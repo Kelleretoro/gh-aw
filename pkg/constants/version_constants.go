@@ -7,7 +7,7 @@ package constants
 //
 // Example usage:
 //
-//	const DefaultCopilotVersion Version = "0.0.369"
+//	const DefaultCopilotVersion Version = "1.0.101"
 //	func InstallTool(name string, version Version) error { ... }
 type Version string
 
@@ -32,33 +32,37 @@ func (v Version) IsValid() bool {
 type ModelName string
 
 // DefaultClaudeCodeVersion is the default version of the Claude Code CLI.
-const DefaultClaudeCodeVersion Version = "2.1.273"
+const DefaultClaudeCodeVersion Version = "2.1.300"
 
 // DefaultCopilotVersion is the default version of the GitHub Copilot CLI.
 //
 // When unpinning or upgrading this version, verify:
 //   - MCPs are not blocked from loading (tools.mcp configuration still works end-to-end)
 //   - /models does not silently fail on PATs (check that model listing works with PAT auth)
-const DefaultCopilotVersion Version = "1.0.87"
+const DefaultCopilotVersion Version = "1.0.101"
 
-// CopilotWebSearchMinVersion is the first known Copilot CLI version that
-// exposes the built-in web_search tool.
-const CopilotWebSearchMinVersion Version = "1.0.87"
+// CopilotSessionIDMinVersion is the minimum Copilot CLI version that supports
+// the exact session selector injected by the model-verification harness.
+const CopilotSessionIDMinVersion Version = "1.0.35"
 
 // DefaultCopilotSDKVersion is the default version of the @github/copilot-sdk package.
-const DefaultCopilotSDKVersion Version = "1.0.13"
+const DefaultCopilotSDKVersion Version = "1.0.16"
 
 // DefaultCodexVersion is the default version of the OpenAI Codex CLI
-const DefaultCodexVersion Version = "0.154.0"
+const DefaultCodexVersion Version = "0.163.0"
 
 // DefaultGeminiVersion is the default version of the Google Gemini CLI
-const DefaultGeminiVersion Version = "0.59.0"
+const DefaultGeminiVersion Version = "0.64.0"
+
+const DefaultAgyVersion Version = "1.3.6"
+
+const AgyDefaultModel = "gemini-3.8-flash-medium"
 
 // DefaultPiVersion is the default version of the Pi CLI
-const DefaultPiVersion Version = "0.87.0"
+const DefaultPiVersion Version = "1.3.0"
 
 // DefaultGitHubMCPServerVersion is the default version of the GitHub MCP server Docker image
-const DefaultGitHubMCPServerVersion Version = "v1.12.2"
+const DefaultGitHubMCPServerVersion Version = "v2.0.2"
 
 // DefaultFirewallVersion is the default version of the gh-aw-firewall (AWF) binary
 //
@@ -68,11 +72,29 @@ const DefaultGitHubMCPServerVersion Version = "v1.12.2"
 //
 // The first recompile regenerates all lock files using the new version; the second recompile
 // refreshes the container SHA pins that were resolved during the first pass.
-const DefaultFirewallVersion Version = "v0.28.25"
+const DefaultFirewallVersion Version = "v0.28.70"
+
+// AWFFallbackModelsMinVersion is the first AWF release with ordered request-level fallback.
+const AWFFallbackModelsMinVersion Version = "v0.28.31"
+
+// DefaultRouterVersion is the legacy gh-aw model router image version used with
+// AWF releases that predate the router image being published by gh-aw-firewall.
+const DefaultRouterVersion Version = "0.1.3"
+
+// AWFModelRoutingMinVersion is the first AWF version that exposes task routing
+// selections through /reflect and accepts apiProxy.routing.
+const AWFModelRoutingMinVersion Version = "v0.28.29"
+
+// AWFRoutingCandidateModelsMinVersion separates router candidates from request policy.
+const AWFRoutingCandidateModelsMinVersion Version = "v0.28.33"
 
 // AWFExcludeEnvMinVersion is the minimum AWF version that supports the --exclude-env flag.
 // Workflows pinning an older AWF version must not emit --exclude-env flags or the run will fail.
 const AWFExcludeEnvMinVersion Version = "v0.25.3"
+
+// AWFSessionStateDirMinVersion is the minimum AWF version that supports the
+// --session-state-dir flag used to persist Copilot session artifacts.
+const AWFSessionStateDirMinVersion Version = "v0.25.15"
 
 // AWFCliProxyMinVersion is the minimum supported AWF version for emitting the CLI proxy flags
 // (--difc-proxy-host, --difc-proxy-ca-cert). Workflows pinning an older AWF version than
@@ -97,6 +119,15 @@ const AWFDockerHostPathPrefixMinVersion Version = "v0.25.43"
 // apiProxy.enableTokenSteering (mapped from frontmatter firewall.token-steering).
 const AWFTokenSteeringMinVersion Version = "v0.25.44"
 
+// AWFAgentTimeoutSteeringMinVersion is the minimum AWF version whose API proxy
+// sends runtime (timeout) steering notices when container.agentTimeout is set
+// (gh-aw-firewall#9790). Below this version the compiler only emits
+// container.agentTimeout for the Cloud Hypervisor and NVX runtimes.
+//
+// v0.28.51 is the first default-version release after v0.28.50 and is the
+// earliest release with the runtime steering behavior this gate protects.
+const AWFAgentTimeoutSteeringMinVersion Version = "v0.28.51"
+
 // AWFChrootConfigMinVersion is the minimum AWF version that supports
 // chroot.binariesSourcePath and chroot.identity.* in the config file.
 // These fields let AWF handle binary staging and identity resolution natively
@@ -112,6 +143,17 @@ const AWFArcDindMinVersion Version = "v0.27.20"
 // AWFCloudHypervisorMinVersion is the minimum AWF version that supports the
 // cloud-hypervisor preview runtime and its release assets.
 const AWFCloudHypervisorMinVersion Version = "v0.28.11"
+
+// AWFNVXMinVersion is the minimum AWF release with the fail-closed NVX runtime.
+const AWFNVXMinVersion Version = "v0.28.49"
+
+// AWFEnclaveCloudHypervisorMinVersion is the minimum AWF version supporting
+// the release-attested Cloud Hypervisor enclave executor preview.
+const AWFEnclaveCloudHypervisorMinVersion Version = "v0.28.47"
+
+// AWFCloudHypervisorPrimaryEnclaveMinVersion is the minimum AWF version supporting
+// the unified Cloud Hypervisor primary and static script enclave lifecycle.
+const AWFCloudHypervisorPrimaryEnclaveMinVersion Version = "v0.28.51"
 
 // AWFLegacySecurityMinVersion is the minimum AWF version that supports the
 // --legacy-security flag and unconditional API proxy (gh-aw-firewall#6207).
@@ -139,6 +181,10 @@ const AWFContainerImagesMinVersion Version = "v0.28.4"
 // "router" role in the container.images manifest. Older versions reject the
 // unknown role.
 const AWFRouterImageRoleMinVersion Version = "v0.28.21"
+
+// AWFRouterReleaseImageMinVersion is the first AWF release that publishes and
+// defaults the router image in the gh-aw-firewall registry.
+const AWFRouterReleaseImageMinVersion Version = "v0.28.62"
 
 // AWFFilesystemAllowWriteMinVersion is the minimum AWF version that added
 // filesystem.allowWrite to the AWF config file schema.
@@ -211,7 +257,7 @@ const CopilotNoAskUserMinVersion Version = "1.0.19"
 //
 // The first recompile regenerates all lock files using the new version; the second recompile
 // refreshes the container SHA pins that were resolved during the first pass.
-const DefaultMCPGatewayVersion Version = "v0.4.26"
+const DefaultMCPGatewayVersion Version = "v0.4.37"
 
 // MCPGIntegrityReactionsMinVersion is the minimum MCPG version that supports
 // endorsement-reactions and disapproval-reactions in the allow-only policy.
@@ -252,7 +298,7 @@ const MCPGDynamicRepositoryDelegationMinVersion Version = "v0.4.19"
 // Used when tools.playwright is enabled.
 // Keep this version outside the default 3-day npm release-age cooldown window enforced by
 // generated Playwright CLI install steps. See TestDefaultPlaywrightCLIVersionOutsideCooldownWindow.
-const DefaultPlaywrightCLIVersion Version = "0.1.19"
+const DefaultPlaywrightCLIVersion Version = "0.1.22"
 
 // DefaultMCPSDKVersion is the default version of the @modelcontextprotocol/sdk package
 const DefaultMCPSDKVersion Version = "1.30.0"
@@ -303,7 +349,7 @@ const DefaultJavaVersion Version = "21"
 const DefaultElixirVersion Version = "1.17"
 
 // DefaultGoVersion is the default version of Go for runtime setup
-const DefaultGoVersion Version = "1.26"
+const DefaultGoVersion Version = "1.27.3"
 
 // DefaultHaskellVersion is the default version of GHC for runtime setup
 const DefaultHaskellVersion Version = "9.10"

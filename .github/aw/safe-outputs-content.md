@@ -88,6 +88,15 @@ description: Safe-output reference for issue, discussion, comment, and pull requ
 
 - `create-issue:` - Safe GitHub issue creation (bugs, features)
 
+  When no `safe-outputs:` section is present (or only system types — `noop`,
+  `report-missing-tool`, `report-missing-data` — are configured), `create-issue` is
+  auto-injected with conservative defaults (`max: 1`, labels/title-prefix from
+  the workflow ID). Set `create-issue: false` to disable the auto-injected tool
+  and its reporting instruction while leaving system outputs enabled; only the
+  literal `false` is accepted (schema-validated), and disablement is sticky
+  across imports — an imported `false` stays disabled unless the top-level
+  config sets an object or `null`.
+
   ```yaml
   safe-outputs:
     create-issue:
@@ -337,7 +346,7 @@ description: Safe-output reference for issue, discussion, comment, and pull requ
       max: 1                          # Optional: maximum number of reviews to submit (default: 1)
       footer: "if-body"               # Optional: footer control ("always", "none", "if-body", default: "always")
       allowed-events: [COMMENT, REQUEST_CHANGES]  # Optional: restrict allowed review event types; omit to allow all (APPROVE, COMMENT, REQUEST_CHANGES)
-      supersede-older-reviews: false  # Optional: dismiss older same-workflow REQUEST_CHANGES reviews after a replacement is posted (default: false; best-effort, needs workflow markers)
+      supersede-older-reviews: false  # Optional: dismiss older same-workflow blockers after a clean COMMENT review with no inline findings (default: false; best-effort)
   ```
 
   **Footer Control**: The `footer` field controls when AI-generated footers appear in the PR review body. Values: `"always"` (default), `"none"`, `"if-body"` (only when body is non-empty). Boolean values supported: `true` → `"always"`, `false` → `"none"`. Useful for clean approval reviews — with `"if-body"`, approvals without explanatory text appear without a footer.

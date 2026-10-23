@@ -15,13 +15,108 @@ const {
   parseSteeringEvents,
   parseGatewayActivity,
   parseSafeOutputsManifest,
+  parseLedgerCompaction,
+  ledgerActivityFromSafeOutputs,
   parseExperimentsData,
   calculateWorkingSetFromJSONL,
   parseWorkingSetMetrics,
   buildFrictionSummary,
+  buildFrictionStepSummary,
+  writeFrictionStepSummary,
   readTokenUsageContent,
+  main,
   MANIFEST_FILE_PATH,
+  writeDetectionUsageResult,
 } = req("./generate_usage_activity_summary.cjs");
+
+describe("generate_usage_activity_summary.cjs", () => {
+  it("exports its main function for github-script execution", () => {
+    expect(typeof main).toBe("function");
+  });
+});
+
+describe("writeDetectionUsageResult", () => {
+  const original = {
+    job: process.env.GH_AW_DETECTION_JOB_RESULT,
+    conclusion: process.env.GH_AW_DETECTION_CONCLUSION,
+    reason: process.env.GH_AW_DETECTION_REASON,
+  };
+  afterEach(() => {
+    for (const [key, name] of [
+      ["job", "GH_AW_DETECTION_JOB_RESULT"],
+      ["conclusion", "GH_AW_DETECTION_CONCLUSION"],
+      ["reason", "GH_AW_DETECTION_REASON"],
+    ]) {
+      if (original[key] === undefined) delete process.env[name];
+      else process.env[name] = original[key];
+    }
+  });
+
+  it("stores only verdict flags and trusted outcomes, not detector reasons", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "detection-usage-"));
+    try {
+      const output = path.join(dir, "usage", "detection_result.json");
+      fs.writeFileSync(
+        path.join(dir, "detection_result.json"),
+        JSON.stringify({
+          prompt_injection: true,
+          secret_leak: false,
+          malicious_patch: false,
+          reasons: ["sensitive secret"],
+        })
+      );
+      process.env.GH_AW_DETECTION_JOB_RESULT = "failure";
+      process.env.GH_AW_DETECTION_CONCLUSION = "failure";
+      process.env.GH_AW_DETECTION_REASON = "threat_detected";
+      writeDetectionUsageResult(dir, output);
+      expect(JSON.parse(fs.readFileSync(output, "utf8"))).toEqual({
+        job_result: "failure",
+        conclusion: "failure",
+        reason: "threat_detected",
+        prompt_injection: true,
+        secret_leak: false,
+        malicious_patch: false,
+      });
+      expect(fs.readFileSync(output, "utf8")).not.toContain("sensitive secret");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves warnings without a verdict and excludes untrusted output fields", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "detection-usage-"));
+    try {
+      const output = path.join(dir, "usage", "detection_result.json");
+      process.env.GH_AW_DETECTION_JOB_RESULT = "success";
+      process.env.GH_AW_DETECTION_CONCLUSION = "warning";
+      process.env.GH_AW_DETECTION_REASON = "private value";
+      writeDetectionUsageResult(dir, output);
+      expect(JSON.parse(fs.readFileSync(output, "utf8"))).toEqual({
+        job_result: "success",
+        conclusion: "warning",
+        reason: "",
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("extracts a verdict from the inline detector log without copying log content", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "detection-usage-"));
+    try {
+      const output = path.join(dir, "usage", "detection_result.json");
+      fs.writeFileSync(path.join(dir, "detection.log"), 'sensitive transcript\nTHREAT_DETECTION_RESULT:{"prompt_injection":false,"secret_leak":true,"malicious_patch":false,"reasons":["sensitive transcript"]}\n');
+      process.env.GH_AW_DETECTION_JOB_RESULT = "failure";
+      process.env.GH_AW_DETECTION_CONCLUSION = "failure";
+      process.env.GH_AW_DETECTION_REASON = "threat_detected";
+      writeDetectionUsageResult(dir, output);
+      expect(JSON.parse(fs.readFileSync(output, "utf8"))).toMatchObject({ secret_leak: true });
+      expect(fs.readFileSync(output, "utf8")).not.toContain("sensitive transcript");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("generate_usage_activity_summary.cjs", () => {
   /** Unique directory for each test to avoid cross-test interference */
@@ -157,6 +252,48 @@ describe("generate_usage_activity_summary.cjs", () => {
               },
             ],
           },
+        });
+      } finally {
+        fs.rmSync(sessionRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("uses canonical input aliases and scoped correlation for skill usage", () => {
+      const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-skills-scoped-test-"));
+      try {
+        const sessionDir = path.join(sessionRoot, "session-1");
+        fs.mkdirSync(sessionDir, { recursive: true });
+        const start = (toolCallId, agentId, alias, skill, timestamp) => ({
+          type: "tool.execution_start",
+          timestamp,
+          data: { sessionId: "session-1", toolCallId, agentId, toolName: "skill", [alias]: { skill } },
+        });
+        const complete = (toolCallId, agentId, success, timestamp) => ({
+          type: "tool.execution_complete",
+          timestamp,
+          data: { sessionId: "session-1", toolCallId, agentId, success },
+        });
+        const events = [
+          start(0, "agent-a", "parameters", "documentation", "2026-09-26T00:00:00Z"),
+          start(0, "agent-b", "args", "validation", "2026-09-26T00:00:01Z"),
+          start(false, "agent-a", "toolInput", "testing", "2026-09-26T00:00:02Z"),
+          start("", "agent-b", "arguments", "documentation", "2026-09-26T00:00:03Z"),
+          start("input-call", "agent-a", "input", "release", "2026-09-26T00:00:04Z"),
+          complete(0, "agent-b", true, "2026-09-26T00:00:05Z"),
+          complete(0, "agent-a", false, "2026-09-26T00:00:06Z"),
+          complete(false, "agent-a", false, "2026-09-26T00:00:07Z"),
+          complete("", "agent-b", true, "2026-09-26T00:00:08Z"),
+          complete("input-call", "agent-a", false, "2026-09-26T00:00:09Z"),
+        ];
+        fs.writeFileSync(path.join(sessionDir, "events.jsonl"), events.map(JSON.stringify).join("\n"));
+
+        const result = parseSessionLogs([sessionRoot]);
+        expect(result).toMatchObject({ tool_execution_starts: 5, tool_execution_completes: 5, failed_tool_executions: 3 });
+        expect(Object.fromEntries(result.skills.items.map(skill => [skill.name, skill]))).toMatchObject({
+          documentation: { invocation_count: 2, failed_count: 1 },
+          release: { invocation_count: 1, failed_count: 1 },
+          testing: { invocation_count: 1, failed_count: 1 },
+          validation: { invocation_count: 1, failed_count: 0 },
         });
       } finally {
         fs.rmSync(sessionRoot, { recursive: true, force: true });
@@ -419,12 +556,14 @@ describe("generate_usage_activity_summary.cjs", () => {
     it("returns null when the manifest file does not exist", () => {
       const result = parseSafeOutputsManifest(manifestPath);
       expect(result).toBeNull();
+      expect(ledgerActivityFromSafeOutputs(result)).toBeNull();
     });
 
     it("returns zero-item result when the manifest file is empty", () => {
       fs.writeFileSync(manifestPath, "");
       const result = parseSafeOutputsManifest(manifestPath);
       expect(result).toEqual({ total_items: 0, items_by_type: {}, items: [] });
+      expect(ledgerActivityFromSafeOutputs(result)).toEqual({ transactions_added: 0 });
     });
 
     it("returns zero-item result when the manifest contains only blank lines", () => {
@@ -458,6 +597,32 @@ describe("generate_usage_activity_summary.cjs", () => {
       expect(result.total_items).toBe(3);
       expect(result.items_by_type).toEqual({ create_issue: 2, add_comment: 1 });
       expect(result.items).toEqual(lines.split("\n").map(line => JSON.parse(line)));
+      expect(ledgerActivityFromSafeOutputs(result)).toEqual({ transactions_added: 0 });
+    });
+
+    it("counts only recorded ledger mutations as added transactions", () => {
+      const lines = [{ type: "ledger_mutation" }, { type: "ledger_append" }, { type: "create_issue" }, { type: "ledger_mutation" }, { type: "ledger_mutation" }];
+      fs.writeFileSync(manifestPath, lines.map(JSON.stringify).join("\n"));
+      expect(ledgerActivityFromSafeOutputs(parseSafeOutputsManifest(manifestPath))).toEqual({ transactions_added: 3 });
+    });
+
+    it("collects compaction stats independently of the safe-output manifest", () => {
+      const compaction = {
+        before: 4,
+        after: 2,
+        selected: 3,
+        records: 12,
+        replacement: "abc123",
+        retired: 3,
+        changed: true,
+      };
+      expect(parseLedgerCompaction(JSON.stringify(compaction))).toEqual(compaction);
+      expect(ledgerActivityFromSafeOutputs(null, compaction)).toEqual({ compaction });
+      expect(ledgerActivityFromSafeOutputs({ items_by_type: {} }, compaction)).toEqual({
+        transactions_added: 0,
+        compaction,
+      });
+      expect(parseLedgerCompaction('{"before":-1}')).toBeNull();
     });
 
     it("skips lines with missing or empty type field", () => {
@@ -481,6 +646,17 @@ describe("generate_usage_activity_summary.cjs", () => {
       fs.writeFileSync(manifestPath, lines);
       const result = parseSafeOutputsManifest(manifestPath);
       expect(result).toEqual({ total_items: 0, items_by_type: {}, items: [] });
+    });
+
+    it("leaves JSON detection to the parser and counts only manifest objects", () => {
+      const item = { type: "create_issue", url: "https://github.com/owner/repo/issues/1" };
+      fs.writeFileSync(manifestPath, ["diagnostic: not JSON", "null", "false", "0", '"text"', "[]", '{"broken":}', `  ${JSON.stringify(item)}  `].join("\n"));
+
+      expect(parseSafeOutputsManifest(manifestPath)).toEqual({
+        total_items: 1,
+        items_by_type: { create_issue: 1 },
+        items: [item],
+      });
     });
   });
 
@@ -652,6 +828,129 @@ describe("generate_usage_activity_summary.cjs", () => {
       expect(roundTripped.events[0].driver).toBe("firewall_block");
       expect(roundTripped.drivers[0].driver).toBe("firewall_block");
       expect(roundTripped.groups[0].group_id).toBe("network_block");
+    });
+
+    it("renders friction cost and driver data in a collapsed step summary section", () => {
+      const summary = buildFrictionStepSummary({
+        measurement_state: "causal",
+        counted_occurrences: 2,
+        friction_ratio: 0.125,
+        cost: {
+          aic: 0.25,
+          tokens: { total: 1234 },
+          turns: 1,
+          tool_calls: 2,
+          latency_ms: 500,
+        },
+        drivers: [
+          {
+            driver: "mcp_tool_error",
+            source: "mcp_gateway",
+            state: "causal",
+            counted_occurrences: 2,
+            cost: { aic: 0.25 },
+          },
+        ],
+      });
+
+      expect(summary).toContain("<details>\n<summary>Friction Cost: 0.25 AIC (causal)</summary>");
+      expect(summary).toContain("### Friction Cost");
+      expect(summary).toContain("| 0.25 | 12.5% | 2 | 1,234 | 1 | 2 | 500 ms |");
+      expect(summary).toContain("| `mcp_tool_error` | `mcp_gateway` | `causal` | 2 | 0.25 |");
+      expect(summary).toContain("</details>");
+    });
+
+    it("renders unavailable friction measurements without implying a measured ratio", () => {
+      const summary = buildFrictionStepSummary({
+        measurement_state: "unavailable",
+        counted_occurrences: 0,
+        cost: {
+          aic: 0,
+          tokens: { total: 0 },
+          turns: 0,
+          tool_calls: 0,
+          latency_ms: 0,
+        },
+        drivers: [],
+      });
+
+      expect(summary).toContain("<summary>Friction Cost: 0 AIC (unavailable)</summary>");
+      expect(summary).toContain("| 0 | unavailable | 0 | 0 | 0 | 0 | 0 ms |");
+    });
+
+    it("suppresses the ratio for an unavailable aggregate even when friction_ratio is finite", () => {
+      // Mirrors the mixed measured API-error plus unavailable firewall-block case in
+      // friction_cost_metrics.test.cjs, where computeFrictionCost can emit an unavailable
+      // aggregate alongside a finite friction_ratio.
+      const summary = buildFrictionStepSummary({
+        measurement_state: "unavailable",
+        counted_occurrences: 1,
+        friction_ratio: 0.4,
+        cost: {
+          aic: 0.1,
+          tokens: { total: 100 },
+          turns: 1,
+          tool_calls: 1,
+          latency_ms: 10,
+        },
+        drivers: [],
+      });
+
+      expect(summary).toContain("<summary>Friction Cost: 0.1 AIC (unavailable)</summary>");
+      expect(summary).toContain("| 0.1 | unavailable | 1 | 100 | 1 | 1 | 10 ms |");
+    });
+
+    describe("writeFrictionStepSummary", () => {
+      let summaryFile;
+      let previousSummaryEnv;
+
+      beforeEach(() => {
+        summaryFile = path.join(frictionDir, "step-summary.md");
+        previousSummaryEnv = process.env.GITHUB_STEP_SUMMARY;
+      });
+
+      afterEach(() => {
+        if (previousSummaryEnv === undefined) {
+          delete process.env.GITHUB_STEP_SUMMARY;
+        } else {
+          process.env.GITHUB_STEP_SUMMARY = previousSummaryEnv;
+        }
+      });
+
+      it("appends the rendered section to GITHUB_STEP_SUMMARY without using core.summary", async () => {
+        process.env.GITHUB_STEP_SUMMARY = summaryFile;
+        fs.writeFileSync(summaryFile, "existing content\n", "utf8");
+
+        await writeFrictionStepSummary("<details>friction</details>");
+
+        expect(fs.readFileSync(summaryFile, "utf8")).toBe("existing content\n<details>friction</details>");
+      });
+
+      it("inserts a newline separator when existing content has no trailing newline", async () => {
+        process.env.GITHUB_STEP_SUMMARY = summaryFile;
+        fs.writeFileSync(summaryFile, "existing content", "utf8");
+
+        await writeFrictionStepSummary("<details>friction</details>");
+
+        expect(fs.readFileSync(summaryFile, "utf8")).toBe("existing content\n<details>friction</details>");
+      });
+
+      it("does not prepend a blank line when the summary file is missing or empty", async () => {
+        process.env.GITHUB_STEP_SUMMARY = summaryFile;
+
+        await writeFrictionStepSummary("<details>friction</details>");
+
+        expect(fs.readFileSync(summaryFile, "utf8")).toBe("<details>friction</details>");
+      });
+
+      it("is a no-op when the section is empty", async () => {
+        process.env.GITHUB_STEP_SUMMARY = summaryFile;
+        fs.writeFileSync(summaryFile, "existing content\n", "utf8");
+
+        await writeFrictionStepSummary("");
+
+        expect(fs.readFileSync(summaryFile, "utf8")).toBe("existing content\n");
+      });
     });
   });
 });

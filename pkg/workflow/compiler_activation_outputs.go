@@ -24,6 +24,7 @@ func (c *Compiler) addActivationFeedbackAndValidationSteps(ctx *activationJobBui
 		ctx.outputs["daily_ai_credits_guardrail_status"] = "${{ steps.daily-ai-credits-workflow-guardrail.outputs.daily_ai_credits_guardrail_status || '' }}"
 		ctx.outputs["daily_ai_credits_guardrail_error"] = "${{ steps.daily-ai-credits-workflow-guardrail.outputs.daily_ai_credits_guardrail_error || '' }}"
 		ctx.outputs["daily_ai_credits_total"] = "${{ steps.daily-ai-credits-workflow-guardrail.outputs.daily_ai_credits_total || '' }}"
+		ctx.outputs["daily_ai_credits_estimated"] = "${{ steps.daily-ai-credits-workflow-guardrail.outputs.daily_ai_credits_estimated || '' }}"
 		ctx.outputs["daily_ai_credits_threshold"] = "${{ steps.daily-ai-credits-workflow-guardrail.outputs.daily_ai_credits_threshold || '' }}"
 	}
 	c.addActivationReactionStep(ctx)
@@ -155,6 +156,11 @@ func (c *Compiler) configureActivationNeedsAndCondition(ctx *activationJobBuildC
 // addActivationArtifactUploadStep appends the activation artifact upload step for downstream jobs.
 func (c *Compiler) addActivationArtifactUploadStep(ctx *activationJobBuildContext) {
 	compilerActivationJobLog.Print("Adding activation artifact upload step")
+	engineID := resolveActivationEngineID(ctx.data)
+	skillInventoryEnabled := hasSkillInventory(ctx.data)
+	if skillInventoryEnabled {
+		c.addActivationSkillInventoryStep(ctx, engineID)
+	}
 	c.addActivationInfoArtifactUploadStep(ctx)
 	activationArtifactName := artifactPrefixExprForActivationJob(ctx.data) + constants.ActivationArtifactName.String()
 	ctx.steps = append(ctx.steps, generateStageAmbientFoldersStep(ctx.data)...)
@@ -174,8 +180,14 @@ func (c *Compiler) addActivationArtifactUploadStep(ctx *activationJobBuildContex
 	// Keep aw_info.json in activation for fallback downloads from workflows created
 	// before the compact info artifact was available.
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/aw_info.json\n")
+	if isWorkQueueEnabled(ctx.data) {
+		ctx.steps = append(ctx.steps, "            "+constants.WorkQueueSnapshotPath+"\n")
+	}
+
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/models.json\n")
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/aw-prompts/prompt.txt\n")
+	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/aw-prompts/system.txt\n")
+	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/aw-prompts/user.txt\n")
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/aw-prompts/prompt-template.txt\n")
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/aw-prompts/prompt-import-tree.json\n")
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/"+constants.GithubRateLimitsFilename.String()+"\n")
@@ -183,7 +195,6 @@ func (c *Compiler) addActivationArtifactUploadStep(ctx *activationJobBuildContex
 	if len(ctx.data.AmbientFolders) > 0 {
 		ctx.steps = append(ctx.steps, "            /tmp/gh-aw/ambient-folders\n")
 	}
-	engineID := resolveActivationEngineID(ctx.data)
 	// Include the engine-specific sub-agent staging directory only when inline agents are enabled.
 	if isFeatureEnabled(constants.FeatureFlag("inline-agents"), ctx.data) {
 		subAgentDir := path.Join(engineConfigBaseDirForRegistry(c.engineRegistry, engineID), "agents")
@@ -191,12 +202,119 @@ func (c *Compiler) addActivationArtifactUploadStep(ctx *activationJobBuildContex
 	}
 	// Always include the engine-specific skill directory when either inline skills are enabled
 	// or frontmatter skills are configured (via Skills or SkillReferences).
-	if isFeatureEnabled(constants.FeatureFlag("inline-agents"), ctx.data) || len(ctx.data.Skills) > 0 || len(ctx.data.SkillReferences) > 0 {
+	if skillInventoryEnabled {
 		skillDir := path.Join(engineConfigBaseDirForRegistry(c.engineRegistry, engineID), "skills")
 		ctx.steps = append(ctx.steps, fmt.Sprintf("            /tmp/gh-aw/%s\n", skillDir))
 	}
+	if skillInventoryEnabled {
+		ctx.steps = append(ctx.steps, "            /tmp/gh-aw/skill_inventory.json\n")
+	}
 	ctx.steps = append(ctx.steps, "          if-no-files-found: ignore\n")
 	ctx.steps = append(ctx.steps, "          retention-days: 1\n")
+}
+
+func hasSkillInventory(data *WorkflowData) bool {
+	return data != nil && (len(data.Skills) > 0 || len(data.SkillReferences) > 0 || isFeatureEnabled(constants.FeatureFlag("inline-agents"), data))
+}
+
+func (c *Compiler) addActivationSkillInventoryStep(ctx *activationJobBuildContext, engineID string) {
+	skillDir := path.Join(engineConfigBaseDirForRegistry(c.engineRegistry, engineID), "skills")
+	ctx.steps = append(ctx.steps,
+		"      - name: Inventory installed skills\n",
+		"        if: success() || failure()\n",
+		fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", ctx.data)),
+		"        env:\n",
+		formatYAMLEnv("          ", "GH_AW_SKILL_DIR", skillDir),
+		"        with:\n",
+		"          script: |\n",
+		generateGitHubScriptWithRequire("skill_inventory.cjs"),
+	)
+}
+
+func (c *Compiler) addWorkQueueSnapshotStep(ctx *activationJobBuildContext) {
+	if !isWorkQueueEnabled(ctx.data) {
+		return
+	}
+
+	compilerActivationJobLog.Print("Adding activation-time work queue snapshot")
+	if workQueueIssuesConfig(ctx.data) != nil && isWorkQueueParticipant(ctx.data) {
+		ctx.steps = append(ctx.steps, c.workQueueProjectorTokenSteps(ctx.data, "activation")...)
+	}
+	ctx.steps = append(ctx.steps,
+		"      - name: Snapshot work queue state\n",
+		"        id: work_queue_snapshot\n",
+		fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", ctx.data)),
+	)
+	ctx.steps = append(ctx.steps, workQueuePolicyEnvironment(ctx.data)...)
+	if workQueueIssuesConfig(ctx.data) != nil {
+		var staged *TemplatableBool
+		if ctx.data.SafeOutputs != nil {
+			staged = ctx.data.SafeOutputs.Staged
+		}
+		if value := resolveSafeOutputsStagedValue(c.trialMode, staged); value != nil {
+			ctx.steps = append(ctx.steps, "          GH_AW_SAFE_OUTPUTS_STAGED: "+fmt.Sprintf("%q", *value)+"\n")
+		}
+	}
+	ctx.steps = append(ctx.steps,
+		"        with:\n",
+	)
+	if workQueueIssuesConfig(ctx.data) != nil && isWorkQueueParticipant(ctx.data) {
+		c.addWorkQueueProjectorToken(&ctx.steps, ctx.data)
+	}
+	ctx.steps = append(ctx.steps,
+		"          script: |\n",
+		generateGitHubScriptWithRequire("write_work_queue_snapshot.cjs"),
+	)
+	ctx.outputs["work_queue_origin"] = "${{ steps.work_queue_snapshot.outputs.work_queue_origin }}"
+}
+
+func isWorkQueueEnabled(data *WorkflowData) bool {
+	if data == nil || data.Tools == nil {
+		return false
+	}
+	value, configured := data.Tools["work-queue"]
+	return configured && value != false
+}
+
+func isWorkQueueWorker(data *WorkflowData) bool {
+	if data == nil || data.Tools == nil {
+		return false
+	}
+	config, ok := data.Tools["work-queue"].(map[string]any)
+	if !ok {
+		return false
+	}
+	worker, ok := config["worker"].(bool)
+	return ok && worker
+}
+
+func workQueueRuntimeRole(data *WorkflowData) string {
+	if workQueueRequiresAssignment(data) {
+		return "worker"
+	}
+	if data != nil && data.SafeOutputs != nil && data.SafeOutputs.DispatchWorkflow != nil && len(data.SafeOutputs.DispatchWorkflow.Workflows) > 0 {
+		return "dispatcher"
+	}
+	return "observer"
+}
+
+func isWorkQueueParticipant(data *WorkflowData) bool {
+	return isWorkQueueEnabled(data) && workQueueRuntimeRole(data) != "observer"
+}
+
+func workQueueRequiresAssignment(data *WorkflowData) bool {
+	if isWorkQueueWorker(data) {
+		return true
+	}
+	if data == nil || data.Tools == nil {
+		return false
+	}
+	config, ok := data.Tools["work-queue"].(map[string]any)
+	if !ok {
+		return false
+	}
+	required, ok := config["require-assignment"].(bool)
+	return ok && required
 }
 
 // addActivationInfoArtifactUploadStep appends an archived upload of aw_info.json.

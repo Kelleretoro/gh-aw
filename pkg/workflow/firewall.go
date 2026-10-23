@@ -125,8 +125,16 @@ func isCloudHypervisorRuntime(workflowData *WorkflowData) bool {
 	return agentConfig.Runtime == AgentRuntimeCloudHypervisor
 }
 
+func isNVXRuntime(workflowData *WorkflowData) bool {
+	agentConfig := getAgentConfig(workflowData)
+	if agentConfig == nil || agentConfig.Disabled {
+		return false
+	}
+	return agentConfig.Runtime == AgentRuntimeNVX
+}
+
 // declaresIgnoredFilesystemAllowWrite returns true when a workflow declares
-// sandbox.agent.config.filesystem.allowWrite on a runtime where the compiler drops
+// sandbox.agent.config.filesystem.allow-write on a runtime where the compiler drops
 // it (see awfEmitsFilesystemAllowWrite). Only explicit opt-ins are reported: the
 // implicit defaults are seeded for the Cloud Hypervisor runtime alone.
 func declaresIgnoredFilesystemAllowWrite(workflowData *WorkflowData) bool {
@@ -144,6 +152,9 @@ func isAWFNetworkIsolationEnabled(workflowData *WorkflowData) bool {
 	agentConfig := getAgentConfig(workflowData)
 	if agentConfig == nil || agentConfig.Disabled {
 		return false
+	}
+	if agentConfig.Runtime == AgentRuntimeNVX {
+		return true
 	}
 	// Inline threat detection and evals run a standalone AWF with no MCP sidecars, so
 	// there is nothing to attach to the isolated topology.

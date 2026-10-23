@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 
@@ -38,10 +39,21 @@ func withKnownEngineImportsForTest(t *testing.T, content []byte, downloadErr err
 
 	originalDownload := knownEngineImportsDownload
 	originalVersion := GetVersion()
+	originalAPIBaseURL := knownEngineImportsAPIBaseURL
+	originalHTTPClient := knownEngineImportsHTTPClient
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/repos/") {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"default_branch":"main"}`))
+	}))
 
 	knownEngineImportsDownload = func(context.Context) ([]byte, error) {
 		return content, downloadErr
 	}
+	knownEngineImportsAPIBaseURL = server.URL
+	knownEngineImportsHTTPClient = server.Client
 	knownEngineImportsLoaded = false
 	knownEngineImports = nil
 	SetVersion(knownEngineImportTestRef)
@@ -51,9 +63,12 @@ func withKnownEngineImportsForTest(t *testing.T, content []byte, downloadErr err
 		defer knownEngineImportsMu.Unlock()
 
 		knownEngineImportsDownload = originalDownload
+		knownEngineImportsAPIBaseURL = originalAPIBaseURL
+		knownEngineImportsHTTPClient = originalHTTPClient
 		knownEngineImportsLoaded = false
 		knownEngineImports = nil
 		SetVersion(originalVersion)
+		server.Close()
 		knownEngineImportsTestMu.Unlock()
 	})
 	cleanupRegistered = true
@@ -75,7 +90,7 @@ func TestNewEngineCatalog_BuiltIns(t *testing.T) {
 		{"codex", "Codex", "openai", nil},
 		{"copilot", "GitHub Copilot CLI", "github", nil},
 		{"gemini", "Google Gemini CLI", "google", nil},
-		{"pi", "Pi", "github", boolPtr(false)},
+		{"pi", "Pi", "github", nil},
 	}
 
 	for _, tt := range tests {
@@ -128,6 +143,14 @@ func TestEngineCatalog_Resolve_PrefixFallback(t *testing.T) {
 	assert.Equal(t, "codex", resolved.Runtime.GetID(), "prefix match should resolve to codex runtime")
 }
 
+func TestEngineCatalog_ResolveRejectsTypoThatExtendsBuiltinID(t *testing.T) {
+	catalog := NewEngineCatalog(NewEngineRegistry())
+
+	_, err := catalog.Resolve("codexx", &EngineConfig{ID: "codexx"})
+	require.Error(t, err)
+	require.ErrorContains(t, err, `unknown engine "codexx"; did you mean "codex"?`)
+}
+
 // TestEngineCatalog_Resolve_UnknownEngine verifies that unknown engine IDs return a
 // descriptive validation error containing the engine ID, a list of valid engines, and
 // the documentation URL.
@@ -137,8 +160,8 @@ func TestEngineCatalog_Resolve_UnknownEngine(t *testing.T) {
 
 	_, err := catalog.Resolve("nonexistent-engine", &EngineConfig{ID: "nonexistent-engine"})
 	require.Error(t, err, "unknown engine should return an error")
-	require.ErrorContains(t, err, "invalid engine",
-		"error should mention 'invalid engine', got: %s", err.Error())
+	require.ErrorContains(t, err, "unknown engine",
+		"error should mention 'unknown engine', got: %s", err.Error())
 	require.ErrorContains(t, err, "nonexistent-engine",
 		"error should mention the unknown engine ID, got: %s", err.Error())
 	require.ErrorContains(t, err, string(constants.DocsEnginesURL),
@@ -160,8 +183,7 @@ func TestEngineCatalog_Resolve_KnownImportTip(t *testing.T) {
 			{"id": "aider", "import": "github/gh-aw/.github/workflows/shared/aider.md"},
 			{"id": "goose", "import": "github/gh-aw/.github/workflows/shared/goose.md"},
 			{"id": "kiro", "import": "github/gh-aw/.github/workflows/shared/kiro.md"},
-			{"id": "pydantic-ai", "import": "pydantic/pydantic-ai-harness/gh-aw/pydantic.md"},
-			{"id": "custom", "import": "github/gh-aw/.github/workflows/shared/genaiscript.md"}
+			{"id": "pydantic-ai", "import": "pydantic/pydantic-ai/src/pydantic_ai_harness/gh-aw/pydantic.md"}
 		]
 	}`), nil)
 
@@ -218,12 +240,7 @@ func TestEngineCatalog_Resolve_KnownImportTip(t *testing.T) {
 		{
 			name:           "pydantic-ai tip",
 			engineID:       "pydantic-ai",
-			wantImportPath: "pydantic/pydantic-ai-harness/gh-aw/pydantic.md@main",
-		},
-		{
-			name:           "custom tip",
-			engineID:       "custom",
-			wantImportPath: "github/gh-aw/.github/workflows/shared/genaiscript.md@" + knownEngineImportTestRef,
+			wantImportPath: "pydantic/pydantic-ai/src/pydantic_ai_harness/gh-aw/pydantic.md@main",
 		},
 	}
 	for _, tt := range tests {
@@ -233,13 +250,25 @@ func TestEngineCatalog_Resolve_KnownImportTip(t *testing.T) {
 
 			_, err := catalog.Resolve(tt.engineID, &EngineConfig{ID: tt.engineID})
 			require.Error(t, err)
-			require.ErrorContains(t, err, "invalid engine")
+			require.ErrorContains(t, err, "unknown engine")
 			require.ErrorContains(t, err, tt.engineID)
 			require.ErrorContains(t, err, "Tip:", "error should contain an import tip for known engine")
 			require.ErrorContains(t, err, tt.wantImportPath, "tip should reference the known import path")
 			require.ErrorContains(t, err, "imports:", "tip should show an imports example")
 		})
 	}
+}
+
+func TestEngineCatalog_Resolve_RemovedLegacyCustom(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", knownEngineImportsPath))
+	require.NoError(t, err)
+	withKnownEngineImportsForTest(t, content, nil)
+
+	registry := NewEngineRegistry()
+	catalog := NewEngineCatalog(registry)
+	_, err = catalog.Resolve("custom", &EngineConfig{ID: "custom"})
+	require.ErrorContains(t, err, `unknown engine "custom"`)
+	require.NotContains(t, err.Error(), "Tip:", "removed engines must not advertise an import")
 }
 
 // TestEngineCatalog_Resolve_UnknownNoTip verifies that truly unknown engines (not in
@@ -256,7 +285,7 @@ func TestEngineCatalog_Resolve_UnknownNoTip(t *testing.T) {
 
 	_, err := catalog.Resolve("totally-unknown-engine", nil)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "invalid engine")
+	require.ErrorContains(t, err, "unknown engine")
 	require.NotContains(t, err.Error(), "Tip:", "error should not contain a tip for truly unknown engines")
 }
 
@@ -270,7 +299,7 @@ func TestEngineCatalog_Resolve_KnownImportDownloadFailureNoTip(t *testing.T) {
 
 	_, err := catalog.Resolve("opencode", nil)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "invalid engine")
+	require.ErrorContains(t, err, "unknown engine")
 	require.NotContains(t, err.Error(), "Tip:", "download failures should be silent")
 }
 

@@ -20,6 +20,7 @@ const mcpGatewayCustomEnvTransportPrefix = "GH_AW_MCP_GATEWAY_ENV_"
 const mcpGatewayReservedEnvPrefix = "GH_AW_MCP_GATEWAY_"
 const mcpGatewayCustomEnvMarker = "__GH_AW_MCP_GATEWAY_CUSTOM_ENV__"
 const mcpGatewayConfiguredAgentIDVar = "GH_AW_MCP_GATEWAY_CONFIGURED_AGENT_ID"
+const mcpDebugEnv = "${{ env.DEBUG || runner.debug == '1' && '*' || '' }}"
 
 var optionalPRHeadEnvVars = []string{
 	"GH_AW_PR_HEAD_BASE_BRANCH",
@@ -31,6 +32,16 @@ var optionalPRHeadEnvVars = []string{
 }
 
 func generateMCPGatewaySetup(yaml *strings.Builder, tools map[string]any, mcpTools []string, engine CodingAgentEngine, workflowData *WorkflowData, hasAgenticWorkflows bool, safeOutputsInputEnvVars map[string]string) error { //nolint:largefunc // Existing setup generation preserves emitted step ordering.
+	for _, name := range mcpTools {
+		config, ok := tools[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, hasCA := config["ca-cert-file"]; hasCA &&
+			!versionAtLeast(effectiveMCPGatewayVersion(workflowData), string(constants.DefaultMCPGatewayVersion), "v0.4.35") {
+			return fmt.Errorf("mcp-servers.%s.ca-cert-file requires MCP Gateway v0.4.35 or newer; update sandbox.mcp.version", name)
+		}
+	}
 	// If the engine provides an MCP config-adapter script (e.g. Goose), write it to disk
 	// before starting the gateway so that start_mcp_gateway.cjs can execute it once the
 	// gateway has produced its output configuration.
@@ -51,6 +62,7 @@ func generateMCPGatewaySetup(yaml *strings.Builder, tools map[string]any, mcpToo
 		mcpEnvVars[jiraBasicAuthEnvVar] = ""
 	}
 	stepEnvVars := maps.Clone(mcpEnvVars)
+	stepEnvVars["DEBUG"] = mcpDebugEnv
 	maps.Copy(stepEnvVars, jiraAPIAuthStepEnv(tools))
 	customGatewayEnvNames := sanitizedGatewayEnvNames(gatewayConfig.Env)
 	writeMCPGatewayStepEnvWithCustomGatewayEnvNames(yaml, stepEnvVars, safeOutputsInputEnvVars, gatewayConfig.Env, customGatewayEnvNames, gatewayConfig.AgentID)
@@ -294,6 +306,7 @@ func writeMCPGatewayExports(yaml *strings.Builder, opts writeMCPGatewayExportsOp
 	for _, envVar := range optionalPRHeadEnvVars {
 		fmt.Fprintf(yaml, "          export %s=\"${%s:-}\"\n", envVar, envVar)
 	}
+	yaml.WriteString("          export GH_AW_TARGET_REPO_SLUG=\"${GH_AW_TARGET_REPO_SLUG:-}\"\n")
 	if enclavesEnabled(workflowData) {
 		yaml.WriteString("          AWF_ENCLAVE_MCP_CAPABILITY=$(openssl rand -hex 32)\n")
 		yaml.WriteString("          echo \"::add-mask::${AWF_ENCLAVE_MCP_CAPABILITY}\"\n")
@@ -379,8 +392,6 @@ func writeMCPGatewayExports(yaml *strings.Builder, opts writeMCPGatewayExportsOp
 		}
 		yaml.WriteString("          } >> \"$GITHUB_ENV\"\n")
 	}
-	yaml.WriteString("          export DEBUG=\"*\"\n")
-	yaml.WriteString("          \n")
 	yaml.WriteString("          export GH_AW_ENGINE=\"" + engine.GetID() + "\"\n")
 	if adapterProvider, ok := engine.(MCPConfigAdapterProvider); ok {
 		if adapterFilename := adapterProvider.GetMCPConfigAdapterFilename(); adapterFilename != "" {
@@ -433,10 +444,7 @@ func buildMCPGatewayContainerCommand(opts buildMCPGatewayContainerCommandOptions
 	} else {
 		containerImage += ":" + effectiveMCPGatewayVersion(workflowData)
 	}
-	// Apply container_pins mapping from aw.json so the runtime docker run command
-	// targets the redirected registry (e.g. an internal mirror) rather than the
-	// default public registry.
-	containerImage = applyContainerPinMappingFromData(containerImage, workflowData)
+	containerImage = resolveContainerImage(containerImage, workflowData)
 	var containerCmd strings.Builder
 	// Pre-size the builder to avoid reallocations. The base flags from
 	// appendMCPGatewayBaseEnvFlags alone write ~2KB of -e flags; allocating
@@ -539,6 +547,7 @@ func appendMCPGatewayBaseEnvFlags(containerCmd *strings.Builder, payloadPathPref
 	containerCmd.WriteString(" -e GH_AW_SAFE_OUTPUTS")
 	containerCmd.WriteString(" -e GH_AW_SAFE_OUTPUTS_CONFIG_PATH")
 	containerCmd.WriteString(" -e GH_AW_SAFE_OUTPUTS_TOOLS_PATH")
+	containerCmd.WriteString(" -e GH_AW_TARGET_REPO_SLUG")
 	for _, envVar := range optionalPRHeadEnvVars {
 		containerCmd.WriteString(" -e " + envVar)
 	}

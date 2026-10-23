@@ -11,10 +11,10 @@ permissions:
 
   copilot-requests: write
 tracker-id: hippo-embed
-model: openai/gpt-5.4
+model: copilot/gpt-5
 engine:
   id: pi
-  model-provider: openai
+  model-provider: github
 
 timeout-minutes: 60
 
@@ -43,7 +43,7 @@ tools:
 steps:
   - name: Install @xenova/transformers
     run: |
-      npm install -g @xenova/transformers
+      npm install -g @xenova/transformers@2.17.2
 
 imports:
   - shared/pmg.md

@@ -37,24 +37,38 @@ var logsDownloadLog = logger.New("cli:logs_download")
 // verbose enables progress messages; owner, repo, hostname identify the GitHub repository;
 // artifactFilter is an optional list of artifact base names to download (nil means all).
 type downloadArtifactsOptions struct {
-	runID          int64
-	outputDir      string
-	verbose        bool
-	owner          string
-	repo           string
-	hostname       string
-	artifactFilter []string
+	runID               int64
+	outputDir           string
+	verbose             bool
+	owner               string
+	repo                string
+	hostname            string
+	artifactFilter      []string
+	includeWorkQueue    bool
+	failOnDownloadError bool
 }
 
 // isUsageOnlyArtifactFilter reports whether the caller requested only the compact
 // usage artifact. In this mode, workflow-run log downloads are intentionally skipped
 // to minimize API and transfer volume for lightweight reporting paths.
 func isUsageOnlyArtifactFilter(artifactFilter []string) bool {
-	return len(artifactFilter) == 1 && artifactFilter[0] == constants.UsageArtifactName.String()
+	if len(artifactFilter) != 1 {
+		return false
+	}
+	for _, artifact := range artifactFilter {
+		return artifact == constants.UsageArtifactName.String()
+	}
+	return false
 }
 
 func isInfoOnlyArtifactFilter(artifactFilter []string) bool {
-	return len(artifactFilter) == 1 && artifactFilter[0] == constants.InfoArtifactName.String()
+	if len(artifactFilter) != 1 {
+		return false
+	}
+	for _, artifact := range artifactFilter {
+		return artifact == constants.InfoArtifactName.String()
+	}
+	return false
 }
 
 // isInfoWithOptionalUsageArtifactFilter reports whether the artifact filter requests
@@ -86,7 +100,7 @@ func shouldDownloadWorkflowRunLogs(artifactFilter []string) bool {
 		return true
 	}
 	for _, artifact := range artifactFilter {
-		if artifact != constants.ActivationArtifactName.String() && artifact != constants.InfoArtifactName.String() && artifact != constants.UsageArtifactName.String() {
+		if artifact != constants.ActivationArtifactName.String() && artifact != constants.InfoArtifactName.String() && artifact != constants.UsageArtifactName.String() && artifact != constants.SafeOutputItemsArtifactName.String() && artifact != constants.AgentOutputFallbackArtifactName.String() {
 			return true
 		}
 	}
@@ -136,10 +150,6 @@ func fetchWorkflowRunLogsArchive(ctx context.Context, runID int64, verbose bool,
 func downloadWorkflowRunLogs(ctx context.Context, runID int64, outputDir string, verbose bool, owner, repo, hostname string) error {
 	logsDownloadLog.Printf("Downloading workflow run logs: run_id=%d, output_dir=%s, owner=%s, repo=%s", runID, outputDir, owner, repo)
 
-	// Create a temporary file for the zip download
-	tmpZip := filepath.Join(os.TempDir(), fmt.Sprintf("workflow-logs-%d.zip", runID))
-	defer os.RemoveAll(tmpZip)
-
 	if verbose {
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Downloading workflow run logs for run %d...", runID)))
 	}
@@ -152,24 +162,12 @@ func downloadWorkflowRunLogs(ctx context.Context, runID int64, outputDir string,
 		return nil
 	}
 
-	// Write the downloaded zip content to temporary file
-	if err := os.WriteFile(tmpZip, output, constants.FilePermPublic); err != nil {
-		return fmt.Errorf("failed to write logs zip file: %w", err)
-	}
-
-	// Create a subdirectory for workflow logs to keep the run directory organized
-	workflowLogsDir := filepath.Join(outputDir, "workflow-logs")
-	if err := os.MkdirAll(workflowLogsDir, constants.DirPermPublic); err != nil {
-		return fmt.Errorf("failed to create workflow-logs directory: %w", err)
-	}
-
-	// Unzip the logs into the workflow-logs subdirectory
-	if err := unzipFile(tmpZip, workflowLogsDir, verbose); err != nil {
-		return fmt.Errorf("failed to unzip workflow logs: %w", err)
+	if err := storeWorkflowRunLogsArchive(output, outputDir, verbose); err != nil {
+		return err
 	}
 
 	if verbose {
-		fmt.Fprintln(os.Stderr, console.FormatSuccessMessage("Downloaded and extracted workflow run logs to "+workflowLogsDir))
+		fmt.Fprintln(os.Stderr, console.FormatSuccessMessage("Downloaded and extracted workflow run logs to "+filepath.Join(outputDir, "workflow-logs")))
 	}
 
 	return nil
@@ -180,6 +178,7 @@ func downloadWorkflowRunLogs(ctx context.Context, runID int64, outputDir string,
 func downloadRunArtifacts(ctx context.Context, opts downloadArtifactsOptions) error {
 	logsDownloadLog.Printf("Downloading run artifacts: run_id=%d, output_dir=%s, owner=%s, repo=%s, artifactFilter=%v", opts.runID, opts.outputDir, opts.owner, opts.repo, opts.artifactFilter)
 	shouldLogProgress := IsRunningInCI() || opts.verbose
+	opts = ensureWorkQueueLogs(ctx, opts)
 
 	// Check if artifacts already exist on disk (since they're immutable)
 	if fileutil.DirExists(opts.outputDir) && !fileutil.IsDirEmpty(opts.outputDir) {
@@ -200,7 +199,7 @@ func downloadRunArtifacts(ctx context.Context, opts downloadArtifactsOptions) er
 	downloadableNames, individualDownload, done, err := planArtifactDownload(ctx, opts, shouldLogProgress)
 	if done || err != nil {
 		if errors.Is(err, ErrNoArtifacts) && isInfoWithOptionalUsageArtifactFilter(opts.artifactFilter) {
-			return downloadActivationAwInfoFallback(ctx, opts)
+			return downloadAwInfoFallback(ctx, opts)
 		}
 		return err
 	}
@@ -217,7 +216,7 @@ func downloadRunArtifacts(ctx context.Context, opts downloadArtifactsOptions) er
 		}
 		if err := downloadArtifactsIndividually(ctx, opts, downloadableNames); err != nil {
 			if errors.Is(err, ErrNoArtifacts) && isInfoWithOptionalUsageArtifactFilter(opts.artifactFilter) {
-				return downloadActivationAwInfoFallback(ctx, opts)
+				return downloadAwInfoFallback(ctx, opts)
 			}
 			return err
 		}
@@ -279,13 +278,14 @@ func finalizeArtifactDownload(ctx context.Context, opts downloadArtifactsOptions
 	}
 
 	if isInfoWithOptionalUsageArtifactFilter(opts.artifactFilter) && !fileutil.FileExists(filepath.Join(opts.outputDir, "aw_info.json")) {
-		if err := downloadActivationAwInfoFallback(ctx, opts); err != nil {
+		if err := downloadAwInfoFallback(ctx, opts); err != nil {
 			return err
 		}
 	}
 
 	// Download and unzip workflow run logs unless caller requested usage-only mode.
-	if shouldDownloadWorkflowRunLogs(opts.artifactFilter) {
+	if shouldDownloadWorkflowRunLogs(opts.artifactFilter) &&
+		(!opts.includeWorkQueue || !workflowRunLogsComplete(opts.outputDir)) {
 		if err := downloadWorkflowRunLogs(ctx, opts.runID, opts.outputDir, opts.verbose, opts.owner, opts.repo, opts.hostname); err != nil {
 			// Log the error but don't fail the entire download process
 			// Logs may not be available for all runs (e.g., expired or deleted)
@@ -348,21 +348,23 @@ func resolveCachedArtifacts(ctx context.Context, opts downloadArtifactsOptions, 
 	return opts.artifactFilter, false
 }
 
-func downloadActivationAwInfoFallback(ctx context.Context, opts downloadArtifactsOptions) error {
-	logsDownloadLog.Printf("aw_info.json missing from info artifact, downloading activation artifact as fallback")
+func downloadAwInfoFallback(ctx context.Context, opts downloadArtifactsOptions) error {
+	logsDownloadLog.Printf("aw_info.json missing, downloading metadata fallback")
 	if opts.verbose {
-		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("aw_info.json missing from info artifact; downloading activation artifact as fallback"))
+		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("aw_info.json missing; downloading metadata fallback"))
 	}
 
-	activationNames := resolveActivationArtifactNames(ctx, opts)
-	if err := downloadArtifactsByName(ctx, opts, activationNames); err != nil {
-		return err
+	metadataNames := resolveAwInfoArtifactNames(ctx, opts)
+	for _, name := range metadataNames {
+		if err := downloadArtifactsByName(ctx, opts, []string{name}); err != nil {
+			return err
+		}
+		flattenAwInfoFallback(opts, []string{name})
+		if fileutil.FileExists(filepath.Join(opts.outputDir, "aw_info.json")) {
+			return nil
+		}
 	}
-	flattenActivationFallback(opts, activationNames)
-	if !fileutil.FileExists(filepath.Join(opts.outputDir, "aw_info.json")) {
-		return ErrNoArtifacts
-	}
-	return nil
+	return ErrNoArtifacts
 }
 
 // enumerateDownloadableArtifacts lists the run artifacts and splits them into the names
@@ -491,12 +493,8 @@ func downloadWorkflowRunLogsForDiagnostics(ctx context.Context, opts downloadArt
 // repo/hostname overrides for cross-repo and multi-host support.
 func buildBulkDownloadArgs(opts downloadArtifactsOptions) []string {
 	ghArgs := []string{"run", "download", strconv.FormatInt(opts.runID, 10), "--dir", opts.outputDir}
-	if opts.owner != "" && opts.repo != "" {
-		if opts.hostname != "" && opts.hostname != "github.com" {
-			ghArgs = append(ghArgs, "-R", filepath.Join(opts.hostname, opts.owner, opts.repo))
-		} else {
-			ghArgs = append(ghArgs, "-R", filepath.Join(opts.owner, opts.repo))
-		}
+	if repoFlag := buildRepoFlag(opts.owner, opts.repo, opts.hostname); repoFlag != "" {
+		ghArgs = append(ghArgs, "-R", repoFlag)
 	}
 	return ghArgs
 }
@@ -655,24 +653,16 @@ func ensureUsageAwInfoFallback(ctx context.Context, opts downloadArtifactsOption
 		return
 	}
 
-	logsDownloadLog.Printf("aw_info.json missing from usage artifact, downloading activation artifact as fallback")
-	if opts.verbose {
-		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("aw_info.json missing from usage artifact; downloading activation artifact as fallback"))
-	}
-
-	activationNames := resolveActivationArtifactNames(ctx, opts)
-
-	if err := downloadArtifactsByName(ctx, opts, activationNames); err != nil {
-		logsDownloadLog.Printf("Activation artifact fallback download failed: %v", err)
+	if err := downloadAwInfoFallback(ctx, opts); err != nil {
+		logsDownloadLog.Printf("Metadata fallback download failed: %v", err)
 		if opts.verbose {
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Could not download activation artifact fallback: %v", err)))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Could not download metadata fallback: %v", err)))
 		}
 	}
-	flattenActivationFallback(opts, activationNames)
 	if _, err := os.Stat(awInfoPath); os.IsNotExist(err) {
-		logsDownloadLog.Print("aw_info.json still absent after activation artifact fallback")
+		logsDownloadLog.Print("aw_info.json still absent after metadata fallback")
 		if opts.verbose {
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage("aw_info.json still absent after activation artifact fallback"))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessage("aw_info.json still absent after metadata fallback"))
 		}
 	}
 }
@@ -701,42 +691,46 @@ func copyUsageAwInfoToRunRoot(outputDir, awInfoPath string) bool {
 	return true
 }
 
-// resolveActivationArtifactNames determines the activation artifact names to download,
-// falling back to the default name when artifact listing is unavailable.
-func resolveActivationArtifactNames(ctx context.Context, opts downloadArtifactsOptions) []string {
+// resolveAwInfoArtifactNames prefers compact info artifacts over activation snapshots.
+func resolveAwInfoArtifactNames(ctx context.Context, opts downloadArtifactsOptions) []string {
 	artifactNames, err := listRunArtifactNames(ctx, opts.runID, opts.owner, opts.repo, opts.hostname, opts.verbose)
 	if err != nil {
-		logsDownloadLog.Printf("Failed to list artifacts for activation fallback: %v", err)
-		return []string{constants.ActivationArtifactName.String()}
+		logsDownloadLog.Printf("Failed to list artifacts for metadata fallback: %v", err)
+		return []string{constants.InfoArtifactName.String(), constants.ActivationArtifactName.String()}
 	}
-	var matched []string
+	var infoNames, activationNames []string
 	for _, name := range artifactNames {
+		if artifactMatchesFilter(name, []string{constants.InfoArtifactName.String()}) {
+			infoNames = append(infoNames, name)
+		}
 		if artifactMatchesFilter(name, []string{constants.ActivationArtifactName.String()}) {
-			matched = append(matched, name)
+			activationNames = append(activationNames, name)
 		}
 	}
-	if len(matched) == 0 {
+	if len(infoNames) > 0 {
+		return append(infoNames, activationNames...)
+	}
+	if len(activationNames) == 0 {
 		return []string{constants.ActivationArtifactName.String()}
 	}
-	return matched
+	return activationNames
 }
 
-// flattenActivationFallback flattens the first activation artifact directory found on disk
-// after the fallback download attempt.
-func flattenActivationFallback(opts downloadArtifactsOptions, activationNames []string) {
-	for _, name := range activationNames {
-		activationDir := findArtifactDir(opts.outputDir, name, "")
-		if activationDir == "" {
+// flattenAwInfoFallback flattens the first metadata artifact found after downloading.
+func flattenAwInfoFallback(opts downloadArtifactsOptions, metadataNames []string) {
+	for _, name := range metadataNames {
+		metadataDir := findArtifactDir(opts.outputDir, name, "")
+		if metadataDir == "" {
 			continue
 		}
-		logsDownloadLog.Printf("Found activation artifact fallback directory: %s", activationDir)
-		if err := flattenActivationArtifact(opts.outputDir, opts.verbose); err != nil {
-			logsDownloadLog.Printf("Failed to flatten fallback activation artifact: %v", err)
+		logsDownloadLog.Printf("Found metadata fallback directory: %s", metadataDir)
+		if err := flattenArtifactTree(metadataDir, metadataDir, opts.outputDir, "metadata fallback artifact", opts.verbose); err != nil {
+			logsDownloadLog.Printf("Failed to flatten metadata fallback: %v", err)
 			if opts.verbose {
-				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to flatten activation artifact fallback: %v", err)))
+				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to flatten metadata fallback: %v", err)))
 			}
 		}
 		return
 	}
-	logsDownloadLog.Print("Activation artifact fallback directory not found after download attempt")
+	logsDownloadLog.Print("Metadata fallback directory not found after download attempt")
 }

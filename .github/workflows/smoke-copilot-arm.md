@@ -21,7 +21,11 @@ permissions:
   discussions: read
   actions: read
 name: Smoke Copilot ARM64
-engine: copilot
+engine:
+  id: copilot
+  fallback-models:
+    - copilot/gpt-5.6-luna
+    - copilot/claude-sonnet-5
 runs-on: ubuntu-24.04-arm
 imports:
   - shared/gh.md
@@ -31,6 +35,9 @@ imports:
   - shared/otlp.md
   - shared/token-telemetry-check.md
   - shared/smoke-test-brevity.md
+  - uses: shared/session-artifact-check.md
+    with:
+      session-artifact: copilot-events
 network:
   allowed:
     - defaults
@@ -48,7 +55,7 @@ tools:
   playwright:
 runtimes:
   go:
-    version: "1.26"
+    version: "1.27.3"
 safe-outputs:
     allowed-domains: [default-safe-outputs]
     add-comment:

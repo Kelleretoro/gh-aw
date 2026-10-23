@@ -12,8 +12,8 @@ max-daily-ai-credits: 10000
 timeout-minutes: 10
 engine:
   id: codex
-  model-provider: openai
-model: openai/gpt-5.3-codex
+  model-provider: github
+model: copilot/gpt-6.1-sol
 strict: false
 permissions:
   pull-requests: read
@@ -22,7 +22,6 @@ jobs:
   post_ace_link:
     runs-on: ubuntu-latest
     needs: [activation]
-    if: needs.activation.outputs.activated == 'true'
     permissions:
       pull-requests: write
       issues: write

@@ -1,13 +1,14 @@
 ---
 cache:
-  key: pr-prefetch-${{ github.event.pull_request.head.sha || format('{0}-{1}', github.event.issue.number || github.event.pull_request.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number), github.run_id) }}
+  key: pr-prefetch-v2-${{ github.event.pull_request.number || github.event.issue.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) }}-${{ github.event.pull_request.head.sha || 'unknown' }}-${{ github.run_id }}-${{ github.run_attempt }}
   path: /tmp/gh-aw/agent
   restore-keys:
-  - pr-prefetch-${{ github.event.pull_request.number || github.event.issue.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) }}-
+  - pr-prefetch-v2-${{ github.event.pull_request.number || github.event.issue.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) }}-${{ github.event.pull_request.head.sha && format('{0}-', github.event.pull_request.head.sha) || '' }}
 description: Reviews pull requests using Matt Pocock's engineering skills to provide targeted, high-quality improvement suggestions based on the type of changes
 emoji: 🔍
 engine:
   id: copilot
+  copilot-sdk: true
   max-continuations: 6
 features:
   gh-aw-detection: true
@@ -36,7 +37,7 @@ model: claude-sonnet-5
     events:
     - pull_request_comment
     - pull_request_review_comment
-    name: matt
+    name: [matt, review]
     strategy: centralized
 permissions:
   contents: read
@@ -60,12 +61,14 @@ safe-outputs:
   submit-pull-request-review:
     max: 1
 skills:
-- mattpocock/skills/diagnosing-bugs@801dca688564c529fa84f247f64472520d9ebe28
-- mattpocock/skills/tdd@801dca688564c529fa84f247f64472520d9ebe28
-- mattpocock/skills/improve-codebase-architecture@801dca688564c529fa84f247f64472520d9ebe28
-- mattpocock/skills/grill-with-docs@801dca688564c529fa84f247f64472520d9ebe28
-- mattpocock/skills/codebase-design@801dca688564c529fa84f247f64472520d9ebe28
-timeout-minutes: 15
+- mattpocock/skills/diagnosing-bugs@49dd158d1076134a641b33efb035946536778336
+- mattpocock/skills/tdd@49dd158d1076134a641b33efb035946536778336
+- mattpocock/skills/improve-codebase-architecture@49dd158d1076134a641b33efb035946536778336
+- mattpocock/skills/grill-with-docs@49dd158d1076134a641b33efb035946536778336
+- mattpocock/skills/codebase-design@49dd158d1076134a641b33efb035946536778336
+# Raised from 15m: skill-driven PR reviews on larger diffs were hitting the
+# engine step's hard timeout mid-review (not a hang) - see #66819.
+timeout-minutes: 30
 tools:
   cli-proxy: true
   github:
@@ -106,6 +109,10 @@ A successful review:
 - uses skill labels only when they materially improve the advice
 - approves only when no actionable issue remains
 - uses `noop` instead of generic praise when there is nothing useful to say
+
+## Investigation Budget
+
+Treat the pre-fetched diff, `pr-triage` output, and the skill guidance below as your primary source of truth. Large, cross-cutting diffs can tempt open-ended tracing through the codebase to build architectural context — bound that exploration to roughly 20 tool calls beyond Steps 1-3. If you reach that budget without a clear picture, stop investigating and submit the best review supported by the evidence gathered so far (call out remaining uncertainty in the review body) rather than continuing to chase every reference; this is what previously caused engine-step timeouts on large diffs (#66819).
 
 ### Step 1: Load Pre-fetched PR Data
 

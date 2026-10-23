@@ -39,6 +39,66 @@ func TestClaudeEngineComputeAllowedTools(t *testing.T) {
 			expected: "Bash,BashOutput,ExitPlanMode,Glob,Grep,KillBash,LS,NotebookRead,Read,Skill,Task,TodoWrite",
 		},
 		{
+			name: "work queue native MCP with restricted bash",
+			tools: map[string]any{
+				"bash":       []any{"cat"},
+				"work-queue": map[string]any{"worker": true, "require-assignment": true},
+			},
+			expected: "Bash(cat),BashOutput,ExitPlanMode,Glob,Grep,KillBash,LS,NotebookRead,Read,Skill,Task,TodoWrite,mcp__work-queue",
+		},
+		{
+			name:     "work queue boolean true",
+			tools:    map[string]any{"work-queue": true},
+			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite,mcp__work-queue",
+		},
+		{
+			name:     "work queue nil",
+			tools:    map[string]any{"work-queue": nil},
+			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite,mcp__work-queue",
+		},
+		{
+			name:     "work queue empty config",
+			tools:    map[string]any{"work-queue": map[string]any{}},
+			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite,mcp__work-queue",
+		},
+		{
+			name: "work queue structured MCP with restricted tools",
+			tools: map[string]any{
+				"work-queue": map[string]any{
+					"type":    "stdio",
+					"command": "server",
+					"allowed": []any{"work_queue_claim_finish"},
+				},
+			},
+			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite,mcp__work-queue__work_queue_claim_finish",
+		},
+		{
+			name: "work queue wildcard tools",
+			tools: map[string]any{
+				"work-queue": map[string]any{"allowed": []any{"*"}},
+			},
+			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite,mcp__work-queue",
+		},
+		{
+			name: "work queue empty allowed list",
+			tools: map[string]any{
+				"work-queue": map[string]any{"allowed": []any{}},
+			},
+			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite",
+		},
+		{
+			name: "work queue malformed allowed list",
+			tools: map[string]any{
+				"work-queue": map[string]any{"allowed": "work_queue_claim_finish"},
+			},
+			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite",
+		},
+		{
+			name:     "disabled work queue",
+			tools:    map[string]any{"work-queue": false},
+			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite",
+		},
+		{
 			name: "neutral web tools",
 			tools: map[string]any{
 				"web-fetch":  nil,
@@ -79,21 +139,21 @@ func TestClaudeEngineComputeAllowedTools(t *testing.T) {
 					"key": "test-memory-key",
 				},
 			},
-			expected: "Bash(cat /tmp/gh-aw/cache-memory/),Bash(cat > /tmp/gh-aw/cache-memory/),Bash(mkdir -p /tmp/gh-aw/cache-memory/),Bash(mv /tmp/gh-aw/cache-memory/),BashOutput,Edit(/tmp/gh-aw/cache-memory/*),ExitPlanMode,Glob,Grep,KillBash,LS,MultiEdit(/tmp/gh-aw/cache-memory/*),NotebookRead,Read,Read(/tmp/gh-aw/cache-memory/*),Skill,Task,TodoWrite,Write(/tmp/gh-aw/cache-memory/*)",
+			expected: "Bash(cat /tmp/gh-aw/cache-memory/),Bash(cat > /tmp/gh-aw/cache-memory/),Bash(mkdir -p /tmp/gh-aw/cache-memory/),Bash(mv /tmp/gh-aw/cache-memory/),BashOutput,Edit(//tmp/gh-aw/cache-memory/**),ExitPlanMode,Glob,Grep,KillBash,LS,NotebookRead,Read,Read(//tmp/gh-aw/cache-memory/**),Skill,Task,TodoWrite",
 		},
 		{
 			name: "cache-memory with boolean true",
 			tools: map[string]any{
 				"cache-memory": true,
 			},
-			expected: "Bash(cat /tmp/gh-aw/cache-memory/),Bash(cat > /tmp/gh-aw/cache-memory/),Bash(mkdir -p /tmp/gh-aw/cache-memory/),Bash(mv /tmp/gh-aw/cache-memory/),BashOutput,Edit(/tmp/gh-aw/cache-memory/*),ExitPlanMode,Glob,Grep,KillBash,LS,MultiEdit(/tmp/gh-aw/cache-memory/*),NotebookRead,Read,Read(/tmp/gh-aw/cache-memory/*),Skill,Task,TodoWrite,Write(/tmp/gh-aw/cache-memory/*)",
+			expected: "Bash(cat /tmp/gh-aw/cache-memory/),Bash(cat > /tmp/gh-aw/cache-memory/),Bash(mkdir -p /tmp/gh-aw/cache-memory/),Bash(mv /tmp/gh-aw/cache-memory/),BashOutput,Edit(//tmp/gh-aw/cache-memory/**),ExitPlanMode,Glob,Grep,KillBash,LS,NotebookRead,Read,Read(//tmp/gh-aw/cache-memory/**),Skill,Task,TodoWrite",
 		},
 		{
 			name: "cache-memory with nil value (no value specified)",
 			tools: map[string]any{
 				"cache-memory": nil,
 			},
-			expected: "Bash(cat /tmp/gh-aw/cache-memory/),Bash(cat > /tmp/gh-aw/cache-memory/),Bash(mkdir -p /tmp/gh-aw/cache-memory/),Bash(mv /tmp/gh-aw/cache-memory/),BashOutput,Edit(/tmp/gh-aw/cache-memory/*),ExitPlanMode,Glob,Grep,KillBash,LS,MultiEdit(/tmp/gh-aw/cache-memory/*),NotebookRead,Read,Read(/tmp/gh-aw/cache-memory/*),Skill,Task,TodoWrite,Write(/tmp/gh-aw/cache-memory/*)",
+			expected: "Bash(cat /tmp/gh-aw/cache-memory/),Bash(cat > /tmp/gh-aw/cache-memory/),Bash(mkdir -p /tmp/gh-aw/cache-memory/),Bash(mv /tmp/gh-aw/cache-memory/),BashOutput,Edit(//tmp/gh-aw/cache-memory/**),ExitPlanMode,Glob,Grep,KillBash,LS,NotebookRead,Read,Read(//tmp/gh-aw/cache-memory/**),Skill,Task,TodoWrite",
 		},
 		{
 			name: "cache-memory with github tools",
@@ -103,7 +163,7 @@ func TestClaudeEngineComputeAllowedTools(t *testing.T) {
 					"allowed": []any{"get_repository"},
 				},
 			},
-			expected: "Bash(cat /tmp/gh-aw/cache-memory/),Bash(cat > /tmp/gh-aw/cache-memory/),Bash(mkdir -p /tmp/gh-aw/cache-memory/),Bash(mv /tmp/gh-aw/cache-memory/),BashOutput,Edit(/tmp/gh-aw/cache-memory/*),ExitPlanMode,Glob,Grep,KillBash,LS,MultiEdit(/tmp/gh-aw/cache-memory/*),NotebookRead,Read,Read(/tmp/gh-aw/cache-memory/*),Skill,Task,TodoWrite,Write(/tmp/gh-aw/cache-memory/*),mcp__github__get_repository",
+			expected: "Bash(cat /tmp/gh-aw/cache-memory/),Bash(cat > /tmp/gh-aw/cache-memory/),Bash(mkdir -p /tmp/gh-aw/cache-memory/),Bash(mv /tmp/gh-aw/cache-memory/),BashOutput,Edit(//tmp/gh-aw/cache-memory/**),ExitPlanMode,Glob,Grep,KillBash,LS,NotebookRead,Read,Read(//tmp/gh-aw/cache-memory/**),Skill,Task,TodoWrite,mcp__github__get_repository",
 		},
 		{
 			name: "cache-memory with unrestricted bash (no extra cache bash commands injected)",
@@ -111,7 +171,7 @@ func TestClaudeEngineComputeAllowedTools(t *testing.T) {
 				"cache-memory": true,
 				"bash":         []any{"*"},
 			},
-			expected: "Bash,BashOutput,Edit(/tmp/gh-aw/cache-memory/*),ExitPlanMode,Glob,Grep,KillBash,LS,MultiEdit(/tmp/gh-aw/cache-memory/*),NotebookRead,Read,Read(/tmp/gh-aw/cache-memory/*),Skill,Task,TodoWrite,Write(/tmp/gh-aw/cache-memory/*)",
+			expected: "Bash,BashOutput,Edit(//tmp/gh-aw/cache-memory/**),ExitPlanMode,Glob,Grep,KillBash,LS,NotebookRead,Read,Read(//tmp/gh-aw/cache-memory/**),Skill,Task,TodoWrite",
 		},
 		{
 			name: "mixed neutral and mcp tools",
@@ -372,6 +432,24 @@ func TestClaudeEngineComputeAllowedTools(t *testing.T) {
 	}
 }
 
+func TestClaudeWorkflowToolFollowsDynamicWorkflowsSetting(t *testing.T) {
+	engine := NewClaudeEngine()
+	enabledTools := engine.computeAllowedClaudeToolsStringWithDynamicWorkflows(map[string]any{}, nil, nil, nil, nil, nil, true)
+	disabledTools := engine.computeAllowedClaudeToolsStringWithDynamicWorkflows(map[string]any{}, nil, nil, nil, nil, nil, false)
+
+	if !strings.Contains(enabledTools, "Workflow") {
+		t.Fatalf("Workflow should be approved when explicitly enabled, got %q", enabledTools)
+	}
+	if strings.Contains(disabledTools, "Workflow") {
+		t.Fatalf("Workflow should not be approved when dynamic workflows are disabled, got %q", disabledTools)
+	}
+	for _, tool := range []string{"Read", "Skill", "Task"} {
+		if !strings.Contains(disabledTools, tool) {
+			t.Errorf("existing tool %q should remain approved, got %q", tool, disabledTools)
+		}
+	}
+}
+
 func TestClaudeEngineComputeAllowedToolsDeduplicatesNormalizedBashEntries(t *testing.T) {
 	engine := NewClaudeEngine()
 
@@ -401,14 +479,14 @@ func TestClaudeEngineComputeAllowedToolsWithSafeOutputs(t *testing.T) {
 		expected    string
 	}{
 		{
-			name:  "SafeOutputs with no tools - should add Write permission",
+			name:  "SafeOutputs with no tools - grants only the MCP server",
 			tools: map[string]any{
 				// Using neutral tools instead of claude section
 			},
 			safeOutputs: &SafeOutputsConfig{
 				CreateIssues: &CreateIssuesConfig{BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")}},
 			},
-			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite,Write,mcp__safeoutputs",
+			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite,mcp__safeoutputs",
 		},
 		{
 			name: "SafeOutputs with general Write permission - should not add specific Write",
@@ -451,7 +529,7 @@ func TestClaudeEngineComputeAllowedToolsWithSafeOutputs(t *testing.T) {
 			safeOutputs: &SafeOutputsConfig{
 				CreateIssues: &CreateIssuesConfig{BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")}},
 			},
-			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite,Write,mcp__github__create_issue,mcp__github__create_pull_request,mcp__safeoutputs",
+			expected: "ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Skill,Task,TodoWrite,mcp__github__create_issue,mcp__github__create_pull_request,mcp__safeoutputs",
 		},
 		{
 			name: "SafeOutputs with neutral tools and create-pull-request",
@@ -522,7 +600,7 @@ func TestClaudeEngineComputeAllowedToolsWithSandboxAllowWrite(t *testing.T) {
 	}
 
 	got := engine.computeAllowedClaudeToolsString(map[string]any{}, nil, cacheMemoryConfig, nil, nil, sandboxConfig)
-	want := "Edit(/tmp/*),ExitPlanMode,Glob,Grep,LS,MultiEdit(/tmp/*),NotebookRead,Read,Read(/tmp/*),Skill,Task,TodoWrite,Write(/tmp/*)"
+	want := "Edit(//tmp/**),ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Read(//tmp/**),Skill,Task,TodoWrite"
 	if got != want {
 		t.Fatalf("unexpected allowed tools\nwant: %s\ngot:  %s", want, got)
 	}
@@ -547,10 +625,10 @@ func TestClaudeEngineSandboxAllowWriteNarrowsDefaultTmpAccess(t *testing.T) {
 	}
 
 	got := engine.computeAllowedClaudeToolsString(map[string]any{}, nil, cacheMemoryConfig, nil, nil, sandboxConfig)
-	if !strings.Contains(got, "Write(/workspace/*)") {
+	if !strings.Contains(got, "Edit(//workspace/**)") {
 		t.Fatalf("expected workspace write permission in %q", got)
 	}
-	if strings.Contains(got, "Write(/tmp/*)") {
+	if strings.Contains(got, "Edit(//tmp/**)") {
 		t.Fatalf("unexpected broad tmp write permission in %q", got)
 	}
 }
@@ -569,7 +647,7 @@ func TestClaudeEngineAddsTmpByDefault(t *testing.T) {
 	}
 
 	got := engine.computeAllowedClaudeToolsString(map[string]any{}, nil, cacheMemoryConfig, nil, nil, sandboxConfig)
-	want := "Edit(/tmp/*),ExitPlanMode,Glob,Grep,LS,MultiEdit(/tmp/*),NotebookRead,Read,Read(/tmp/*),Skill,Task,TodoWrite,Write(/tmp/*)"
+	want := "Edit(//tmp/**),ExitPlanMode,Glob,Grep,LS,NotebookRead,Read,Read(//tmp/**),Skill,Task,TodoWrite"
 	if got != want {
 		t.Fatalf("unexpected allowed tools\nwant: %s\ngot:  %s", want, got)
 	}

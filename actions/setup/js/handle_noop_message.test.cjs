@@ -83,11 +83,7 @@ safe-outputs:
 <!-- gh-aw-noop-runs -->`;
       }
       if (filePath.includes("noop_comment.md")) {
-        return `### {workflow_name}
-
-{message}
-
-> Generated from [{workflow_name}]({run_url}){aic_suffix}{ambient_context_suffix}{history_link}`;
+        return originalReadFileSync.call(fs, path.resolve(import.meta.dirname, "../md/noop_comment.md"), encoding);
       }
       return originalReadFileSync.call(fs, filePath, encoding);
     });
@@ -204,6 +200,69 @@ safe-outputs:
     expect(mockGithub.rest.search.issuesAndPullRequests).not.toHaveBeenCalled();
   });
 
+  it.each(["No action needed", "Blocked by unavailable approval channel", "Missing PR diff data", "safeoutputs command denied", "private repository content, prompt, credentials and tool payload"])(
+    "does not infer failure from or publish noop prose: %s",
+    async message => {
+      process.env.GH_AW_AGENT_CONCLUSION = "success";
+      const outputFile = path.join(tempDir, "agent_output.json");
+      fs.writeFileSync(outputFile, JSON.stringify({ items: [{ type: "noop", message }] }));
+      process.env.GH_AW_AGENT_OUTPUT = outputFile;
+      mockGithub.rest.search.issuesAndPullRequests.mockResolvedValue({
+        data: { total_count: 1, items: [{ number: 42, node_id: "ID", html_url: "url" }] },
+      });
+      mockGithub.rest.issues.createComment.mockResolvedValue({ data: {} });
+
+      const { main } = await import("./handle_noop_message.cjs?t=" + Date.now());
+      await main();
+
+      const body = mockGithub.rest.issues.createComment.mock.calls[0][0].body;
+      expect(body).toContain("**Outcome:** `reported_no_action`");
+      expect(body).toContain("does not verify");
+      expect(body).not.toContain(message);
+      expect(JSON.stringify(mockCore.info.mock.calls)).not.toContain(message);
+    }
+  );
+
+  it.each(["cancelled", "skipped", "", "private unknown status"])("keeps completion unconfirmed for status %s", async conclusion => {
+    process.env.GH_AW_AGENT_CONCLUSION = conclusion;
+    const outputFile = path.join(tempDir, "agent_output.json");
+    fs.writeFileSync(outputFile, JSON.stringify({ items: [{ type: "noop", message: "private noop text" }] }));
+    process.env.GH_AW_AGENT_OUTPUT = outputFile;
+
+    const { main, classifyNoopOutcome } = await import("./handle_noop_message.cjs?t=" + Date.now());
+    await main();
+
+    expect(classifyNoopOutcome(conclusion).category).toBe("unconfirmed");
+    const body = mockCore.setOutput.mock.calls.find(call => call[0] === "noop_comment_body")[1];
+    expect(body).toContain("**Outcome:** `unconfirmed`");
+    expect(body).not.toContain("private noop text");
+    expect(mockGithub.rest.issues.createComment).not.toHaveBeenCalled();
+  });
+
+  it("leaves explicit report_incomplete to failure reporting rather than the noop tracker", async () => {
+    process.env.GH_AW_AGENT_CONCLUSION = "success";
+    const outputFile = path.join(tempDir, "agent_output.json");
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        items: [
+          { type: "noop", message: "No action needed" },
+          { type: "report_incomplete", reason: "private reason" },
+        ],
+      })
+    );
+    process.env.GH_AW_AGENT_OUTPUT = outputFile;
+
+    const { main } = await import("./handle_noop_message.cjs?t=" + Date.now());
+    await main();
+
+    expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("Found 1 non-noop output(s)"));
+    expect(mockGithub.rest.issues.createComment).not.toHaveBeenCalled();
+    const body = mockCore.setOutput.mock.calls.find(call => call[0] === "noop_comment_body")[1];
+    expect(body).toContain("**Outcome:** `incomplete`");
+    expect(body).not.toContain("private reason");
+  });
+
   it("should expose the rendered comment body as an output", async () => {
     process.env.GH_AW_WORKFLOW_NAME = "Test Workflow";
     process.env.GH_AW_RUN_URL = "https://github.com/test-owner/test-repo/actions/runs/123";
@@ -225,7 +284,38 @@ safe-outputs:
     const commentBodyCall = mockCore.setOutput.mock.calls.find(call => call[0] === "noop_comment_body");
     expect(commentBodyCall).toBeDefined();
     expect(commentBodyCall[1]).toContain("### Test Workflow");
-    expect(commentBodyCall[1]).toContain("Nothing to do");
+    expect(commentBodyCall[1]).toContain("reported_no_action");
+    expect(commentBodyCall[1]).not.toContain("Nothing to do");
+    expect(mockCore.setOutput).toHaveBeenCalledWith("noop_message", "Nothing to do");
+  });
+
+  it.each([
+    { taskOutput: true, completed: true, genuineReport: false, category: "reported_no_action" },
+    { taskOutput: false, completed: true, genuineReport: false, category: "incomplete" },
+    { taskOutput: true, completed: false, genuineReport: false, category: "incomplete" },
+    { taskOutput: true, completed: true, genuineReport: true, category: "incomplete" },
+  ])("matches failure policy for registration diagnostics: %j", async ({ taskOutput, completed, genuineReport, category }) => {
+    process.env.GH_AW_AGENT_CONCLUSION = "success";
+    process.env.GH_AW_NOOP_REPORT_AS_ISSUE = "false";
+    const outputFile = path.join(tempDir, "agent_output.json");
+    const items = [
+      { type: "noop", message: "private noop prose" },
+      { type: "report_incomplete", reason: "task_complete tool calls are not registering; analysis completed successfully" },
+    ];
+    if (taskOutput) items.push({ type: "add_comment", body: "private task output" });
+    if (genuineReport) items.push({ type: "report_incomplete", reason: "private genuine failure" });
+    fs.writeFileSync(outputFile, JSON.stringify({ items }));
+    if (completed) fs.writeFileSync(path.join(tempDir, "agent-stdio.log"), '{"terminal_reason":"completed"}\n');
+    process.env.GH_AW_AGENT_OUTPUT = outputFile;
+
+    const { main } = await import("./handle_noop_message.cjs?t=" + Date.now());
+    await main();
+
+    const body = mockCore.setOutput.mock.calls.find(call => call[0] === "noop_comment_body")[1];
+    expect(body).toContain(`**Outcome:** \`${category}\``);
+    expect(body).not.toContain("private");
+    expect(body).not.toContain("not registering");
+    expect(mockCore.setOutput).toHaveBeenCalledWith("noop_message", "private noop prose");
   });
 
   it("should proceed if report-as-issue is set to true", async () => {
@@ -357,7 +447,7 @@ safe-outputs:
     expect(mockGithub.rest.search.issuesAndPullRequests).not.toHaveBeenCalled();
   });
 
-  it("should post noop message when agent failed with only noop outputs (transient error)", async () => {
+  it("should report incomplete when agent failed with only noop outputs", async () => {
     process.env.GH_AW_WORKFLOW_NAME = "Test Workflow";
     process.env.GH_AW_RUN_URL = "https://github.com/test-owner/test-repo/actions/runs/123";
     process.env.GH_AW_NOOP_MESSAGE = "No issues found";
@@ -382,8 +472,13 @@ safe-outputs:
     const { main } = await import("./handle_noop_message.cjs?t=" + Date.now());
     await main();
 
-    expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("Agent failed but produced only noop outputs (transient AI model error"));
+    expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("reporting incomplete outcome"));
     expect(mockGithub.rest.issues.createComment).toHaveBeenCalled();
+    const body = mockGithub.rest.issues.createComment.mock.calls[0][0].body;
+    expect(body).toContain("**Outcome:** `incomplete`");
+    expect(body).toContain("Task completion is unconfirmed");
+    expect(body).not.toContain("No issues found");
+    expect(body).not.toContain("reported_no_action");
   });
 
   it("should skip if agent failed with non-noop outputs", async () => {
@@ -498,7 +593,8 @@ safe-outputs:
     const commentCall = mockGithub.rest.issues.createComment.mock.calls[0][0];
     expect(commentCall.issue_number).toBe(42);
     expect(commentCall.body).toContain("Test Workflow");
-    expect(commentCall.body).toContain("No updates needed");
+    expect(commentCall.body).toContain("reported_no_action");
+    expect(commentCall.body).not.toContain("No updates needed");
     // The new format doesn't have a separate Run ID line, but the URL is still in the footer
     expect(commentCall.body).toContain("https://github.com/test-owner/test-repo/actions/runs/123456");
   });
@@ -551,7 +647,8 @@ safe-outputs:
     const commentCall = mockGithub.rest.issues.createComment.mock.calls[0][0];
     expect(commentCall.issue_number).toBe(99);
     expect(commentCall.body).toContain("Another Workflow");
-    expect(commentCall.body).toContain("Everything is up to date");
+    expect(commentCall.body).toContain("reported_no_action");
+    expect(commentCall.body).not.toContain("Everything is up to date");
   });
 
   it("should handle comment creation failure gracefully", async () => {
@@ -708,11 +805,19 @@ safe-outputs:
     expect(commentCall.body).not.toContain("<script>");
   });
 
-  it("should include AIC suffix in comment footer when GH_AW_AIC is set", async () => {
+  it.each([
+    ["0.025", "~1"],
+    ["0.000000000001", "~1"],
+    ["1", "~1"],
+    ["1.000000000001", "~2"],
+    ["12.4", "~13"],
+    ["1000.1", "~1001"],
+    ["1000000.1", "~1000001"],
+  ])("should include estimated %s AIC in the no-op footer", async (value, formatted) => {
     process.env.GH_AW_WORKFLOW_NAME = "AIC Test Workflow";
     process.env.GH_AW_RUN_URL = "https://github.com/test/test/actions/runs/123";
     process.env.GH_AW_AGENT_CONCLUSION = "success";
-    process.env.GH_AW_AIC = "0.025";
+    process.env.GH_AW_AIC = value;
 
     const outputFile = path.join(tempDir, "agent_output.json");
     fs.writeFileSync(outputFile, JSON.stringify({ items: [{ type: "noop", message: "No action needed" }] }));
@@ -727,7 +832,7 @@ safe-outputs:
     await main();
 
     const commentCall = mockGithub.rest.issues.createComment.mock.calls[0][0];
-    expect(commentCall.body).toContain("AIC");
+    expect(commentCall.body).toContain(` · ${formatted} AIC`);
   });
 
   it("should include detection AIC in the footer total when GH_AW_THREAT_DETECTION_AIC is set", async () => {
@@ -751,7 +856,7 @@ safe-outputs:
     await main();
 
     const commentCall = mockGithub.rest.issues.createComment.mock.calls[0][0];
-    expect(commentCall.body).toContain("sonnet46 · 0.1 AIC · ⌖ 0.025 AIC");
+    expect(commentCall.body).toContain("sonnet46 · ~1 AIC · ⌖ ~1 AIC");
   });
 
   it("should include evals AIC in the footer breakdown when GH_AW_EVALS_AIC is set", async () => {
@@ -775,7 +880,7 @@ safe-outputs:
     await main();
 
     const commentCall = mockGithub.rest.issues.createComment.mock.calls[0][0];
-    expect(commentCall.body).toContain("sonnet46 · 0.1 AIC · ◇ 0.025 AIC");
+    expect(commentCall.body).toContain("sonnet46 · ~1 AIC · ◇ ~1 AIC");
   });
 
   it("should place evals AIC after detection AIC in the footer breakdown", async () => {
@@ -800,7 +905,7 @@ safe-outputs:
     await main();
 
     const commentCall = mockGithub.rest.issues.createComment.mock.calls[0][0];
-    expect(commentCall.body).toContain("sonnet46 · 0.1 AIC · ⌖ 0.025 AIC · ◇ 0.01 AIC");
+    expect(commentCall.body).toContain("sonnet46 · ~1 AIC · ⌖ ~1 AIC · ◇ ~1 AIC");
   });
 
   it("should not include AIC suffix in comment footer when GH_AW_AIC is not set", async () => {

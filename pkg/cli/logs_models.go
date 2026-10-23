@@ -66,23 +66,24 @@ const (
 
 // WorkflowRun represents a GitHub Actions workflow run with metrics
 type WorkflowRun struct {
-	DatabaseID          int64     `json:"databaseId"`
-	Number              int       `json:"number"`
-	URL                 string    `json:"url"`
-	Status              string    `json:"status"`
-	Conclusion          string    `json:"conclusion"`
-	WorkflowName        string    `json:"workflowName"`
-	WorkflowPath        string    `json:"workflowPath"` // Workflow file path (e.g., .github/workflows/copilot-swe-agent.yml)
-	CreatedAt           time.Time `json:"createdAt"`
-	StartedAt           time.Time `json:"startedAt"`
-	UpdatedAt           time.Time `json:"updatedAt"`
-	Event               string    `json:"event"`
-	HeadBranch          string    `json:"headBranch"`
-	HeadSha             string    `json:"headSha"`
-	DisplayTitle        string    `json:"displayTitle"`
-	Attempt             int       `json:"attempt,omitempty"`
-	Repository          string    `json:"repository,omitempty"`
-	Actor               string    `json:"actor,omitempty"`
+	ObsoletePR          *ObsoletePREvidence `json:"obsolete_pr,omitempty"`
+	DatabaseID          int64               `json:"databaseId"`
+	Number              int                 `json:"number"`
+	URL                 string              `json:"url"`
+	Status              string              `json:"status"`
+	Conclusion          string              `json:"conclusion"`
+	WorkflowName        string              `json:"workflowName"`
+	WorkflowPath        string              `json:"workflowPath"` // Workflow file path (e.g., .github/workflows/copilot-swe-agent.yml)
+	CreatedAt           time.Time           `json:"createdAt"`
+	StartedAt           time.Time           `json:"startedAt"`
+	UpdatedAt           time.Time           `json:"updatedAt"`
+	Event               string              `json:"event"`
+	HeadBranch          string              `json:"headBranch"`
+	HeadSha             string              `json:"headSha"`
+	DisplayTitle        string              `json:"displayTitle"`
+	Attempt             int                 `json:"attempt,omitempty"`
+	Repository          string              `json:"repository,omitempty"`
+	Actor               string              `json:"actor,omitempty"`
 	Duration            time.Duration
 	ActionMinutes       float64 // Billable Actions minutes estimated from wall-clock time
 	TokenUsage          int
@@ -117,6 +118,7 @@ type ToolCallInfo = workflow.ToolCallInfo
 type ProcessedRun struct {
 	Run                     WorkflowRun
 	AwContext               *AwContext
+	EpisodeContexts         []*AwInfo
 	TaskDomain              *TaskDomainInfo
 	BehaviorFingerprint     *BehaviorFingerprint
 	AgenticAssessments      []AgenticAssessment
@@ -132,7 +134,10 @@ type ProcessedRun struct {
 	GatewaySteeringEvents   []GatewaySteeringEvent
 	MCPToolUsage            *MCPToolUsageData
 	TokenUsage              *TokenUsageSummary
+	ModelRouting            *ModelRoutingSummary
 	WorkingSet              *WorkingSetMetrics
+	Ledger                  *LedgerActivity
+	WorkQueue               *WorkQueueReport
 	Friction                *FrictionCostSummary
 	GitHubRateLimitUsage    *GitHubRateLimitUsage
 	JobDetails              []JobInfoWithDuration
@@ -141,11 +146,14 @@ type ProcessedRun struct {
 	cachedAudit             *AuditData
 }
 
-// GatewaySteeringEvent records an AI-credit or timeout warning injected by the gateway.
+// GatewaySteeringEvent records an AI-credit, effective-token or timeout warning
+// injected by the AWF API proxy, read from its steering event log.
 type GatewaySteeringEvent struct {
 	Type      string `json:"type" console:"header:Type"`
 	Message   string `json:"message" console:"header:Message"`
 	Timestamp string `json:"timestamp,omitempty" console:"header:Timestamp,omitempty"`
+	Threshold int    `json:"threshold,omitempty" console:"header:Threshold,omitempty"`
+	RequestID string `json:"request_id,omitempty" console:"header:Request ID,omitempty"`
 }
 
 // ReportProvenance holds the shared provenance fields common to all report record types.
@@ -213,10 +221,10 @@ type AggregatedSummaryBase struct {
 }
 
 // MCPServerStatsBase holds the per-server identity and volume fields shared by the MCP
-// server health/stats report types (MCPServerStats, MCPServerHealthDetail and
-// MCPServerCrossRunHealth). Those types previously spelled the same concepts four
-// different ways (TotalCalls/ToolCalls/ToolCallCount and TotalErrors/ErrorCount);
-// embedding this struct standardizes the Go field names and removes copy-paste drift
+// server health/stats report types (MCPServerStats, MCPServerHealthDetail,
+// MCPServerCrossRunHealth and GatewayServerMetrics). Those types previously spelled
+// the same concepts with different field names (TotalCalls/ToolCalls/ToolCallCount and
+// TotalErrors/ErrorCount); embedding this struct standardizes the Go field names and removes copy-paste drift
 // risk, following the same approach as AggregatedSummaryBase. Types whose serialized
 // schema differs from these tags keep it via a MarshalJSON override.
 type MCPServerStatsBase struct {
@@ -293,8 +301,11 @@ type RunAnalysis struct {
 	SkillActivations        []SkillActivation        `json:"skill_activations,omitempty"`       // Detected skill invocations
 	MCPToolUsage            *MCPToolUsageData        `json:"mcp_tool_usage,omitempty"`          // MCP tool usage data
 	TokenUsage              *TokenUsageSummary       `json:"token_usage_summary,omitempty"`     // Token usage from firewall proxy
+	ModelRouting            *ModelRoutingSummary     `json:"model_routing,omitempty"`           // AWF model routing decisions and cost attribution
 	GatewaySteeringEvents   []GatewaySteeringEvent   `json:"gateway_steering_events,omitempty"` // AI-credit and timeout steering events
 	WorkingSet              *WorkingSetMetrics       `json:"working_set,omitempty"`             // Working-set rebuild metric from usage summary
+	Ledger                  *LedgerActivity          `json:"ledger,omitempty"`                  // Recorded ledger append transactions
+	WorkQueue               *WorkQueueReport         `json:"work_queue,omitempty"`
 	Friction                *FrictionCostSummary     `json:"friction,omitempty"`                // Precomputed cost of wasted work from usage summary
 	GitHubRateLimitUsage    *GitHubRateLimitUsage    `json:"github_rate_limit_usage,omitempty"` // GitHub API quota consumption
 	JobDetails              []JobInfoWithDuration    `json:"job_details"`                       // Job execution details
@@ -335,7 +346,8 @@ type DownloadResult struct {
 	storageReserved bool
 }
 
-// JobInfo represents basic information about a workflow job
+// JobInfo mirrors a job object from the GitHub Actions Jobs API.
+// For the slimmed-down audit report view of a job, see JobData.
 type JobInfo struct {
 	ID              int64     `json:"id,omitempty"`
 	RunID           int64     `json:"run_id,omitempty"`
@@ -419,32 +431,44 @@ type AwContext struct {
 	RunID          string `json:"run_id"`                     // GitHub Actions run ID of the calling workflow
 	WorkflowID     string `json:"workflow_id"`                // Full workflow ref, e.g. "owner/repo/.github/workflows/foo.yml@refs/heads/main"
 	WorkflowCallID string `json:"workflow_call_id,omitempty"` // Unique call attempt ID (run_id + run_attempt)
-	Time           string `json:"time,omitempty"`             // ISO 8601 timestamp of the dispatch
-	Actor          string `json:"actor,omitempty"`            // GitHub actor that triggered the calling workflow
-	EventType      string `json:"event_type,omitempty"`       // GitHub event name of the calling workflow
-	ItemType       string `json:"item_type,omitempty"`        // Kind of triggering item: "issue", "pull_request", "discussion", "check_run", "check_suite", or ""
-	ItemNumber     string `json:"item_number,omitempty"`      // Number (issue/PR/discussion) or database id (check_run/check_suite) of the triggering item
-	CommentID      string `json:"comment_id,omitempty"`       // ID of the triggering comment or review; empty when not a comment/review event
+	EpisodeID      string `json:"episode_id,omitempty"`
+	HopID          string `json:"hop_id,omitempty"`
+	ParentHopID    string `json:"parent_hop_id,omitempty"`
+	OriginEvent    string `json:"origin_event,omitempty"`
+	RootRepo       string `json:"root_repo,omitempty"`
+	RootWorkflowID string `json:"root_workflow_id,omitempty"`
+	RootRunID      string `json:"root_run_id,omitempty"`
+	Time           string `json:"time,omitempty"`        // ISO 8601 timestamp of the dispatch
+	Actor          string `json:"actor,omitempty"`       // GitHub actor that triggered the calling workflow
+	EventType      string `json:"event_type,omitempty"`  // GitHub event name of the calling workflow
+	ItemType       string `json:"item_type,omitempty"`   // Kind of triggering item: "issue", "pull_request", "discussion", "check_run", "check_suite", or ""
+	ItemNumber     string `json:"item_number,omitempty"` // Number (issue/PR/discussion) or database id (check_run/check_suite) of the triggering item
+	CommentID      string `json:"comment_id,omitempty"`  // ID of the triggering comment or review; empty when not a comment/review event
 }
 
 // AwInfo represents the structure of aw_info.json files
 type AwInfo struct {
-	EngineID        string              `json:"engine_id"`
-	EngineName      string              `json:"engine_name"`
-	Model           string              `json:"model"`
-	Version         string              `json:"version"`
-	CLIVersion      string              `json:"cli_version,omitempty"` // gh-aw CLI version
-	WorkflowName    string              `json:"workflow_name"`
-	Staged          bool                `json:"staged"`
-	AwfVersion      string              `json:"awf_version,omitempty"`      // AWF firewall version (new name)
-	FirewallVersion string              `json:"firewall_version,omitempty"` // AWF firewall version (old name, for backward compatibility)
-	AwmgVersion     string              `json:"awmg_version,omitempty"`     // MCP gateway version
-	AgentRuntime    string              `json:"agent_runtime,omitempty"`    // sandbox.agent.runtime value (e.g., "cloud-hypervisor"); empty when unset
-	CacheMemory     bool                `json:"cache_memory"`               // true when the workflow declares tools.cache-memory
-	Steps           AwInfoSteps         `json:"steps,omitzero"`             // Steps metadata
-	CreatedAt       string              `json:"created_at"`
-	Context         *AwContext          `json:"context,omitempty"`       // aw_context data passed via workflow_dispatch inputs
-	TokenWeights    *types.TokenWeights `json:"token_weights,omitempty"` // Historical/custom model cost data stored in aw_info.json
+	EngineID        string                `json:"engine_id"`
+	EngineName      string                `json:"engine_name"`
+	Model           string                `json:"model"`
+	RequestedModel  string                `json:"requested_model,omitempty"`
+	FallbackModel   string                `json:"fallback_model,omitempty"`
+	ModelRouting    *AwInfoModelRouting   `json:"model_routing,omitempty"`
+	ModelSelection  *AwInfoModelSelection `json:"model_selection,omitempty"`
+	Version         string                `json:"version"`
+	CLIVersion      string                `json:"cli_version,omitempty"` // gh-aw CLI version
+	WorkflowName    string                `json:"workflow_name"`
+	Staged          bool                  `json:"staged"`
+	DryRun          bool                  `json:"dry_run"`
+	AwfVersion      string                `json:"awf_version,omitempty"`      // AWF firewall version (new name)
+	FirewallVersion string                `json:"firewall_version,omitempty"` // AWF firewall version (old name, for backward compatibility)
+	AwmgVersion     string                `json:"awmg_version,omitempty"`     // MCP gateway version
+	AgentRuntime    string                `json:"agent_runtime,omitempty"`    // sandbox.agent.runtime value (e.g., "cloud-hypervisor"); empty when unset
+	CacheMemory     bool                  `json:"cache_memory"`               // true when the workflow declares tools.cache-memory
+	Steps           AwInfoSteps           `json:"steps,omitzero"`             // Steps metadata
+	CreatedAt       string                `json:"created_at"`
+	Context         *AwContext            `json:"context,omitempty"`       // aw_context data passed via workflow_dispatch inputs
+	TokenWeights    *types.TokenWeights   `json:"token_weights,omitempty"` // Historical/custom model cost data stored in aw_info.json
 	// Additional fields that might be present
 	RunID      NumericID `json:"run_id,omitempty"`
 	RunNumber  NumericID `json:"run_number,omitempty"`
@@ -455,6 +479,30 @@ type AwInfo struct {
 	Actor      string    `json:"actor,omitempty"`
 	EventName  string    `json:"event_name,omitempty"`
 	TargetRepo string    `json:"target_repo,omitempty"`
+}
+
+type AwInfoModelSelection struct {
+	Status          string `json:"status"`
+	ConfiguredModel string `json:"configured_model"`
+	ResolvedModel   string `json:"resolved_model"`
+	EffectiveModel  string `json:"effective_model"`
+}
+
+type AwInfoModelRouting struct {
+	Status           string `json:"status"`
+	Source           string `json:"source,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	Model            string `json:"model,omitempty"`
+	WireModel        string `json:"wire_model,omitempty"`
+	Effort           string `json:"effort,omitempty"`
+	AppliedEffort    string `json:"applied_effort,omitempty"`
+	Endpoint         string `json:"endpoint,omitempty"`
+	SelectedEndpoint string `json:"selected_endpoint,omitempty"`
+	Mode             string `json:"mode,omitempty"`
+	SelectedID       string `json:"selected_id,omitempty"`
+	RouterVersion    string `json:"router_version,omitempty"`
+	FailureCode      string `json:"failure_code,omitempty"`
+	Detail           string `json:"detail,omitempty"`
 }
 
 // GetFirewallVersion returns the AWF firewall version, preferring the new field name

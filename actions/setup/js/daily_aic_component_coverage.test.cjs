@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 const { getRunAIC } = require("./check_daily_aic_workflow_guardrail.cjs");
 const { sumAICFromUsageJSONLFiles } = require("./daily_aic_workflow_helpers.cjs");
 const { createAPIBudget } = require("./daily_aic_api_budget.cjs");
+const { captureExecutionEvidenceConfiguration, shouldSkipForNoopSafeOutputs } = require("./harness_retry_runner.cjs");
 const time = "2025-01-01T12:00:00Z";
 const later = "2025-01-01T12:30:00Z";
 const job = (name, overrides = {}) => ({
@@ -38,7 +39,7 @@ function evaluate(files, jobs, overrides = {}) {
       artifacts: [
         { id: 10, name: "usage", createdAt: new Date(overrides.artifactTime || later) },
         ...["agent", "detection", "evals"].map(name => {
-          const latest = jobs.filter(item => item.name === name && item.conclusion !== "skipped").sort((a, b) => b.run_attempt - a.run_attempt)[0];
+          const latest = jobs.filter(item => (item.name.toLowerCase() === "evaluations" ? "evals" : item.name.toLowerCase()) === name && item.conclusion !== "skipped").sort((a, b) => b.run_attempt - a.run_attempt)[0];
           return { id: latest?.id, name, createdAt: new Date(overrides.producerTime || latest?.completed_at || time) };
         }),
       ],
@@ -103,6 +104,25 @@ it("counts an empty detection accounting file as zero AIC", async () => {
   expect(global.core.info).toHaveBeenCalledWith(expect.stringContaining('"component":"detection"'));
   expect(global.core.info).toHaveBeenCalledWith(expect.stringContaining('"aic":0,"reason":"empty_detection_accounting"'));
   expect(global.core.info).toHaveBeenCalledWith(expect.stringContaining('"source":"detection/token_usage.jsonl"'));
+});
+
+it("counts compiler-generated Agent, Detection and Evaluations jobs using their lowercase accounting paths", async () => {
+  const f = evaluate(
+    {
+      "agent/token_usage.jsonl": '{"aic":18.02604}',
+      "detection/token_usage.jsonl": '{"aic":30.08748}',
+      "evals/token_usage.jsonl": '{"aic":1}',
+    },
+    [job("Agent"), job("Detection"), job("Evaluations")]
+  );
+  await expect(f.result).resolves.toBeCloseTo(49.11352);
+  expect(f.client.listArtifacts).toHaveBeenCalledOnce();
+  expect(global.core.info).not.toHaveBeenCalledWith(expect.stringContaining('"reason":"no_billable_jobs"'));
+});
+
+it("treats differently cased names for the same component as ambiguous", async () => {
+  const f = evaluate({}, [job("Agent", { id: 1 }), job("agent", { id: 2 })]);
+  await expect(f.result).rejects.toThrow("Ambiguous daily AIC component jobs");
 });
 
 it("still requires accounting when detection/token_usage.jsonl is missing (not empty)", async () => {
@@ -384,11 +404,63 @@ it("still requires accounting when an agent job succeeds", async () => {
   await expect(f.result).rejects.toThrow("Missing accounting for executed agent component");
 });
 
+it("counts a successful pre-flight noop with harness evidence and empty accounting as zero AIC", async () => {
+  const evidenceFile = path.join(directory, "agent_execution.json");
+  shouldSkipForNoopSafeOutputs({
+    safeOutputsPath: "/tmp/safe-outputs.jsonl",
+    hasNoopInSafeOutputs: () => true,
+    log: () => {},
+    executionEvidence: captureExecutionEvidenceConfiguration({
+      GH_AW_AWF_EXECUTION_EVIDENCE_FILE: evidenceFile,
+      GH_AW_AWF_EXECUTION_COMPONENT: "agent",
+      GITHUB_RUN_ID: "1",
+      GITHUB_RUN_ATTEMPT: "1",
+    }),
+  });
+  const f = evaluate({ "agent/token_usage.jsonl": "", "agent/execution.json": fs.readFileSync(evidenceFile, "utf8") }, [job("agent")]);
+  await expect(f.result).resolves.toBe(0);
+  expect(global.core.info).toHaveBeenCalledWith(expect.stringContaining('"aic":0,"reason":"execution_not_started"'));
+});
+
+it.each(["success", "failure"])("still requires accounting after model execution starts with job conclusion %s", async conclusion => {
+  const f = evaluate({ "agent/execution.json": JSON.stringify({ version: 1, component: "agent", run_id: 1, run_attempt: 1, state: "started" }) }, [job("agent", { conclusion })]);
+  await expect(f.result).rejects.toThrow("Missing accounting for executed agent");
+});
+
 it("accepts a completed run with no jobs as zero usage", async () => {
   const f = evaluate({}, []);
   await expect(f.result).resolves.toBe(0);
   expect(f.client.listArtifacts).not.toHaveBeenCalled();
   expect(global.core.info).toHaveBeenCalledWith(expect.stringContaining('"aic":0,"reason":"no_billable_jobs"'));
+});
+
+it("counts usage for compiler-generated job display names", async () => {
+  const f = evaluate({ "agent_usage.jsonl": '{"aic":18.02604}', "detection_usage.jsonl": '{"aic":30.08748}' }, [job("Agent"), job("Detection")]);
+  await expect(f.result).resolves.toBeCloseTo(48.11352);
+  expect(global.core.info).toHaveBeenCalledWith(expect.stringContaining('"component":"agent"'));
+  expect(global.core.info).toHaveBeenCalledWith(expect.stringContaining('"component":"detection"'));
+});
+
+it("maps the Evaluations display name and job_id to their components", async () => {
+  const f = evaluate({ "agent_usage.jsonl": '{"aic":1}', "evals/token_usage.jsonl": '{"aic":2}' }, [job("Agent"), job("Evaluations")]);
+  await expect(f.result).resolves.toBeCloseTo(3);
+  const g = evaluate({ "agent_usage.jsonl": '{"aic":4}' }, [job("Display", { job_id: "agent" })]);
+  await expect(g.result).resolves.toBeCloseTo(4);
+});
+
+it("prefers the agent job_id over a conflicting billable display name", async () => {
+  const f = evaluate({ "agent/token_usage.jsonl": '{"aic":4}' }, [job("Detection", { id: 1, job_id: "agent" })]);
+  await expect(f.result).resolves.toBe(4);
+});
+
+it.each(["detection", "evals"])("prefers the %s job_id over the Agent display name", async component => {
+  const f = evaluate({ "agent/token_usage.jsonl": '{"aic":1}', [`${component}/token_usage.jsonl`]: '{"aic":2}' }, [job("Agent", { id: 1 }), job("Agent", { id: 2, job_id: component })]);
+  await expect(f.result).resolves.toBe(3);
+});
+
+it("requires accounting for executed jobs with generated display names", async () => {
+  const f = evaluate({}, [job("Agent")]);
+  await expect(f.result).rejects.toThrow("Missing accounting for executed agent component");
 });
 
 it("accepts a completed run with all billable jobs skipped as zero usage", async () => {
@@ -498,6 +570,48 @@ it("counts carried-forward agent usage and rerun detection once after a failed-o
   );
   await expect(f.result).resolves.toBe(5);
   expect(f.list).toHaveBeenCalledWith(expect.objectContaining({ filter: "all" }));
+});
+
+it("T-AIC-DG-026 counts verified prior usage when a runner-assigned agent rerun is cancelled without a producer artifact", async () => {
+  const f = evaluate(
+    { "agent_usage.jsonl": '{"aic":2}' },
+    [job("agent"), job("agent", { id: 10, run_attempt: 2, conclusion: "cancelled", runner_id: 123, runner_name: "runner", steps: [{ name: "Set up job" }], started_at: later, completed_at: later })],
+    { attempt: 2, runStarted: later, producerTime: time }
+  );
+  await expect(f.result).resolves.toBe(2);
+  expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("Usage from the cancelled attempt may be unaccounted for"));
+});
+
+it("rejects a cancelled rerun without a verifiable earlier producer", async () => {
+  const f = evaluate({ "agent_usage.jsonl": '{"aic":2}' }, [job("agent"), job("agent", { id: 10, run_attempt: 2, conclusion: "cancelled", started_at: later, completed_at: later })], {
+    attempt: 2,
+    runStarted: later,
+    producerTime: "2025-01-01T11:00:00Z",
+  });
+  await expect(f.result).rejects.toThrow("Cannot verify the agent producer artifact");
+  expect(global.core.warning).not.toHaveBeenCalled();
+});
+
+it("rejects an ambiguous previous attempt rather than choosing arbitrary carried-forward usage", async () => {
+  const f = evaluate({ "agent_usage.jsonl": '{"aic":2}' }, [job("agent"), job("Agent", { id: 11 }), job("agent", { id: 10, run_attempt: 2, conclusion: "cancelled", started_at: later, completed_at: later })], {
+    attempt: 2,
+    runStarted: later,
+    producerTime: time,
+  });
+  await expect(f.result).rejects.toThrow("Ambiguous daily AIC component jobs");
+});
+
+it.each([
+  ["chronological", [job("agent"), job("Agent", { id: 11 }), job("agent", { id: 10, run_attempt: 2, started_at: later, completed_at: later })]],
+  ["latest-first", [job("agent", { id: 10, run_attempt: 2, started_at: later, completed_at: later }), job("agent"), job("Agent", { id: 11 })]],
+])("ignores ambiguous older jobs when the latest job has its own producer (%s order)", async (_order, jobs) => {
+  const f = evaluate({ "agent_usage.jsonl": '{"aic":2}' }, jobs, { attempt: 2, runStarted: later, producerTime: later });
+  await expect(f.result).resolves.toBe(2);
+});
+
+it("rejects a cancelled rerun when the carried-forward accounting is missing", async () => {
+  const f = evaluate({}, [job("agent"), job("agent", { id: 10, run_attempt: 2, conclusion: "cancelled", started_at: later, completed_at: later })], { attempt: 2, runStarted: later, producerTime: time });
+  await expect(f.result).rejects.toThrow("Missing accounting for executed agent");
 });
 
 it("accepts an earlier usage artifact when only a nonbillable job was rerun", async () => {

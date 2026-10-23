@@ -13,6 +13,8 @@
 # organizations or private repositories beyond the current one):
 #   vars.SQUAD_GITHUB_APP_ID / secrets.SQUAD_GITHUB_APP_PRIVATE_KEY / vars.SQUAD_GITHUB_APP_OWNER
 #     — mints a GitHub App installation token for `squad init`
+#   vars.SQUAD_GITHUB_APP_REPOSITORIES
+#     — comma/newline-separated repositories to scope the token to when using another owner
 #   secrets.SQUAD_GITHUB_TOKEN
 #     — used if the App id is not set
 # Auth precedence: GitHub App installation token > SQUAD_GITHUB_TOKEN > the workflow's
@@ -44,11 +46,13 @@ jobs:
       - name: Mint Squad GitHub App token
         id: squad-app-token
         if: ${{ steps.squad-installation.outputs.installed != 'true' && vars.SQUAD_GITHUB_APP_ID != '' }}
-        uses: actions/create-github-app-token@v3.2.0
+        uses: actions/create-github-app-token@v3.3.0
         with:
           app-id: ${{ vars.SQUAD_GITHUB_APP_ID }}
           private-key: ${{ secrets.SQUAD_GITHUB_APP_PRIVATE_KEY }}
           owner: ${{ vars.SQUAD_GITHUB_APP_OWNER }}
+          repositories: ${{ vars.SQUAD_GITHUB_APP_REPOSITORIES || github.repository }}
+          permission-contents: read
       - name: Initialize Squad team
         if: ${{ steps.squad-installation.outputs.installed != 'true' }}
         env:

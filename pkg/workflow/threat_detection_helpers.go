@@ -8,6 +8,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/workflow/compilerenv"
 )
 
 var threatLog = logger.New("workflow:threat_detection")
@@ -15,6 +16,9 @@ var threatLog = logger.New("workflow:threat_detection")
 // detectionStepCondition is the if condition applied to inline detection steps.
 // Detection steps only run when the detection guard determines there's output to analyze.
 const detectionStepCondition = "always() && steps.detection_guard.outputs.run_detection == 'true'"
+
+// A successful setup step can still return early in warn mode without preparing a detector prompt.
+const detectionExecutionCondition = detectionStepCondition + " && steps.detection_setup.outcome == 'success' && steps.detection_setup.outputs.ready == 'true'"
 
 // stepEnvIndent is the indentation prefix used for env var lines in rendered step YAML.
 const stepEnvIndent = "        "
@@ -70,26 +74,22 @@ func isThreatDetectionExplicitlyDisabledInConfigs(configs []string) bool {
 	return false
 }
 
-func getThreatDetectionAdditionalAllowedDomains(data *WorkflowData) []string {
+func getThreatDetectionAdditionalAllowedDomains(data *WorkflowData, engineID string) []string {
 	if data == nil || data.NetworkPermissions == nil {
 		return []string{}
 	}
 
-	// Evaluate the effective merged detection environment (main + detection-specific
-	// overrides) so that a custom base URL configured only in
+	// Evaluate the effective detection environment so that a custom base URL configured only in
 	// safe-outputs.threat-detection.engine.env also triggers domain propagation.
 	var detectionSpecificEnv map[string]string
 	if data.SafeOutputs != nil && data.SafeOutputs.ThreatDetection != nil && data.SafeOutputs.ThreatDetection.EngineConfig != nil {
 		detectionSpecificEnv = data.SafeOutputs.ThreatDetection.EngineConfig.Env
 	}
-	effectiveEnv := mergeThreatDetectionEngineEnv(data, detectionSpecificEnv)
+	effectiveEnv := mergeThreatDetectionEngineEnv(data, engineID, detectionSpecificEnv)
 
 	hasCustomTarget := effectiveEnv["OPENAI_BASE_URL"] != "" ||
 		effectiveEnv["ANTHROPIC_BASE_URL"] != "" ||
 		effectiveEnv[constants.CopilotProviderBaseURL] != ""
-	if !hasCustomTarget {
-		return []string{}
-	}
 
 	additional := make([]string, 0, len(data.NetworkPermissions.Allowed))
 	seen := make(map[string]struct{})
@@ -97,10 +97,18 @@ func getThreatDetectionAdditionalAllowedDomains(data *WorkflowData) []string {
 		if entry == "" || strings.Contains(entry, "${{") {
 			continue
 		}
-		if len(getEcosystemDomains(entry)) > 0 {
+		if _, exists := seen[entry]; exists {
 			continue
 		}
-		if _, exists := seen[entry]; exists {
+		if entry == "copilot-vendor" || (entry == "codex-vendor" && engineID == string(constants.CodexEngine)) {
+			seen[entry] = struct{}{}
+			additional = append(additional, entry)
+			continue
+		}
+		if !hasCustomTarget {
+			continue
+		}
+		if len(getEcosystemDomains(entry)) > 0 {
 			continue
 		}
 		seen[entry] = struct{}{}
@@ -112,25 +120,46 @@ func getThreatDetectionAdditionalAllowedDomains(data *WorkflowData) []string {
 }
 
 // mergeThreatDetectionEngineEnv composes detection engine env vars from the main
-// engine env and detection-specific overrides.
+// engine env and detection-specific overrides, inheriting main engine settings
+// only when both configurations resolve to the same engine ID.
 //
-// Detection values take precedence when keys overlap. When detectionEnv is empty,
+// Detection values take precedence when keys overlap. For the same engine, when detectionEnv is empty,
 // it still returns a copy of the main env map to avoid aliasing/mutation of the
 // parent WorkflowData.EngineConfig.Env by downstream detection-specific updates.
-func mergeThreatDetectionEngineEnv(data *WorkflowData, detectionEnv map[string]string) map[string]string {
+func mergeThreatDetectionEngineEnv(data *WorkflowData, engineID string, detectionEnv map[string]string) map[string]string {
 	if data == nil || data.EngineConfig == nil || len(data.EngineConfig.Env) == 0 {
 		return detectionEnv
 	}
+	mainEnv := data.EngineConfig.Env
+	if ResolveEngineID(data) != engineID {
+		return detectionEnv
+	}
 	if len(detectionEnv) == 0 {
-		// Return a copy (not the original map) so subsequent detection-specific
-		// env merges cannot mutate the main engine's env map by aliasing.
-		return maps.Clone(data.EngineConfig.Env)
+		return maps.Clone(mainEnv)
 	}
 
-	merged := make(map[string]string, len(data.EngineConfig.Env)+len(detectionEnv))
-	maps.Copy(merged, data.EngineConfig.Env)
+	merged := make(map[string]string, len(mainEnv)+len(detectionEnv))
+	maps.Copy(merged, mainEnv)
 	maps.Copy(merged, detectionEnv)
 	return merged
+}
+
+func resolveWorkflowEngineProvider(data *WorkflowData, engineID string) (LLMProvider, bool) {
+	if data == nil {
+		return "", false
+	}
+	switch engineID {
+	case "claude":
+		return NewClaudeEngine().ResolveLLMProvider(data), true
+	case "codex":
+		return NewCodexEngine().ResolveLLMProvider(data), true
+	case "copilot":
+		return NewCopilotEngine().ResolveLLMProvider(data), true
+	case "pi":
+		return NewPiEngine().ResolveLLMProvider(data), true
+	default:
+		return "", false
+	}
 }
 
 // buildExternalDetectorWorkflowData creates the base WorkflowData for an external
@@ -155,8 +184,9 @@ func buildExternalDetectorWorkflowData(data *WorkflowData, engineID string) *Wor
 	if engineID == "codex" && NewCodexEngine().ResolveLLMProvider(d) != LLMProviderGitHub {
 		d.EngineConfig.LLMProvider = LLMProviderOpenAI
 	}
-	d.EngineConfig.Env = mergeThreatDetectionEngineEnv(data, d.EngineConfig.Env)
-	if d.EngineConfig.APITarget == "" && data.EngineConfig != nil {
+	d.EngineConfig.Env = mergeThreatDetectionEngineEnv(data, engineID, d.EngineConfig.Env)
+	if d.EngineConfig.APITarget == "" && data.EngineConfig != nil &&
+		ResolveEngineID(data) == engineID {
 		d.EngineConfig.APITarget = data.EngineConfig.APITarget
 	}
 	if data.SafeOutputs != nil && data.SafeOutputs.ThreatDetection != nil && data.SafeOutputs.ThreatDetection.MaxAICredits != 0 {
@@ -170,7 +200,7 @@ func buildExternalDetectorWorkflowData(data *WorkflowData, engineID string) *Wor
 }
 
 // resolveExternalDetectorEngineConfig determines the EngineConfig used to install and
-// execute the engine on the external detector path. Precedence:
+// execute the engine on both detector paths. Precedence:
 //  1. An explicit safe-outputs.threat-detection.engine override — cloned with its ID
 //     normalized to the resolved detection engine ID (handles cases like the pi->copilot
 //     detection normalization where the override's declared ID differs from the engine
@@ -190,35 +220,52 @@ func resolveExternalDetectorEngineConfig(data *WorkflowData, engineID string) *E
 	if hasThreatDetectionEngineOverride {
 		return cloneThreatDetectionEngineConfig(engineID, data.SafeOutputs.ThreatDetection.EngineConfig)
 	}
-	if data.EngineConfig != nil && (data.EngineConfig.ID == "" || data.EngineConfig.ID == engineID) {
-		return &EngineConfig{
-			ID:                       engineID,
-			Version:                  data.EngineConfig.Version,
-			Command:                  data.EngineConfig.Command,
-			LLMProvider:              data.EngineConfig.LLMProvider,
-			Config:                   data.EngineConfig.Config,
-			Args:                     data.EngineConfig.Args,
-			HarnessScript:            data.EngineConfig.HarnessScript,
-			Driver:                   data.EngineConfig.Driver,
-			HarnessMaxRetries:        data.EngineConfig.HarnessMaxRetries,
-			HarnessInitialDelayMs:    data.EngineConfig.HarnessInitialDelayMs,
-			HarnessBackoffMultiplier: data.EngineConfig.HarnessBackoffMultiplier,
-			HarnessMaxDelayMs:        data.EngineConfig.HarnessMaxDelayMs,
-			HarnessWatchdogTimeoutMs: data.EngineConfig.HarnessWatchdogTimeoutMs,
-		}
+	if data.EngineConfig != nil && ResolveEngineID(data) == engineID {
+		config := cloneThreatDetectionEngineConfig(engineID, data.EngineConfig)
+		resetDetectionEngineTaskSettings(config)
+		return config
 	}
+
 	return &EngineConfig{ID: engineID}
 }
 
+func resetDetectionEngineTaskSettings(config *EngineConfig) {
+	config.Agent = ""
+	config.MaxTurns = ""
+	config.MaxRuns = 0
+	config.MaxAICredits = 0
+	config.MaxContinuations = 0
+	config.MaxToolCalls = ""
+	config.MaxToolDenials = ""
+	config.Cwd = ""
+	config.Concurrency = ""
+	config.CopilotSDK = false
+	config.ModelRouting = nil
+}
+
 // cloneThreatDetectionEngineConfig returns a shallow copy of source with engine ID
-// normalized to the provided detection engineID. If source is nil, it returns a
-// minimal config containing only the ID.
+// normalized to the provided detection engineID. Runtime-specific settings cannot
+// cross engine identities; provider and detection policy settings remain available.
+// If source is nil, it returns a minimal config containing only the ID.
 func cloneThreatDetectionEngineConfig(engineID string, source *EngineConfig) *EngineConfig {
 	if source == nil {
 		return &EngineConfig{ID: engineID}
 	}
 	cloned := *source
 	cloned.ID = engineID
+	cloned.ModelRouting = nil
+	if source.ID != "" && source.ID != engineID {
+		threatLog.Printf("Resetting runtime settings when normalizing %q to detection engine %q", source.ID, engineID)
+		cloned.Version = ""
+		cloned.ChecksumsSHA256 = ""
+		cloned.Command = ""
+		cloned.Config = ""
+		cloned.Args = nil
+		cloned.HarnessScript = ""
+		cloned.Driver = ""
+		cloned.InlineDriver = nil
+		cloned.Extensions = nil
+	}
 	return &cloned
 }
 
@@ -259,17 +306,60 @@ func engineCoreSecretVarNames(engineID string) []string {
 	}
 }
 
+// resolveThreatDetectionModel returns the explicit or inherited model when configured,
+// otherwise the enterprise override or runtime-aware engine detection default.
+func resolveThreatDetectionModel(data *WorkflowData, engineID string, engine CodingAgentEngine) string {
+	model := inheritedDetectionModel(data, engineID)
+	if data != nil && data.SafeOutputs != nil && data.SafeOutputs.ThreatDetection != nil && data.SafeOutputs.ThreatDetection.Model != "" {
+		model = data.SafeOutputs.ThreatDetection.Model
+	}
+	if model == "" {
+		if engine != nil {
+			model = defaultDetectionModel(engine)
+		} else if defaultModel := compilerenv.ResolveDefaultDetectionModel(""); defaultModel != "" {
+			model = defaultModel
+		} else {
+			model = "detection"
+		}
+	}
+	return model
+}
+
 // inheritedDetectionModel returns the main workflow model when the detection engine can
 // interpret it. Workflows using a custom engine run detection on a built-in engine that
 // does not understand the custom engine's model IDs, so their model is not inherited and
 // the detection engine's own default model is used instead.
-func inheritedDetectionModel(data *WorkflowData) string {
+func inheritedDetectionModel(data *WorkflowData, detectionEngineID string) string {
 	if data == nil {
 		return ""
 	}
 	engineID := ResolveEngineID(data)
+	// Cross-engine detection uses built-in aliases, not the main engine's alias definitions.
+	if engineID != detectionEngineID && len(data.ModelMappings[data.Model]) > 0 {
+		return ""
+	}
 	if engineID == "" || engineID == "pi" || isThreatDetectionCapableEngineID(engineID) {
 		return data.Model
 	}
 	return ""
+}
+
+// defaultDetectionModel preserves an explicit compiler override, but lets runtime
+// organization/repository variables override the built-in detection default. The fallback
+// was accidentally removed from inline detection in a93e36ea4; sharing it here keeps inline
+// and external detection from diverging again.
+func defaultDetectionModel(engine CodingAgentEngine) string {
+	if model := compilerenv.ResolveDefaultDetectionModel(""); model != "" {
+		return model
+	}
+	model := engine.GetDefaultDetectionModel()
+	if model == "" {
+		model = "detection"
+	}
+	suffix := strings.ToUpper(engine.GetID())
+	return compilerenv.BuildModelOverrideExpression(
+		"GH_AW_MODEL_DETECTION_"+suffix,
+		"GH_AW_DEFAULT_MODEL_"+suffix,
+		model,
+	)
 }

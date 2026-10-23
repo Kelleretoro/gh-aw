@@ -10,6 +10,8 @@ VERSION ?= $(shell git describe --tags --always --dirty)
 DOCKER_IMAGE=ghcr.io/github/gh-aw
 DOCKER_PLATFORMS=linux/amd64,linux/arm64
 BASE_REF ?= origin/main
+# Use the runtime's locked Prettier version from every working directory.
+PRETTIER := $(abspath actions/setup/js/node_modules/.bin/prettier)
 JS_IMPACTED_TEST_EXCLUDES=--exclude '**/*.integration.test.cjs' --exclude '**/frontmatter_hash_github_api.test.cjs'
 CI_WORKFLOW_FILE ?= ci.yml
 CI_COVERAGE_ARTIFACT_PATTERN ?= ci-integration-coverage-*
@@ -38,7 +40,7 @@ all: build
 
 # Build the binary, run make deps before this
 .PHONY: build
-build: sync-action-pins sync-action-scripts sync-compat
+build: sync-action-pins sync-action-scripts sync-compat sync-model-aliases
 	go build $(LDFLAGS) -o $(BINARY_NAME) ./cmd/gh-aw
 
 # Build for all platforms
@@ -90,6 +92,11 @@ test: test-unit test-integration
 test-unit-all:
 	go test -v -parallel=4 -timeout=10m -run='^Test' ./... -short
 
+# Run concurrency-heavy package tests with the Go race detector
+.PHONY: test-race
+test-race:
+	go test -race -count=1 -short -parallel=4 -timeout=30m ./pkg/cli ./pkg/console ./pkg/parser ./pkg/workflow
+
 # Test impacted Go unit tests first for faster feedback (target budget: ~30s)
 .PHONY: test-unit
 test-unit:
@@ -121,6 +128,20 @@ test-wasm-golden:
 update-wasm-golden:
 	@echo "Updating wasm golden test files..."
 	go test -v -timeout=5m -run='^TestWasmGolden_' ./pkg/workflow -update
+
+# Run model-routing golden tests without downloading source runs
+.PHONY: verify-model-routing-golden
+verify-model-routing-golden:
+	python3 scripts/test_model_routing_golden.py
+	go test ./pkg/cli -run '^TestModelRoutingGolden' -count=1
+
+# Update model-routing golden files from the committed fixtures
+.PHONY: update-model-routing-golden
+update-model-routing-golden:
+	@echo "Updating model-routing golden files..."
+	UPDATE_MODEL_ROUTING_GOLDEN=1 go test ./pkg/cli -run '^TestModelRoutingGolden' -count=1
+	@echo "Review changed model-routing golden files:"
+	@git status --short --untracked-files=all pkg/cli/testdata/model_routing_golden
 
 # Build wasm and run Node.js golden comparison test
 .PHONY: test-wasm
@@ -212,6 +233,7 @@ fuzz:
 	@echo "Running fuzz tests for 30 seconds..."
 	go test -fuzz=FuzzParseFrontmatter -fuzztime=30s ./pkg/parser/
 	go test -fuzz=FuzzExpressionParser -fuzztime=30s ./pkg/workflow/
+	go test -run='^$$' -fuzz=FuzzBashCommandParserModel -fuzztime=30s ./pkg/workflow/
 
 # Run security regression tests
 .PHONY: test-security
@@ -262,6 +284,7 @@ check-cjs-syntax:
 
 .PHONY: test-js
 test-js: build-js
+	node --test scripts/pr-sous-chef.test.mjs
 	cd actions/setup/js && npm run test:js -- --no-file-parallelism
 	cd eslint-factory && npm test
 
@@ -475,6 +498,11 @@ deps-js: check-node-version
 	cd actions/setup/js && npm ci
 	cd eslint-factory && npm ci
 
+# Verify every locked npm registry dependency through the public 1ES feed.
+.PHONY: check-npm-1es
+check-npm-1es: check-node-version
+	node scripts/check-npm-1es.mjs
+
 .PHONY: build-js
 build-js: deps-js
 	cd actions/setup/js && npm run typecheck
@@ -487,25 +515,45 @@ bundle-js:
 	@echo "✓ bundle-js tool built"
 	@echo "To bundle a JavaScript file: ./bundle-js <input-file> [output-file]"
 
-# Run Bash script tests (check-stale-lock-files, check-workflow-drift, check-cgo-cjs-workflow-purity)
+# Run script tests (authentication probes, stale locks, workflow drift, and workflow purity).
 .PHONY: test-scripts
 test-scripts: build
-	@echo "Running Bash script tests..."
+	@echo "Running script tests..."
+	node --test scripts/agy-authentication.test.cjs
+	node --test scripts/check-npm-1es.test.mjs
+	node --test scripts/release-workflows.test.cjs
 	bash scripts/extract-workflow-frontmatter-keys_test.sh
 	bash scripts/check-stale-lock-files_test.sh
 	bash scripts/check-skill-file-paths_test.sh
 	bash scripts/check-safe-outputs-conformance_test.sh
 	bash scripts/resolve-base-commit_test.sh
+	bash scripts/pr-data-prefetch_test.sh
+	bash scripts/design-decision-gate-prefetch_test.sh
 	bash scripts/check-workflow-drift_test.sh ./$(BINARY_NAME)
 	bash scripts/check-cgo-cjs-workflow-purity_test.sh
 	bash scripts/update-threat-detect-pins_test.sh
+	bash scripts/update-release-pins_test.sh
+	bash scripts/check-go-toolchain_test.sh
+	python3 scripts/test_super_linter_scope.py
+	python3 scripts/test_publish_safe_outputs_node.py
+	bash actions/setup/sh/collect_usage_artifact_files_test.sh
 	bash actions/setup/sh/copy_gh_aw_binary_for_mcp_test.sh
 	bash actions/setup/sh/create_gh_aw_tmp_dir_test.sh
-	@echo "✓ All Bash script tests passed"
+	bash actions/setup/sh/download_docker_images_local_test.sh
+	bash actions/setup/sh/install_awf_binary_test.sh
+	bash actions/setup/sh/install_gh_cli_test.sh
+	bash actions/setup/sh/install_threat_detect_binary_test.sh
+	bash actions/setup/sh/release_integrity_test.sh
+	bash actions/setup/sh/runtime_trust_inventory_test.sh
+	@echo "✓ All script tests passed"
 
-# Test all code (Go, JavaScript, wasm golden, and shell scripts)
+# Test all code and guidance (Go, JavaScript, wasm golden, shell scripts, and guidance contracts)
 .PHONY: test-all
-test-all: test test-js test-wasm-golden test-scripts
+test-all: test test-js test-wasm-golden test-scripts test-guidance
+
+.PHONY: test-guidance
+test-guidance:
+	python3 -m unittest discover -s .github/skills/agentic-workflows/tests -p 'test_*.py'
 
 # Run tests with coverage
 .PHONY: test-coverage
@@ -632,8 +680,8 @@ check-node-version:
 	@if ! command -v node >/dev/null 2>&1; then \
 		echo "Error: Node.js is not installed."; \
 		echo ""; \
-		echo "This project requires Node.js 20 or higher."; \
-		echo "Please install Node.js 20+ and try again."; \
+		echo "This project requires Node.js 24 or higher."; \
+		echo "Please install Node.js 24+ and try again."; \
 		echo ""; \
 		echo "For installation instructions, see:"; \
 		echo "  https://github.com/github/gh-aw/blob/main/CONTRIBUTING.md#prerequisites"; \
@@ -642,10 +690,10 @@ check-node-version:
 	NODE_VERSION=$$(node --version); \
 	NODE_VERSION_NUM=$$(echo "$$NODE_VERSION" | sed 's/v//'); \
 	NODE_MAJOR=$$(echo "$$NODE_VERSION_NUM" | cut -d. -f1); \
-	if [ "$$NODE_MAJOR" -lt 20 ]; then \
+	if [ "$$NODE_MAJOR" -lt 24 ]; then \
 		echo "Error: Node.js version $$NODE_VERSION is not supported."; \
 		echo ""; \
-		echo "This project requires Node.js 20 or higher."; \
+		echo "This project requires Node.js 24 or higher."; \
 		echo "Your current version: $$NODE_VERSION"; \
 		echo ""; \
 		echo "Please upgrade Node.js and try again."; \
@@ -670,7 +718,7 @@ tools: ## Install build-time tools declared in go.mod tool directives
 .PHONY: install-golangci-lint
 install-golangci-lint:
 	@echo "Installing golangci-lint binary..."
-	@GOLANGCI_LINT_VERSION="v2.13.2"; \
+	@GOLANGCI_LINT_VERSION="v2.15.0"; \
 	GOPATH=$$(go env GOPATH); \
 	GOOS=$$(go env GOOS); \
 	GOARCH=$$(go env GOARCH); \
@@ -987,8 +1035,8 @@ fmt-go:
 fmt-cjs:
 	@echo "→ Formatting JavaScript files..."
 	@cd actions/setup/js && npm run format:cjs --silent >/dev/null 2>&1
-	@cd eslint-factory && npx prettier --write '**/*.cjs' '**/*.ts' '**/*.json' --ignore-path ../.prettierignore --log-level=error 2>&1
-	@npx prettier --write 'scripts/**/*.js' --ignore-path .prettierignore --log-level=error 2>&1
+	@cd eslint-factory && "$(PRETTIER)" --write '**/*.cjs' '**/*.ts' '**/*.json' --ignore-path ../.prettierignore --log-level=error 2>&1
+	@"$(PRETTIER)" --write 'scripts/**/*.js' --ignore-path .prettierignore --log-level=error 2>&1
 	@echo "✓ JavaScript files formatted"
 
 # Format JSON files in pkg directory (excluding actions/setup/js, which is handled by npm script)
@@ -996,7 +1044,7 @@ fmt-cjs:
 fmt-json:
 	@echo "→ Formatting JSON files..."
 	@cd actions/setup/js && npm run format:pkg-json --silent >/dev/null 2>&1
-	@npx prettier --write 'pkg/cli/data/models.json' 'actions/setup/js/models.json' --ignore-path .prettierignore --log-level=error 2>&1
+	@"$(PRETTIER)" --write 'pkg/cli/data/models.json' 'actions/setup/js/models.json' --ignore-path .prettierignore --log-level=error 2>&1
 	@echo "✓ JSON files formatted"
 
 # Check formatting
@@ -1013,8 +1061,8 @@ fmt-check:
 .PHONY: fmt-check-cjs
 fmt-check-cjs:
 	cd actions/setup/js && npm run lint:cjs
-	cd eslint-factory && npx prettier --check '**/*.cjs' '**/*.ts' '**/*.json' --ignore-path ../.prettierignore
-	npx prettier --check 'scripts/**/*.js' --ignore-path .prettierignore
+	cd eslint-factory && "$(PRETTIER)" --check '**/*.cjs' '**/*.ts' '**/*.json' --ignore-path ../.prettierignore
+	"$(PRETTIER)" --check 'scripts/**/*.js' --ignore-path .prettierignore
 
 # Check JSON file formatting in pkg directory (excluding actions/setup/js, which is handled by npm script)
 .PHONY: fmt-check-json
@@ -1164,6 +1212,13 @@ install: build
 generate-schema-docs:
 	node scripts/generate-schema-docs.js
 
+.PHONY: session-schemas check-session-schemas
+session-schemas:
+	cd actions/setup/js && npm run schema:session
+
+check-session-schemas:
+	cd actions/setup/js && npm run schema:session:check
+
 # Generate agent factory documentation page
 .PHONY: generate-agent-factory
 generate-agent-factory:
@@ -1235,6 +1290,13 @@ sync-action-pins:
 		echo "⚠ Warning: .github/aw/actions-lock.json does not exist yet"; \
 	fi
 
+# Sync built-in model aliases from pkg/workflow/data to the setup action, where the
+# shared model resolver loads them at run time (see resolve_model_alias.cjs)
+.PHONY: sync-model-aliases
+sync-model-aliases:
+	@cp pkg/workflow/data/model_aliases.json actions/setup/js/model_aliases.json
+	@echo "✓ Built-in model aliases synced to actions/setup/js/model_aliases.json"
+
 # Sync action scripts
 .PHONY: sync-action-scripts
 sync-action-scripts:
@@ -1262,7 +1324,7 @@ sync-install-script-hashes:
 	@bash scripts/update-install-script-hashes.sh
 	@echo "✓ Install script hashes synced successfully"
 
-# Generate audit, logs, and cached logs JSONL item schemas
+# Generate structured CLI output schemas
 .PHONY: schemas
 schemas: build
 	@set -eu; \
@@ -1424,10 +1486,14 @@ help:
 	@echo "  test-impacted-go - Run impacted Go unit tests for current branch changes"
 	@echo "  test-impacted    - Run impacted JavaScript and Go unit tests for current branch changes"
 	@echo "  test-scripts     - Run Bash script tests (check-stale-lock-files, check-workflow-drift)"
-	@echo "  test-all         - Run all tests (Go, JavaScript, wasm golden, and shell scripts)"
+	@echo "  check-npm-1es    - Verify locked npm package tarballs are available in the 1ES feed"
+	@echo "  test-all         - Run all tests (Go, JavaScript, wasm golden, shell scripts, and guidance contracts)"
+	@echo "  test-guidance    - Run agentic-workflows documentation contract tests"
 	@echo "  test-wasm-golden - Run wasm golden tests (Go string API path)"
 	@echo "  test-wasm        - Build wasm and run Node.js golden comparison test"
 	@echo "  update-wasm-golden - Regenerate wasm golden files from current compiler output"
+	@echo "  verify-model-routing-golden - Verify model-routing fixtures against expected outputs"
+	@echo "  update-model-routing-golden - Regenerate model-routing golden files from fixtures"
 	@echo "  test-coverage    - Run tests with coverage report"
 	@echo "  bench            - Run benchmarks for performance testing"
 	@echo "  bench-compare    - Run benchmarks with more iterations (for benchstat comparison)"
@@ -1450,7 +1516,7 @@ help:
 	@echo "  deps             - Install dependencies"
 	@echo "  deps-dev         - Install development dependencies (includes tools)"
 	@echo "  install-shellcheck - Install pinned shellcheck binary"
-	@echo "  check-node-version - Check Node.js version (20 or higher required)"
+	@echo "  check-node-version - Check Node.js version (24 or higher required)"
 	@echo "  golint           - Run golangci-lint (full repository scan)"
 	@echo "  golint-incremental - Run golangci-lint incrementally (only changed files, requires BASE_REF)"
 	@echo "  lint             - Run linter"
@@ -1483,6 +1549,7 @@ help:
 	@echo "  check-stale-schema-binary - Guard: detect modified schema files under pkg/parser/schemas/ without a binary rebuild"
 	@echo "  install          - Install binary locally"
 	@echo "  sync-action-pins - Sync actions-lock.json from .github/aw to pkg/actionpins/data and pkg/workflow/data (runs automatically during build)"
+	@echo "  sync-model-aliases - Sync pkg/workflow/data/model_aliases.json to actions/setup/js/model_aliases.json (runs automatically during build)"
 	@echo "  sync-action-scripts - Sync install-gh-aw.sh and install-gh-aw.ps1 to actions/setup-cli/ (runs automatically during build)"
 	@echo "  sync-compat      - Sync max-agent in .github/aw/compat.json latest interval with DefaultCopilotVersion (runs automatically during build)"
 	@echo "  check-stale-compat - Guard: detect when compat.json max-agent is out of sync with DefaultCopilotVersion"
@@ -1495,6 +1562,8 @@ help:
 	@echo "  compile-cli-workflows - Compile workflows in pkg/cli/workflows (builds binary if missing)"
 	@echo "  dependabot       - Generate Dependabot manifests for npm dependencies in workflows"
 	@echo "  generate-schema-docs - Generate frontmatter full reference documentation from JSON schema"
+	@echo "  session-schemas - Generate canonical and unified session JSON schemas from TypeScript declarations"
+	@echo "  check-session-schemas - Check generated session schemas for declaration drift"
 	@echo "  generate-agent-factory     - Generate agent factory documentation page"
 	@echo "  generate-llms-txt  - Generate llms.txt at repository root from .github/aw/*.md"
 	@echo "  build-slides     - Build slides with Marp to docs/public/slides/gh-aw.html"

@@ -15,6 +15,8 @@ The cost of running an agentic workflow is the sum of two components: **GitHub A
 
 AIC is shown in the `gh aw logs` output table under the **AIC** column, in audit reports alongside raw token counts, and as `{ai_credits_suffix}` in workflow footer templates. For structured output, each run under `.runs[]` includes an `aic` field and each episode under `.episodes[]` includes `total_aic`.
 
+For a concrete model present in gh-aw's embedded pricing catalog, `gh aw compile` includes its provider-specific rates in the firewall configuration. Model parameters such as `?effort=high` are removed for pricing lookup and configuration keys. This keeps AI-credit limits working even when the firewall's built-in pricing table does not yet include the model. Frontmatter `models.providers` pricing takes precedence; compilation does not fetch pricing or infer rates from a related model.
+
 > [!NOTE]
 > AIC values are computed on a best-effort basis using pricing data sourced from the [models.dev](https://models.dev/) catalog and may not exactly match your provider's actual billing. Always verify charges in your provider's billing dashboard.
 
@@ -23,6 +25,8 @@ AIC is shown in the `gh aw logs` output table under the **AIC** column, in audit
 A typical run includes a short pre-activation job (10–30 seconds) and an agent job (1–15 minutes), each with ~1.5 minutes of runner setup overhead billed at standard [GitHub Actions pricing](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions). Inference is charged by the AI provider based on the engine and API token type used.
 
 ## Monitoring Costs with `gh aw logs`
+
+For routed runs, the Model Routing summary separates classifier AIC from selected-model and deviated-traffic cost in each run. Cross-run `--format pretty|markdown` and `--json` output groups task labels and mode by selected model, effort, and router version, with run counts and total/average AIC. Use the selected route to compare the cost of different classification outcomes; classifier cost is routing overhead, while deviated traffic can include sub-agents or overrides.
 
 The `gh aw logs` command surfaces per-run metrics — elapsed duration, token usage, AIC (AI Credits), and turn count — before you decide what to optimize. Use `gh aw audit <run-id>` to deep-dive into a single run's token usage, tool calls, and inference spend; its **Metrics** and **Performance Metrics** sections cover token counts, AIC, turn counts, and estimated cost in one place. For cost trends across multiple runs, use `gh aw logs --format markdown [workflow]` to generate a cross-run report with anomaly detection.
 
@@ -63,19 +67,58 @@ Each run under `.runs[]` includes `duration`, `token_usage`, `aic`, `workflow_na
 
 ### Interpret Episode-Level Usage
 
-`gh aw logs --json` emits three views of the same data: `.runs[]` for individual workflow runs, `.episodes[]` for related runs grouped into one logical execution, and `.edges[]` for inferred parent-child lineage. Use `.runs[]` to find which run was resource-heavy and `.episodes[]` to answer "what did this job use end-to-end?". For non-orchestrated workflows, an episode collapses to a single run.
+`gh aw logs --json` emits three views of the same data: `.runs[]` for individual workflow runs, `.episodes[]` for runs sharing a recorded canonical identity, and `.edges[]` for recorded parent-child lineage between selected runs in the same episode. Use `.runs[]` to find which run was resource-heavy and `.episodes[]` to measure usage across the selected members of a logical execution.
 
-For usage analysis, focus on `total_runs`, `total_tokens`, `total_aic`, `total_duration`, `primary_workflow`, `resource_heavy_node_count`, and `blocked_request_count`. For Claude, Codex, and Copilot runs, `total_aic` is the preferred cost metric because it maps to provider billing in AI Credits (1 AIC = $0.01 USD).
+Episode grouping requires a nonempty propagated `context.episode_id` and preserves that ID, matching OpenTelemetry correlation even when intermediate runs are absent. Runs without canonical identity remain in `.runs[]` and overall summary totals, but do not contribute to `.episodes[]`, episode counts, or edges. Call IDs, matching revision/actor metadata, and `workflow_run` events do not reconstruct episodes. Totals cover only selected members with recorded canonical identity; high confidence indicates lineage evidence, not complete episode coverage. Edges require both runs to share the same canonical ID and connect distinct GitHub run IDs, so reusable workflow hops sharing one run do not produce separate run edges.
+
+Conflicting canonical identities never merge, and uncorrelated runs never bridge episodes. Input ordering does not change episode membership or totals.
+
+Episode root and coverage fields distinguish recorded identity from the selected data:
+
+| Field | Meaning |
+|---|---|
+| `recorded_roots[]` | Distinct root claims from context: string `run_id`, full `workflow_id`, and `repository` when recorded, including claims without a run ID. `observed` is true only when that root run is selected in this episode without a known repository mismatch. Conflicting claims and original repository spelling are preserved; repository identity comparison ignores case. |
+| `representative_run_id`, `representative_workflow` | Selected-data representative, preferring the earliest timestamped run, then the lowest run ID when timestamps are absent or tied. An available workflow name is used when the representative has none. These fields do not identify a missing canonical root. |
+| `coverage.scope` | Always `selected_runs`; totals exclude unselected ancestors and descendants. |
+| `coverage.status` | `partial` when recorded evidence has gaps, contradictions, invalid run IDs, or collection truncation; otherwise `unknown`. Logs do not establish episode completeness, even when every recorded parent and root is selected. |
+| `coverage.reasons` | Machine-readable codes: `missing_recorded_root`, `missing_recorded_parent`, `unverified_root_lineage`, `unverified_parent_lineage`, `conflicting_recorded_roots`, `conflicting_root_lineage`, `conflicting_parent_lineage`, `invalid_recorded_root_run_id`, `invalid_recorded_parent_run_id`, and `collection_truncated`. Unverified lineage means the referenced run is selected but has no canonical episode identity. |
+| `coverage.missing_parent_run_ids` | Sorted, unique recorded caller run IDs absent from the selection. Same-run reusable hops are not missing run-level parents. |
+| `coverage.collection_truncated` | True when collection truncation applies to this episode's selected repository/workflow target, or a reached count limit cannot be scoped more precisely. A scoped continuation does not downgrade unrelated targets. This is not proof that this particular episode has additional members; false does not establish completeness. |
+
+Missing root fields remain unknown; the CLI does not infer a canonical root from a descendant or parse one from an episode ID. Root presence is run-level evidence, not proof that every reusable workflow hop or artifact was collected.
+
+Both compact and verbose JSON retain all canonical episode and edge details, including single-run episodes. `total_duration` sums execution durations rather than measuring wall-clock time between the first and last hop.
+
+To expand a selected run into a bounded episode selection, use
+[`gh aw logs episode`](/gh-aw/setup/cli/#logs-episode-run-id-or-url).
+The collector follows recorded parents and roots and scans explicitly allowed
+repositories for canonical members within a fixed time window. Candidate-run,
+request, and timeout caps are reported in `episode_retrieval`; reaching them
+qualifies coverage rather than presenting the observed total as a complete
+episode cost.
+
+`episodes[].explanation` separates recorded hops from `run_costs`. Reusable
+workflow hops can share a run ID; that run's tokens and AI credits appear once
+in the accounting list and are not attributed to individual hops.
+`gh aw logs episode <run-id-or-url> --view hops` shows the same evidence and gaps.
+Repeated queries reuse the cached snapshot without GitHub requests; use
+`--refresh` to recollect rather than treating cached costs as current.
+
+The episode-level `root_run_id` and `primary_workflow` fields have been removed. Migrate selected-data consumers to `representative_run_id` and `representative_workflow`; use `recorded_roots[]` for canonical root claims. Historical data without `context.episode_id` remains available for per-run analysis but is not backfilled into synthetic episodes.
+
+`--count` defaults to 10 even with a date filter. Choose a larger explicit count and inspect `.continuation` or `.continuations[]` before interpreting a date-window report. Continuing a query can recover more selected data, but neither an exhausted cursor nor high lineage confidence proves that all episode descendants were observed.
+
+For usage analysis, focus on `total_runs`, `total_tokens`, `total_aic`, `total_duration`, `representative_workflow`, `resource_heavy_node_count`, and `blocked_request_count`. For Claude, Codex, and Copilot runs, `total_aic` is the preferred cost metric because it maps to provider billing in AI Credits (1 AIC = $0.01 USD).
 
 ```bash
-# Top 10 costliest logical executions over the past 30 days by AIC
-gh aw logs --start-date -30d --json | \
-  jq '[.episodes[] | {episode: .episode_id, workflow: .primary_workflow, runs: .total_runs, aic: (.total_aic // 0)}]
+# Top 10 costliest selected episodes, from at most 1000 runs in the past 30 days
+gh aw logs --start-date -30d --count 1000 --verbose --json | \
+  jq '[.episodes[] | {episode: .episode_id, workflow: .representative_workflow, runs: .total_runs, aic: (.total_aic // 0)}]
       | sort_by(.aic) | reverse | .[:10]'
 
-# Top 10 heaviest Copilot executions by AIC
-gh aw logs --start-date -30d --engine copilot --json | \
-  jq '[.episodes[] | {episode: .episode_id, workflow: .primary_workflow, runs: .total_runs, aic: (.total_aic // 0)}]
+# Top 10 heaviest selected Copilot episodes by AIC
+gh aw logs --start-date -30d --count 1000 --engine copilot --verbose --json | \
+  jq '[.episodes[] | {episode: .episode_id, workflow: .representative_workflow, runs: .total_runs, aic: (.total_aic // 0)}]
       | sort_by(.aic) | reverse | .[:10]'
 ```
 
@@ -111,9 +154,9 @@ The primary cost lever for most workflows is how often they run.
 
 ## Reducing Cost
 
-### Use Deterministic Checks to Skip the Agent
+### Skip the Agent When It Is Not Needed
 
-The most effective cost reduction is skipping the agent job entirely when it is not needed. The `skip-if-match` and `skip-if-no-match` conditions run during the low-cost pre-activation job and cancel the workflow before the agent starts:
+The cheapest run is the one that never starts the agent. Use `skip-if-match` and `skip-if-no-match` for simple GitHub-search conditions because they run in the low-cost pre-activation job:
 
 ```aw wrap
 on:
@@ -129,11 +172,7 @@ on:
   skip-if-no-match: 'label:needs-triage'
 ```
 
-Use these to filter out noise before incurring inference costs. See [Triggers](/gh-aw/reference/triggers/) for the full syntax.
-
-### Skip the Agent from Steps Using `noop`
-
-When a condition is too complex for a GitHub search query — for example, when you need to call an API, inspect a file, or apply custom business logic — write a `noop` entry to `$GH_AW_SAFE_OUTPUTS` from a `steps:` block. The harness checks for this entry before starting the AI engine and exits cleanly without incurring any AI Credits.
+When the condition needs scripting — for example calling an API, inspecting a file, or applying custom logic — emit a `noop` to `$GH_AW_SAFE_OUTPUTS` from `steps:` or `pre-agent-steps:`. The harness exits before starting the AI engine, so no AI Credits are charged:
 
 ```aw wrap
 steps:
@@ -147,20 +186,7 @@ steps:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-When a `noop` entry is present at harness startup, the agent is never started, no AI Credits are charged, and retries are suppressed. The `noop` message appears in the workflow conclusion comment or step summary. Use `pre-agent-steps:` instead of `steps:` when the check must run immediately before engine startup, such as after MCP configuration.
-
-Compared to `skip-if-match` and `skip-if-no-match`:
-
-| | `skip-if-match` / `skip-if-no-match` | `noop` in `steps:` |
-|---|---|---|
-| **Evaluated in** | Pre-activation job (earliest, cheapest) | Agent job (after checkout and steps) |
-| **Condition type** | GitHub search query | Arbitrary shell or script logic |
-| **Actions minutes saved** | Yes — agent job is never scheduled | No — agent job still runs through setup |
-| **AI Credits saved** | Yes | Yes |
-| **Best for** | Simple label/status/title filters | Complex API calls or file-based conditions |
-
-Prefer `skip-if-match` / `skip-if-no-match` when possible, and reserve `noop` in `steps:` for conditions that need scripting or the full agent job environment.
-
+Use `skip-if-match` / `skip-if-no-match` whenever possible because they also avoid scheduling the agent job. Use `noop` when you need arbitrary shell logic. See [Triggers](/gh-aw/reference/triggers/) for the full syntax.
 ### Choose a Cheaper Model
 
 The `engine.model` field selects the AI model. Smaller or faster models cost significantly less per token while still handling many routine tasks:
@@ -218,6 +244,8 @@ gh-aw does not compile a synthetic price for the selector itself. Requests are a
 
 The same rule applies to `apiProxy.maxModelMultiplierCap`: the cap is evaluated against the multiplier of the *resolved* concrete model, not against the dynamic selector. A selector such as `auto` therefore never bypasses the cap — a request routed to a model whose multiplier exceeds the cap is rejected with HTTP 400 (`model_multiplier_cap_exceeded`). Models without an explicit multiplier use `defaultModelMultiplier` when configured, otherwise the highest configured multiplier.
 
+For task-level model routing, see the [Model Routing guide](/gh-aw/reference/model-routing/) for configuration, and the [Audit](/gh-aw/reference/audit/) page for interpreting classifier overhead, selected-route costs, and deviations in `gh aw audit` and `gh aw logs`.
+
 ### Cap Turns per Run
 
 Use the top-level `max-turns` frontmatter field to cap the number of chat iterations (model responses and tool calls) for a single workflow run. Each additional turn consumes more tokens and Actions compute time, so a turn limit bounds both runaway loops and cost.
@@ -246,6 +274,8 @@ An enterprise-wide default can be set with the compiler process environment vari
 
 Use `max-daily-ai-credits` to set a 24-hour AI Credits cap for one workflow. The guardrail sums runs from the past 24 hours of the same workflow across the repository, regardless of who triggered them.
 
+When a configured [admission service](/gh-aw/specs/admission-service-specification/) returns a valid approval, that decision supersedes daily validation for the current activation. The daily scan and its preparatory API work are skipped, but usage collection and historical ledger publication continue. Admission-disabled runs and ignored admission outages still use the daily guardrail below; denial or invalid approval blocks activation. The primary and optional threat-detection/evals allowances are passed to existing jobs and replace their respective runtime credit limits; omitted optional allowances retain the configured component limits.
+
 ```aw wrap
 max-daily-ai-credits: 15M
 ```
@@ -255,13 +285,23 @@ When the total from the past 24 hours exceeds this threshold, activation reports
 When omitted, the guardrail inherits the default daily limit (5000 AI Credits unless overridden). Positive values accept plain integers or `K`/`M` suffixes such as `100M`.
 
 > [!CAUTION]
-> Every activation lists the current 24-hour window (up to 10 pages of 100 completed runs). A cold scan also reads usage artifacts. Activation publishes all resolved observations, including nonzero usage, so later scans can reuse them without reading each historical artifact again.
+> Every activation requiring daily fallback lists the current 24-hour window (up to 10 pages of 100 completed runs). A cold scan also reads usage artifacts. Activation publishes all resolved observations, including nonzero usage, so later scans can reuse them without reading each historical artifact again.
 
 Scan snapshots are optional accelerators, not authoritative daily totals. Each record must match the repository, workflow, run attempt, and completed-run timestamps. Missing, expired, and incomplete snapshots require resolving the missing records. The artifact fallback accepts the same workflow's `pull_request_target` runs and default-branch `push`, `schedule`, or `workflow_dispatch` runs; contributor-controlled `pull_request` snapshots are not trusted. This storage path does not require writable Actions cache scopes.
 
-An API failure or incomplete history stops activation rather than reporting an under-budget result from partial data. Quota decisions use business-response headers, including artifact requests; inspection does not continue to the next run after a failure. Respect any logged reset or `Retry-After` deadline before retrying. A missing usage artifact is not zero usage unless the completed attempt's job metadata confirms that the generated billable jobs were skipped.
+An incomplete history, permanent API failure, or quota restriction stops activation rather than reporting an under-budget result from partial data. Transient reads receive bounded retries; unresolved accounting uses the per-run maximum when available. Respect any logged reset or `Retry-After` deadline before retrying. A missing usage artifact is not zero usage unless complete job metadata confirms that all generated AI-powered jobs were skipped or never assigned a runner, with no executed jobs carried forward from earlier attempts.
+
+Activation logs identify artifact discovery and accounting failures with the underlying error and guidance to check Actions read permissions, artifact retention, and accounting coverage. The activation summary separates recorded usage, confirmed-zero runs, and conservative estimates. The exceeded-guardrail log also reports measured and assumed AIC separately. These totals are guardrail accounting, not provider billing; reconcile charges with the provider.
 
 Cold scans check the compiler-owned `agent`, `detection`, and `evals` jobs independently. Every executed component needs valid accounting; empty collector placeholders and evaluation results alone do not prove zero usage. Raw token usage takes precedence over overlapping summaries. Invalid numeric fields make the accounting unknown. Failed-only reruns retain successful components from earlier attempts, but a rerun component needs a producer artifact from its own job execution. Missing carried-forward usage remains unknown. Older snapshots without component-coverage validation are not reused.
+
+#### Repo-Memory Bootstrap
+
+With `max-daily-ai-credits.backend: repo-memory`, a missing memory branch does not require an insecure override. After the clone step confirms the branch is absent, activation checks authoritative workflow history and usage artifacts under the same daily limit. This requires Actions read access and fails closed on incomplete accounting or API restrictions.
+
+Recompile existing workflows after upgrading so activation receives the clone result required for secure bootstrap.
+
+The trusted memory writer records when ledger coverage starts. New branches and existing ledgers without coverage metadata continue using artifact accounting until that coverage is at least 24 hours old; subsequent activations use the trusted cloned ledger. This prevents a new empty ledger from erasing recent spending. Preserve the coverage files under `daily-aic-ledger/` with the JSONL shards. Do not enable `GH_AW_ALLOW_INSECURE_REPO_MEMORY_AIC` or `continue-on-error` to bootstrap.
 
 To disable the guardrail explicitly, set `-1`:
 
@@ -294,7 +334,7 @@ EOF
 > `repository_dispatch`, and `workflow_dispatch` runs, including dispatches carrying internal
 > `aw_context` metadata.
 
-### Roll out org/repo defaults with enterprise controls
+### Roll Out Shared Defaults
 
 For large installations, set baseline model and token guardrails once and let individual workflows override them only when needed:
 
@@ -304,7 +344,7 @@ For large installations, set baseline model and token guardrails once and let in
 gh aw env get defaults.yml --scope org --org MY_ORG
 ```
 
-2. Update and apply shared defaults in batch:
+2. Update and apply shared defaults:
 
 ```yaml
 default_max_ai_credits: "5M"
@@ -318,13 +358,12 @@ default_model_codex: "gpt-5.4-mini"
 gh aw env update defaults.yml --scope org --org MY_ORG
 ```
 
-`gh aw env update` previews changes before applying them. Use `--yes` to skip confirmation in automation or `--dry-run` to preview only. Set a field to `null` to delete the corresponding variable. Unknown YAML keys are rejected; `default_max_turns`, `default_timeout_minutes`, `default_agent_job_timeout_minutes`, and `default_detection_job_timeout_minutes` must be positive integers; and `default_max_ai_credits` and `default_max_daily_ai_credits` must be non-zero integers. Negative values disable the corresponding guardrail.
+`gh aw env update` previews changes before applying them. Use `--yes` to skip confirmation in automation or `--dry-run` to preview only. Set a field to `null` to delete the corresponding variable. Unknown YAML keys are rejected. `default_max_turns`, `default_timeout_minutes`, `default_agent_job_timeout_minutes`, and `default_detection_job_timeout_minutes` must be positive integers; `default_max_ai_credits` and `default_max_daily_ai_credits` must be non-zero integers. Negative values disable the corresponding guardrail.
 
 3. If you compile workflows in CI, pass compiler-read defaults into the compiler process environment, for example via `${{ vars.* }}`: `GH_AW_DEFAULT_MAX_TURNS`, `GH_AW_DEFAULT_MAX_TURN_CACHE_MISSES`, and `GH_AW_DEFAULT_DETECTION_MODEL`.
 
 > [!TIP]
 > `GH_AW_DEFAULT_MODEL_*` and `GH_AW_DEFAULT_*_TIMEOUT_MINUTES` are resolved at workflow runtime via `${{ vars.* }}` in compiled YAML, while max-turn and token defaults are read by the compiler process at compile time.
-
 ### Rate Limiting and Concurrency
 
 Use `user-rate-limit` to cap how many times a user can trigger the workflow in a given window, and rely on concurrency controls to serialize runs rather than letting them pile up:
@@ -472,7 +511,7 @@ The [githubnext/agentic-ops](https://github.com/githubnext/agentic-ops) reposito
 
 ## Common Scenario Estimates
 
-These are rough budgeting estimates; actual costs vary by prompt size, tool usage, model, and provider pricing.
+These rough estimates help with early budgeting; actual costs vary by prompt size, tool usage, model, and provider pricing.
 
 | Scenario | Frequency | Actions minutes/month | Inference/month |
 |---|---|---:|---|
@@ -482,8 +521,7 @@ These are rough budgeting estimates; actual costs vary by prompt size, tool usag
 | On-demand via slash command | User-controlled | Varies | Varies |
 
 > [!TIP]
-> Create separate `COPILOT_GITHUB_TOKEN` service accounts per repository or team to attribute spend by workflow.
-
+> Use separate `COPILOT_GITHUB_TOKEN` service accounts per repository or team to attribute spend by workflow.
 ## Learn More
 
 - [Audit Commands](/gh-aw/reference/audit/) - Single-run analysis, diff, and cross-run reporting

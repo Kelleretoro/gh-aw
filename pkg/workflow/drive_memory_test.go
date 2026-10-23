@@ -61,6 +61,11 @@ func TestExtractDriveMemoryConfig(t *testing.T) {
 			wantErr: "invalid drive-memory drive-name",
 		},
 		{
+			name:    "invalid allowed extension",
+			raw:     map[string]any{"allowed-extensions": []any{".json", "invalid"}},
+			wantErr: `invalid allowed-extension "invalid"`,
+		},
+		{
 			name:    "non-object array entry",
 			raw:     []any{"notes"},
 			wantErr: "array entries must be objects",
@@ -280,13 +285,25 @@ func TestDriveMemoryValidationConfigAndGeneratedSteps(t *testing.T) {
 					"timeout-minutes": 1,
 				},
 			},
+			map[string]any{
+				"id":         "schema",
+				"drive-name": "agent-state-schema",
+				"validation": map[string]any{
+					"json-schemas": []any{
+						map[string]any{"file": "state.json", "format": "json", "schema": map[string]any{"type": "object"}},
+					},
+				},
+			},
 		}},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, config)
-	require.Len(t, config.Drives, 1)
+	require.Len(t, config.Drives, 2)
 	require.NotNil(t, config.Drives[0].Validation)
 	assert.Equal(t, 1, config.Drives[0].Validation.TimeoutMinutes)
+	require.NotNil(t, config.Drives[1].Validation)
+	assert.Empty(t, config.Drives[1].Validation.Script)
+	require.Len(t, config.Drives[1].Validation.JSONSchemas, 1)
 
 	data := &WorkflowData{DriveMemoryConfig: config}
 
@@ -295,12 +312,15 @@ func TestDriveMemoryValidationConfigAndGeneratedSteps(t *testing.T) {
 	validationYAML := validation.String()
 	assert.Contains(t, validationYAML, "Validate drive-memory file types (default)")
 	assert.Contains(t, validationYAML, "VALIDATION_SCRIPT_B64:")
+	assert.Contains(t, validationYAML, "MEMORY_JSON_SCHEMAS_REQUIRED: 'true'")
 	assert.Contains(t, validationYAML, "validate_memory_step.cjs")
 	assert.Contains(t, validationYAML, "id: "+driveMemoryValidationStepID("default"))
+	assert.Contains(t, validationYAML, "id: "+driveMemoryValidationStepID("schema"))
 
 	var persist strings.Builder
 	generateDriveMemoryPersistence(&persist, data, func(action string) string { return action + "@test-pin" })
 	assert.Contains(t, persist.String(), "steps."+driveMemoryValidationStepID("default")+".outcome == 'success'")
+	assert.Contains(t, persist.String(), "steps."+driveMemoryValidationStepID("schema")+".outcome == 'success'")
 }
 
 func TestDriveMemoryRestorePreservesIntegrityLevel(t *testing.T) {

@@ -17,8 +17,8 @@ concurrency:
   cancel-in-progress: false
 engine:
   id: codex
-  model-provider: github
-model: copilot/gpt-5.3-codex
+  model-provider: openai
+model: openai/gpt-5.6-terra
 network: {}
 tools:
   cache-memory:
@@ -28,8 +28,17 @@ tools:
     toolsets: [issues, repos, actions]
 jobs:
   windows_probe:
-    name: Windows runner probe
+    name: windows_probe
     needs: [activation]
+    # Reusable callers must grant the union of the callee's job permissions.
+    permissions:
+      actions: read
+      contents: read
+      copilot-requests: write
+      discussions: write
+      id-token: write
+      issues: write
+      pull-requests: write
     uses: ./.github/workflows/windows.lock.yml
     with:
       topic: "Windows runner support"

@@ -11,6 +11,7 @@ import (
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/sliceutil"
+	"github.com/github/gh-aw/pkg/workflow/aw"
 )
 
 // buildMainJobCondition computes the if-condition string for the main agent job.
@@ -51,20 +52,20 @@ func (c *Compiler) buildMainJobDependencies(data *WorkflowData, activationJobCre
 		depends = []string{string(constants.ActivationJobName)} // Depend on the activation job only if it exists
 	}
 
-	// Add custom jobs as dependencies only if they don't depend on pre_activation or agent
+	// Add custom jobs as dependencies only if they don't depend on pre_activation or agent.
 	// Custom jobs that depend on pre_activation are now dependencies of activation,
 	// so the agent job gets them transitively through activation
 	// Custom jobs that depend on agent should run AFTER the agent job, not before it
-	if data.Jobs != nil {
-		for _, jobName := range sliceutil.SortedKeys(data.Jobs) {
-			// Skip built-in jobs as they are handled separately and should not become custom dependencies.
-			if isBuiltinJobName(jobName) {
-				continue
-			}
-			if configMap, ok := data.Jobs[jobName].(map[string]any); ok {
-				if !jobDependsOnPreActivation(configMap) && !jobDependsOnAgent(configMap) {
-					depends = append(depends, jobName)
-				}
+	graph := aw.AuthoredJobDependencies(data.Jobs)
+	for _, jobName := range sliceutil.SortedKeys(data.Jobs) {
+		// Skip built-in jobs as they are handled separately and should not become custom dependencies.
+		if isBuiltinJobName(jobName) {
+			continue
+		}
+		if configMap, ok := data.Jobs[jobName].(map[string]any); ok {
+			beforeActivation := jobDependsOnPreActivation(configMap) && !jobDependsOnActivation(configMap)
+			if !beforeActivation && !graph.DependsOn(jobName, string(constants.AgentJobName)) {
+				depends = append(depends, jobName)
 			}
 		}
 	}
@@ -95,8 +96,8 @@ func (c *Compiler) buildMainJobDependencies(data *WorkflowData, activationJobCre
 
 	referencedJobs := c.getReferencedCustomJobs(contentBuilder.String(), data.Jobs)
 	for _, jobName := range referencedJobs {
-		// Skip built-in jobs as they are handled separately and should not become custom dependencies.
-		if isBuiltinJobName(jobName) {
+		// References cannot make post-agent jobs available before the agent.
+		if isBuiltinJobName(jobName) || graph.DependsOn(jobName, string(constants.AgentJobName)) {
 			continue
 		}
 		if !slices.Contains(depends, jobName) {
@@ -104,6 +105,7 @@ func (c *Compiler) buildMainJobDependencies(data *WorkflowData, activationJobCre
 			compilerMainJobLog.Printf("Added direct dependency on custom job '%s' because it's referenced in workflow content or engine.env", jobName)
 		}
 	}
+	data.AgentJobNeeds = depends
 	return depends, engineEnvContent
 }
 
@@ -145,7 +147,7 @@ func buildMainJobCoreOutputs(data *WorkflowData) map[string]string {
 	if isFirewallEnabled(data) || data.AI == string(constants.CopilotEngine) {
 		usageStepID = constants.ParseTokenUsageStepID
 	}
-	return map[string]string{
+	outputs := map[string]string{
 		"model": fmt.Sprintf("${{ needs.%s.outputs.model }}", constants.ActivationJobName),
 		// aic is the total AI Credits cost for the run (1 AIC == 0.01 USD), captured by the
 		// MCP gateway log parser step and passed to downstream jobs for footer rendering.
@@ -166,13 +168,19 @@ func buildMainJobCoreOutputs(data *WorkflowData) map[string]string {
 		// setup-parent-span-id propagates the global setup parent span ID across jobs.
 		"setup-parent-span-id": "${{ steps.setup.outputs.parent-span-id || steps.setup.outputs.span-id }}",
 	}
+	if isModelRoutingEnabled(data) {
+		outputs["model"] = fmt.Sprintf("${{ steps.%s.outputs.model || needs.%s.outputs.model }}", constants.ParseTokenUsageStepID, constants.ActivationJobName)
+		outputs["model_effort"] = fmt.Sprintf("${{ steps.%s.outputs.model_effort }}", constants.ParseTokenUsageStepID)
+		outputs["model_routing_status"] = fmt.Sprintf("${{ steps.%s.outputs.model_routing_status }}", constants.ParseTokenUsageStepID)
+	}
+	return outputs
 }
 
 // addMainJobEngineErrorOutputs adds engine error detection output declarations to outputs when the
 // configured engine provides an error-detection script ID.
 func (c *Compiler) addMainJobEngineErrorOutputs(outputs map[string]string, data *WorkflowData) {
 	// Add inference_access_error, mcp_policy_error, agentic_engine_timeout,
-	// model_not_supported_error, http_400_response_error, invocation_cap_exceeded,
+	// model_not_supported_error, model_endpoint_mismatch_error, http_400_response_error, invocation_cap_exceeded,
 	// and shell_expansion_guard_rejected outputs for engines
 	// that provide an error detection step.
 	// These outputs are written by the host-runner detect-agent-errors step (via the
@@ -194,6 +202,8 @@ func (c *Compiler) addMainJobEngineErrorOutputs(outputs map[string]string, data 
 	compilerMainJobLog.Printf("Added agentic_engine_timeout output (engine=%s, step=%s)", engine.GetID(), constants.DetectAgentErrorsStepID)
 	outputs["model_not_supported_error"] = fmt.Sprintf("${{ %s.model_not_supported_error || 'false' }}", stepRef)
 	compilerMainJobLog.Printf("Added model_not_supported_error output (engine=%s, step=%s)", engine.GetID(), constants.DetectAgentErrorsStepID)
+	outputs["model_endpoint_mismatch_error"] = fmt.Sprintf("${{ %s.model_endpoint_mismatch_error || 'false' }}", stepRef)
+	compilerMainJobLog.Printf("Added model_endpoint_mismatch_error output (engine=%s, step=%s)", engine.GetID(), constants.DetectAgentErrorsStepID)
 	outputs["http_400_response_error"] = fmt.Sprintf("${{ %s.http_400_response_error || 'false' }}", stepRef)
 	compilerMainJobLog.Printf("Added http_400_response_error output (engine=%s, step=%s)", engine.GetID(), constants.DetectAgentErrorsStepID)
 	outputs["invocation_cap_exceeded"] = fmt.Sprintf("${{ %s.invocation_cap_exceeded || 'false' }}", stepRef)
@@ -211,6 +221,9 @@ func (c *Compiler) addMainJobEngineErrorOutputs(outputs map[string]string, data 
 // buildMainJobOutputs builds the complete outputs map for the main agent job.
 func (c *Compiler) buildMainJobOutputs(data *WorkflowData) map[string]string {
 	outputs := buildMainJobCoreOutputs(data)
+	if checkoutError := dynamicCheckoutFailureOutput(data.CheckoutConfigs); checkoutError != "" {
+		outputs["checkout_error"] = checkoutError
+	}
 
 	// Note: secret_verification_result is now an output of the activation job (not the agent job).
 	// The validate-secret step runs in the activation job, before context variable validation.
@@ -229,6 +242,9 @@ func (c *Compiler) buildMainJobOutputs(data *WorkflowData) map[string]string {
 		outputs["output_types"] = "${{ steps.collect_output.outputs.output_types }}"
 		outputs["has_patch"] = "${{ steps.collect_output.outputs.has_patch }}"
 	}
+	if isWorkQueueParticipant(data) {
+		outputs["work_queue_origin"] = "${{ steps.work_queue_intent_origin.outputs.work_queue_origin }}"
+	}
 
 	// Add checkout_pr_success output to track PR checkout status only if the checkout-pr step will be generated
 	// This is used by the conclusion job to skip failure handling when checkout fails
@@ -236,6 +252,7 @@ func (c *Compiler) buildMainJobOutputs(data *WorkflowData) map[string]string {
 	// The checkout-pr step is only generated when the workflow has contents read permission
 	if ShouldGeneratePRCheckoutStep(data) {
 		outputs["checkout_pr_success"] = "${{ steps.checkout-pr.outputs.checkout_pr_success || 'true' }}"
+		outputs["checkout_pr_invalidated"] = "${{ steps.checkout-pr.outputs.checkout_pr_invalidated || 'false' }}"
 		compilerMainJobLog.Print("Added checkout_pr_success output (workflow has contents read access)")
 	} else {
 		compilerMainJobLog.Print("Skipped checkout_pr_success output (workflow lacks contents read access)")
@@ -262,6 +279,16 @@ func (c *Compiler) buildMainJobEnv(data *WorkflowData) map[string]string { //nol
 		env = make(map[string]string)
 		env["GH_AW_ENGINE_VERSION"] = fmt.Sprintf("%q", data.EngineConfig.Version)
 	}
+	if isWorkQueueEnabled(data) {
+		if env == nil {
+			env = make(map[string]string)
+		}
+		env["GH_AW_WORK_QUEUE_ENABLED"] = `"true"`
+		env["GH_AW_WORK_QUEUE_ROLE"] = fmt.Sprintf("%q", workQueueRuntimeRole(data))
+		if isWorkQueueParticipant(data) {
+			env["GH_AW_WORK_QUEUE_INTENT_ORIGIN"] = `"${{ needs.activation.outputs.work_queue_origin }}"`
+		}
+	}
 
 	// Disable the Chromium process sandbox for playwright CLI mode.
 	// GitHub Actions runners are containerised environments where kernel namespace
@@ -283,6 +310,9 @@ func (c *Compiler) buildMainJobEnv(data *WorkflowData) map[string]string { //nol
 		// Set GH_AW_MCP_LOG_DIR for safe outputs MCP server logging
 		// Store in mcp-logs directory so it's included in mcp-logs artifact
 		env["GH_AW_MCP_LOG_DIR"] = constants.TmpMcpLogsSafeOutputsDir
+
+		// The gateway requires this placeholder to resolve even outside trial mode.
+		env["GH_AW_TARGET_REPO_SLUG"] = `""`
 
 		// Note: GH_AW_SAFE_OUTPUTS, GH_AW_SAFE_OUTPUTS_CONFIG_PATH, and
 		// GH_AW_SAFE_OUTPUTS_TOOLS_PATH are set via a run step (see generateSetRuntimePathsStep)
@@ -346,6 +376,12 @@ func (c *Compiler) buildMainJobEnv(data *WorkflowData) map[string]string { //nol
 // permissions from gh CLI commands found in all agent job step sections.
 func (c *Compiler) buildMainJobPermissions(data *WorkflowData) (string, error) {
 	permissions := augmentPermissionsForDevMode(c, data, filterJobLevelPermissions(data.Permissions, data.CachedPermissions))
+	permissions = augmentPermissionsForLedger(data, permissions)
+	if isWorkQueueParticipant(data) {
+		perms := NewPermissionsParser(permissions).ToPermissions()
+		perms.Set(PermissionActions, PermissionRead)
+		permissions = filterJobLevelPermissions(perms.RenderToYAML())
+	}
 
 	agentAllScripts := collectAgentJobScripts(data)
 	if len(agentAllScripts) == 0 {
@@ -384,12 +420,19 @@ func (c *Compiler) buildMainJobPermissions(data *WorkflowData) (string, error) {
 	return permissions, nil
 }
 
-func operationalValueGraderEnabled(data *WorkflowData) bool {
-	if data == nil || data.Graders == nil {
-		return false
+func augmentPermissionsForLedger(data *WorkflowData, permissions string) string {
+	if data.LedgerConfig == nil || !data.LedgerConfig.Enabled() {
+		return permissions
 	}
-	grader, ok := data.Graders.Graders["operational-value"]
-	return ok && (grader.Enabled == nil || *grader.Enabled)
+	if permissions == "" {
+		return NewPermissionsContentsRead().RenderToYAML()
+	}
+	parsed := NewPermissionsParser(permissions).ToPermissions()
+	if level, exists := parsed.Get(PermissionContents); !exists || level == PermissionNone {
+		parsed.Set(PermissionContents, PermissionRead)
+		return filterJobLevelPermissions(parsed.RenderToYAML())
+	}
+	return permissions
 }
 
 // augmentPermissionsForDevMode adds contents: read to permissions when the compiler is in

@@ -23,18 +23,6 @@ const (
 	// by default when guard policies are configured. Set tools.github.integrity-proxy: false
 	// to disable it. The codemod "features-difc-proxy-to-tools-github" migrates this flag.
 	DIFCProxyFeatureFlag FeatureFlag = "difc-proxy"
-	// CliProxyFeatureFlag enables the AWF CLI proxy sidecar.
-	// When enabled, the compiler starts a difc-proxy on the host before AWF and
-	// injects --difc-proxy-host and --difc-proxy-ca-cert into the AWF command,
-	// giving the agent secure gh CLI access without exposing GITHUB_TOKEN.
-	// The token is held in an mcpg DIFC proxy on the host, enforcing
-	// guard policies and audit logging.
-	//
-	// Workflow frontmatter usage:
-	//
-	//	features:
-	//	  cli-proxy: true
-	CliProxyFeatureFlag FeatureFlag = "cli-proxy"
 	// AwfDiagnosticLogsFeatureFlag enables AWF operational Docker diagnostics
 	// collection on failure. When enabled, AWF collects capped container logs,
 	// container exit codes, mount metadata, and sanitized compose config into
@@ -86,6 +74,14 @@ const (
 	//	features:
 	//	  dangerously-disable-sandbox-agent: true
 	DangerouslyDisableSandboxAgentFeatureFlag FeatureFlag = "dangerously-disable-sandbox-agent"
+	// DangerouslyAllowRolesReadAndPullRequestTargetFeatureFlag suppresses the
+	// pull_request_target/on.roles read-or-all warning in non-strict mode only.
+	//
+	// Workflow frontmatter usage:
+	//
+	//	features:
+	//	  dangerously-allow-roles-read-and-pull-request-target: true
+	DangerouslyAllowRolesReadAndPullRequestTargetFeatureFlag FeatureFlag = "dangerously-allow-roles-read-and-pull-request-target"
 	// GHAWDetectionFeatureFlag controls the external threat-detect binary detection path.
 	// The external detector is enabled by default. Set this flag to false to use
 	// the legacy inline engine execution path.

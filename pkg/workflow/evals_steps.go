@@ -170,6 +170,7 @@ func (c *Compiler) buildEvalsEngineSteps(data *WorkflowData) []string { //nolint
 		copy := *data.EngineConfig
 		evalsEngineConfig = &copy
 		evalsEngineConfig.Agent = ""
+		evalsEngineConfig.ModelRouting = nil
 		if evalsEngineConfig.ID == "" {
 			evalsEngineConfig.ID = engineID
 		}
@@ -219,13 +220,17 @@ func (c *Compiler) buildEvalsEngineSteps(data *WorkflowData) []string { //nolint
 		ModelCosts:        data.ModelCosts,      // propagate pricing providers so evals awf-config.json can resolve AI-credit costs
 		CompiledVersion:   data.CompiledVersion, // propagate compiler version so install steps can inject GH_AW_COMPILED_VERSION
 		NetworkPermissions: &NetworkPermissions{
-			Allowed: getThreatDetectionAdditionalAllowedDomains(data),
+			Allowed: getThreatDetectionAdditionalAllowedDomains(data, engineID),
 		},
 		SandboxConfig: &SandboxConfig{
 			Agent: &AgentSandboxConfig{
-				Type: SandboxTypeAWF,
+				Type:            SandboxTypeAWF,
+				ChecksumsSHA256: getAWFChecksumsSHA256(data),
 			},
 		},
+	}
+	if isOTLPEnabled(data) {
+		evalsData.ExcludedEnv = append(evalsData.ExcludedEnv, otlpSandboxExcludedEnvVarNames...)
 	}
 	if firewallConfig := getFirewallConfig(data); firewallConfig != nil {
 		firewallCopy := *firewallConfig
@@ -242,12 +247,12 @@ func (c *Compiler) buildEvalsEngineSteps(data *WorkflowData) []string { //nolint
 	var steps []string
 
 	// Install the engine binary (fresh runner has no engine installed).
-	installSteps := engine.GetInstallationSteps(evalsData)
+	installSteps := applyNodeSetupOverrides(engine.GetInstallationSteps(evalsData), data)
 
 	// Ensure Node.js is on PATH when the engine harness requires it.
 	// Guard against engines whose install steps already bundle Setup Node.js.
 	if engineRequiresNodeHarness(engine) && !installStepsContainNodeSetup(installSteps) {
-		for _, line := range GenerateNodeJsSetupStep() {
+		for _, line := range generateNodeJsSetupStepForWorkflow(data) {
 			steps = append(steps, line+"\n")
 		}
 	}
@@ -388,9 +393,9 @@ await main();`
 	}
 	if len(secretReferences) > 0 {
 		steps = append(steps, "        env:\n")
-		escapedRefs := make([]string, len(secretReferences))
-		for i, ref := range secretReferences {
-			escapedRefs[i] = escapeSingleQuoteBackslash(ref)
+		escapedRefs := make([]string, 0, len(secretReferences))
+		for _, ref := range secretReferences {
+			escapedRefs = append(escapedRefs, escapeSingleQuoteBackslash(ref))
 		}
 		steps = append(steps, fmt.Sprintf("          GH_AW_SECRET_NAMES: '%s'\n", strings.Join(escapedRefs, ",")))
 		for _, secretName := range secretReferences {
@@ -442,10 +447,14 @@ func (c *Compiler) buildUploadEvalsArtifactStep(data *WorkflowData) []string {
 		"      - name: Collect evals token usage\n",
 		"        if: always()\n",
 		"        run: |\n",
-		fmt.Sprintf("          for root in \"%s\" \"%s\"; do\n", auditDir, proxyLogsDir),
-		"            source=\"$root/api-proxy-logs/token-usage.jsonl\"\n",
-		"            if [ -s \"$source\" ]; then cp \"$source\" /tmp/gh-aw/evals_token_usage.jsonl; fi\n",
-		"          done\n",
+		"          if [ -n \"${AWF_TOKEN_USAGE_LOG:-}\" ] && [ -f \"$AWF_TOKEN_USAGE_LOG\" ]; then\n",
+		"            cp \"$AWF_TOKEN_USAGE_LOG\" /tmp/gh-aw/evals_token_usage.jsonl\n",
+		"          else\n",
+		fmt.Sprintf("            for root in \"%s\" \"%s\"; do\n", auditDir, proxyLogsDir),
+		"              source=\"$root/api-proxy-logs/token-usage.jsonl\"\n",
+		"              if [ -s \"$source\" ]; then cp \"$source\" /tmp/gh-aw/evals_token_usage.jsonl; fi\n",
+		"            done\n",
+		"          fi\n",
 		"      - name: Upload evals results\n",
 		"        if: always() && steps.redact_evals_results.outcome == 'success'\n",
 		fmt.Sprintf("        uses: %s\n", c.getActionPin("actions/upload-artifact")),
@@ -560,17 +569,14 @@ func marshalEvalsQuestions(questions []EvalDefinition) string {
 	if len(questions) == 0 {
 		return "[]"
 	}
-	var sb strings.Builder
-	sb.WriteString("[")
-	for i, q := range questions {
-		if i > 0 {
-			sb.WriteString(",")
-		}
-		// Use json.Marshal for robust string quoting (handles all JSON escape sequences)
-		idJSON, _ := json.Marshal(q.ID)             //nolint:jsonmarshalignoredeerror // marshaling a string cannot fail
-		questionJSON, _ := json.Marshal(q.Question) //nolint:jsonmarshalignoredeerror // marshaling a string cannot fail
-		fmt.Fprintf(&sb, `{"id":%s,"question":%s}`, idJSON, questionJSON)
+	type evalQuestion struct {
+		ID       string `json:"id"`
+		Question string `json:"question"`
 	}
-	sb.WriteString("]")
-	return sb.String()
+	serializedQuestions := make([]evalQuestion, 0, len(questions))
+	for _, question := range questions {
+		serializedQuestions = append(serializedQuestions, evalQuestion{ID: question.ID, Question: question.Question})
+	}
+	encoded, _ := json.Marshal(serializedQuestions) //nolint:jsonmarshalignoredeerror // marshaling strings cannot fail
+	return string(encoded)
 }

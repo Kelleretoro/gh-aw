@@ -282,10 +282,6 @@ func collectSafeJobArtifactPaths(jobs map[string]*SafeJobConfig) []string {
 	return paths
 }
 
-func hasSafeJobArtifactPaths(data *WorkflowData) bool {
-	return data != nil && data.SafeOutputs != nil && len(collectSafeJobArtifactPaths(data.SafeOutputs.Jobs)) > 0
-}
-
 func isEmptySafeJobRunsOn(value any) bool {
 	if _, isObject := value.(map[string]any); isObject {
 		return false
@@ -324,6 +320,7 @@ func (c *Compiler) buildSafeJobs(data *WorkflowData, threatDetectionEnabled bool
 		job := &Job{
 			Name:        normalizedJobName,
 			Environment: c.indentYAMLLines(resolveSafeOutputsEnvironment(data), "    "),
+			Env:         c.buildJobLevelSafeOutputEnvVars(data, GetWorkflowIDFromPath(c.markdownPath)),
 		}
 
 		// Set custom job name if specified
@@ -375,6 +372,8 @@ func (c *Compiler) buildSafeJobs(data *WorkflowData, threatDetectionEnabled bool
 				BuildAnd(BuildFunctionCall("always"), safeOutputCondition),
 				buildDetectionPassedCondition(),
 			)
+		} else if threatDetectionEnabled {
+			baseCondition = BuildAnd(safeOutputCondition, buildDetectionSuccessCondition())
 		}
 
 		if jobConfig.If != "" {
@@ -412,6 +411,9 @@ func (c *Compiler) buildSafeJobs(data *WorkflowData, threatDetectionEnabled bool
 			setupEnvVars := map[string]string{
 				"GH_AW_AGENT_OUTPUT": SafeJobsDownloadDirExpr + constants.AgentOutputFilename.String(),
 			}
+			if threatDetectionEnabled {
+				setupEnvVars["GH_AW_DETECTION_CONCLUSION"] = fmt.Sprintf("${{ needs.%s.outputs.detection_conclusion }}", constants.DetectionJobName)
+			}
 			// All job-specific env vars (literal or expression-based) are injected with
 			// their original values. Nothing goes through $GITHUB_OUTPUT.
 			maps.Copy(setupEnvVars, jobConfig.Env)
@@ -433,6 +435,7 @@ func (c *Compiler) buildSafeJobs(data *WorkflowData, threatDetectionEnabled bool
 							typedStep.Env[k] = v
 						}
 					}
+					typedStep.Env["GH_AW_JOB_CHECK_RUN_ID"] = "${{ job.check_run_id }}"
 
 					// Apply action pinning using type-safe version
 					pinnedStep, err := applyActionPinToTypedStep(typedStep, data)

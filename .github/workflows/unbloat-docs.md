@@ -25,6 +25,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  copilot-requests: write
 
 strict: true
 
@@ -34,10 +35,10 @@ runtimes:
 
 # AI engine configuration
 max-turns: 90  # Reduce from avg 115 turns
-model: openai/gpt-5.4
+model: copilot/claude-sonnet-5.5
 engine:
   id: pi
-  model-provider: openai
+  model-provider: github
 # Shared instructions
 imports:
   - uses: shared/daily-pr-base.md
@@ -173,7 +174,7 @@ steps:
       persist-credentials: false
 
   - name: Setup Node.js
-    uses: actions/setup-node@v7.0.0
+    uses: actions/setup-node@v7.1.0
     with:
       node-version: '24'
       cache: 'npm'

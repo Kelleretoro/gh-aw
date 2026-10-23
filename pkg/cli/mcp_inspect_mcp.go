@@ -193,6 +193,9 @@ func connectStdioMCPServer(ctx context.Context, config parser.RegistryMCPServerC
 
 // connectHTTPMCPServer connects to an HTTP-based MCP server using the Go SDK
 func connectHTTPMCPServer(ctx context.Context, config parser.RegistryMCPServerConfig, verbose bool) (*parser.MCPServerInfo, error) {
+	if config.CACertFile != "" {
+		return nil, errors.New("mcp inspect does not support ca-cert-file: per-server CA files are provisioned and applied by the MCP Gateway during workflow execution")
+	}
 	if verbose {
 		console.PrintInfoMessage("Connecting to HTTP MCP server: " + config.URL)
 	}
@@ -416,7 +419,7 @@ func displayServerCapabilities(info *parser.MCPServerInfo, toolFilter string) {
 			rows = append(rows, []string{resource.URI, resource.Name, description, mimeType})
 		}
 
-		fmt.Fprint(os.Stdout, console.RenderTable(console.TableConfig{
+		fmt.Fprint(os.Stdout, console.RenderTableStdout(console.TableConfig{
 			Headers: headers,
 			Rows:    rows,
 		}))
@@ -447,7 +450,7 @@ func displayServerCapabilities(info *parser.MCPServerInfo, toolFilter string) {
 			})
 		}
 
-		fmt.Fprint(os.Stdout, console.RenderTable(console.TableConfig{
+		fmt.Fprint(os.Stdout, console.RenderTableStdout(console.TableConfig{
 			Headers: headers,
 			Rows:    rows,
 		}))
@@ -468,7 +471,7 @@ func displayServerCapabilities(info *parser.MCPServerInfo, toolFilter string) {
 			rows = append(rows, []string{root.URI, root.Name})
 		}
 
-		fmt.Fprint(os.Stdout, console.RenderTable(console.TableConfig{
+		fmt.Fprint(os.Stdout, console.RenderTableStdout(console.TableConfig{
 			Headers: headers,
 			Rows:    rows,
 		}))

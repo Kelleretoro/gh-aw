@@ -287,6 +287,8 @@ func buildContinuationIfNeeded(
 		StartDate:             opts.startDate,
 		EndDate:               endDate,
 		Engine:                opts.engine,
+		DryRun:                opts.dryRun,
+		NoDryRun:              opts.noDryRun,
 		Branch:                opts.branch,
 		AfterRunID:            opts.afterRunID,
 		BeforeRunID:           oldestRunID,
@@ -300,6 +302,7 @@ func buildContinuationIfNeeded(
 
 // DownloadWorkflowLogs downloads and analyzes workflow logs with metrics
 func DownloadWorkflowLogs(ctx context.Context, opts LogsDownloadOptions) (err error) {
+	opts = normalizeLogsDownloadOptions(opts)
 	logsOrchestratorLog.Printf("Downloading workflow logs: workflow=%q, count=%d, outputDir=%q", opts.WorkflowName, opts.Count, opts.OutputDir)
 	if err := prepareCachedLogsJSONL(&opts); err != nil {
 		return err
@@ -314,6 +317,13 @@ func DownloadWorkflowLogs(ctx context.Context, opts LogsDownloadOptions) (err er
 	result, err := collectWorkflowLogs(ctx, opts)
 	if err != nil {
 		return err
+	}
+	var outcomeReports []OutcomesData
+	if opts.Outcomes {
+		outcomeReports, err = collectLogsOutcomes(ctx, result.processedRuns, opts.OutcomesDir, opts.Verbose)
+		if err != nil {
+			return err
+		}
 	}
 	renderLogsCollectionStats(opts.collectionStats)
 	finishGitHubAPIRateLimitReport(ctx, apiRateLimit, opts.JSONOutput)
@@ -330,6 +340,7 @@ func DownloadWorkflowLogs(ctx context.Context, opts LogsDownloadOptions) (err er
 		format:            opts.Format,
 		reportFile:        opts.ReportFile,
 		jsonOutput:        opts.JSONOutput,
+		episodes:          opts.Episodes,
 		toolGraph:         opts.ToolGraph,
 		train:             opts.Train,
 		drain3Weights:     opts.Drain3Weights,
@@ -337,6 +348,7 @@ func DownloadWorkflowLogs(ctx context.Context, opts LogsDownloadOptions) (err er
 		continuation:      result.continuation,
 		verbose:           opts.Verbose,
 		artifactFilter:    result.artifactFilter,
+		includeWorkQueue:  workQueueEvidenceRequested(opts.ArtifactSets),
 		startDate:         opts.StartDate,
 		endDate:           opts.EndDate,
 		checkStaleness:    true,
@@ -344,10 +356,12 @@ func DownloadWorkflowLogs(ctx context.Context, opts LogsDownloadOptions) (err er
 		suppressRender:    opts.SuppressRender,
 		apiRateLimit:      apiRateLimit,
 		cachedJSONLWriter: opts.cachedJSONLWriter,
+		outcomeReports:    outcomeReports,
 	})
 }
 
 func collectWorkflowLogs(ctx context.Context, opts LogsDownloadOptions) (workflowLogsResult, error) {
+	opts = normalizeLogsDownloadOptions(opts)
 	runtime, err := prepareLogsDownload(ctx, opts)
 	if err != nil {
 		return workflowLogsResult{}, err
@@ -378,6 +392,8 @@ func collectWorkflowLogs(ctx context.Context, opts LogsDownloadOptions) (workflo
 		startDate:             opts.StartDate,
 		endDate:               opts.EndDate,
 		engine:                opts.Engine,
+		dryRun:                opts.DryRun,
+		noDryRun:              opts.NoDryRun,
 		branch:                opts.Ref,
 		afterRunID:            opts.AfterRunID,
 		ignoreWorkflowRuns:    opts.IgnoreWorkflowRuns,

@@ -11,6 +11,11 @@ func ManualRelease() {
 	r.Release()
 }
 
+func ParenthesizedManualRelease() {
+	r := acquire() // want `resource should be released with defer`
+	(r.Release())
+}
+
 func DeferredRelease() {
 	r := acquire()
 	defer r.Release()
@@ -32,6 +37,11 @@ func ReleaseResultAssigned() {
 	r := acquire() // want `resource should be released with defer`
 	err := r.Release()
 	_ = err
+}
+
+func ParenthesizedReleaseResultAssigned() {
+	r := acquire() // want `resource should be released with defer`
+	_ = (r.Release())
 }
 
 func ConditionalAcquisition(ok bool) {
@@ -78,4 +88,35 @@ func Shadowing() {
 		r := acquire() // want `resource should be released with defer`
 		r.Release()
 	}
+
+}
+
+func SiblingCleanup(deferred bool) {
+	r := acquire() // want `resource should be released with defer`
+	if deferred {
+		defer r.Release()
+	} else {
+		r.Release()
+	}
+}
+
+func DifferentBranchAcquisitions(deferred bool) {
+	var r *resource
+	if deferred {
+		r = acquire()
+		defer r.Release()
+	} else {
+		r = acquire() // want `resource should be released with defer`
+		r.Release()
+	}
+}
+
+func BothBranchAcquisitionsManual(first bool) {
+	var r *resource
+	if first {
+		r = acquire() // want `resource should be released with defer`
+	} else {
+		r = acquire() // want `resource should be released with defer`
+	}
+	r.Release()
 }

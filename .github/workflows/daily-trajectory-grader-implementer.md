@@ -24,6 +24,7 @@ permissions:
 
 engine:
   id: copilot
+  copilot-sdk: true
 strict: true
 timeout-minutes: 25
 
@@ -85,12 +86,12 @@ If every grader already has a file and the table shows all 25 as
 and stop. Do not re-implement or "improve" an existing grader file in this
 workflow — one net-new grader per run only.
 
-## Step 3 — Implement the grader as a shared grader script
+## Step 3 — Configure the built-in grader as a shared fragment
 
 Create exactly one new file:
 `.github/workflows/shared/graders/<selected-id>.md`
 
-This is a shared component whose frontmatter declares exactly one custom
+This is a shared component whose frontmatter configures exactly one built-in
 deterministic grader under `graders:`. It must be self-contained and
 importable by any workflow via:
 
@@ -102,23 +103,23 @@ imports:
 The file must include:
 
 1. YAML frontmatter with a single `graders.<selected-id>` entry.
-2. A pure inline JavaScript `script:` body that computes the grader from the
-   preprocessed trace data passed to custom graders. The script receives
-   `trace`, `run`, `workflow`, `config`, `helpers`, and `Math`; it cannot
-   read files or use `require`, `import`, `fetch`, `eval`, process APIs, or
-   nondeterminism.
+2. Only non-executable configuration for an ID already registered in
+   `pkg/workflow/graders_config.go`. This catalog uses built-ins, not custom
+   scripts (which run in a separate job). Bash `run` is unsupported.
+   If the selected ID has no built-in implementation, call `noop`
+   explaining that runtime implementation is required and stop.
 3. `name`, `unit`, `direction`, and any useful `min`/`max` metadata in the
    grader entry.
 4. The human-readable description as comments only (YAML comments and/or a
    markdown `<!-- ... -->` comment after the frontmatter), not as prose
    instructions for an LLM to execute.
-5. Unavailable or insufficient trace data handling through a deterministic
-   object result with `value`, `unit`, and `message`/`details` fields.
+5. A comment stating the required unified-session evidence. The built-in
+   reports `unavailable` when that evidence is absent.
 
 Keep the file focused and grounded: no invented statistics, no references
 to tools or data this grader does not need, and no network calls. Keep it
-consistent with the constraints custom inline graders must satisfy per the
-[Graders Specification](https://githubnext.github.io/gh-aw/specs/graders-specification/)).
+consistent with the pure in-memory built-in interface in the
+[Graders Specification](https://githubnext.github.io/gh-aw/specs/graders-specification/).
 
 ## Step 4 — Update the catalog
 
@@ -146,5 +147,5 @@ Body must include:
 
 Do not modify any file outside the two listed above. Do not edit any
 `.lock.yml` file. If you cannot produce a complete, self-contained grader
-file meeting all six required sections above, call `noop` with a clear
+file meeting all five required sections above, call `noop` with a clear
 reason instead of emitting a partial `create_pull_request`.

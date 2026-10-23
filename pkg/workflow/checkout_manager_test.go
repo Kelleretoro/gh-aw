@@ -156,7 +156,7 @@ func TestGenerateDefaultCheckoutStep(t *testing.T) {
 		})
 		lines := cm.GenerateDefaultCheckoutStep(false, "", getPin)
 		combined := strings.Join(lines, "")
-		assert.Contains(t, combined, "ref: develop", "should include ref override")
+		assert.Contains(t, combined, "ref: \"develop\"", "should include ref override")
 	})
 
 	t.Run("trial mode overrides user config", func(t *testing.T) {
@@ -334,7 +334,7 @@ func TestGenerateAdditionalCheckoutSteps(t *testing.T) {
 		combined := strings.Join(lines, "")
 		assert.Contains(t, combined, "repository: owner/libs", "should include repo")
 		assert.Contains(t, combined, "path: ./libs/owner-libs", "should include path")
-		assert.Contains(t, combined, "ref: main", "should include ref")
+		assert.Contains(t, combined, "ref: \"main\"", "should include ref")
 		assert.Contains(t, combined, "persist-credentials: false", "must always have persist-credentials: false")
 	})
 
@@ -418,6 +418,19 @@ func TestParseCheckoutConfigs(t *testing.T) {
 		assert.Equal(t, "${{ secrets.MY_TOKEN }}", configs[0].GitHubToken, "github-token should be set")
 		require.NotNil(t, configs[0].FetchDepth, "fetch-depth should be set")
 		assert.Equal(t, 0, *configs[0].FetchDepth, "fetch-depth should be 0")
+	})
+
+	t.Run("pull-request false disables generated PR checkout", func(t *testing.T) {
+		configs, err := ParseCheckoutConfigs(map[string]any{"pull-request": false})
+		require.NoError(t, err)
+		require.Len(t, configs, 1)
+		require.NotNil(t, configs[0].PullRequest)
+		assert.False(t, *configs[0].PullRequest)
+	})
+
+	t.Run("pull-request must be a boolean", func(t *testing.T) {
+		_, err := ParseCheckoutConfigs(map[string]any{"pull-request": "false"})
+		require.ErrorContains(t, err, "checkout.pull-request must be a boolean")
 	})
 
 	t.Run("negative fetch-depth returns error", func(t *testing.T) {

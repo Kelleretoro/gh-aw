@@ -79,15 +79,13 @@ func getLoadedEcosystemDomains() map[string][]string {
 // documented behavior that package ecosystems require explicit opt-in
 // (`network: { allowed: [node] }`, `[python]`, or a matching `runtimes:` entry).
 //
-// This invariant is enforced for runtime engine defaults by
-// TestEngineDefaultDomainsDoNotOverlapEcosystems in domains_package_registry_test.go, which
-// fails if those default domain lists overlap with the full "node" or "python" ecosystem
-// domain sets in data/ecosystem_domains.json — not just the registries known when this comment
-// was written. If you need to add a package-registry domain to a runtime engine default and
-// that test starts failing, the domain belongs behind an explicit ecosystem/runtime opt-in
-// instead, not in the unconditional default list. Copilot threat detection is the exception:
-// its dedicated detection allow-list includes registry.npmjs.org for read-only lockfile
-// validation, and that list is not part of normal agent engine defaults.
+// TestEngineDefaultDomainsDoNotOverlapEcosystems checks effective suffix/wildcard coverage
+// against package ecosystems, not just literal registry membership. GitHub transport is
+// a deliberate exception: github.com is needed for repository access and AWF also permits
+// its package subdomains. TestGitHubTransportPackageRegistryException documents this limit;
+// callers can explicitly block pkg.github.com when that capability is unwanted.
+// Copilot threat detection is another exception: its dedicated detection allow-list includes
+// registry.npmjs.org for read-only lockfile validation, outside normal agent engine defaults.
 
 // engineDefaultDomainSets centralizes every engine allow-list. These sets are
 // user-selectable domain lists: workflows opt into them through network.allowed
@@ -112,14 +110,22 @@ func copyEngineDefaultDomainSet(domains []string) []string {
 // so those vendor hosts require an explicit `network: { allowed: [copilot-vendor] }` opt-in.
 var CopilotDefaultDomains = copyEngineDefaultDomainSet(engineDefaultDomainSets["copilot"])
 
-// CodexDefaultDomains are the minimal default domains required for Codex CLI operation.
+// CodexDefaultDomains retain gateway/GitHub transport and the concrete OpenAI API host.
+// Optional authentication/telemetry hosts require an explicit codex-vendor opt-in.
 var CodexDefaultDomains = copyEngineDefaultDomainSet(engineDefaultDomainSets["codex"])
 
-// ClaudeDefaultDomains are the default domains required for Claude Code CLI authentication and operation.
+// ClaudeDefaultDomains are the opt-in Claude gateway/GitHub transport baseline.
+// Direct Anthropic API access is added only when Claude's effective target is Anthropic.
+// Claude uses API-key or gateway authentication, not interactive browser login.
+// Do not include anthropic.com: AWF also allows subdomains, which would re-enable
+// statsig.anthropic.com. Infrastructure and downloads belong in ecosystem opt-ins.
 var ClaudeDefaultDomains = copyEngineDefaultDomainSet(engineDefaultDomainSets["claude"])
 
-// GeminiDefaultDomains are the default domains required for Google Gemini CLI authentication and operation.
+// GeminiDefaultDomains retain the concrete model API, not the googleapis.com wildcard
+// that would also grant access to unrelated package and browser download hosts.
 var GeminiDefaultDomains = copyEngineDefaultDomainSet(engineDefaultDomainSets["gemini"])
+
+var AgyDefaultDomains = copyEngineDefaultDomainSet(engineDefaultDomainSets["agy"])
 
 // PiBaseDefaultDomains are the base domains required for the Pi CLI to operate,
 // independent of the chosen LLM provider. When a model uses provider/model format,
@@ -128,9 +134,6 @@ var PiBaseDefaultDomains = copyEngineDefaultDomainSet(engineDefaultDomainSets["p
 
 // piProviderDomains maps provider prefixes to their API domains. It covers the
 // same set of providers that Pi can route through via the AWF LLM gateway.
-// Note: "google" is intentionally omitted — Pi backend resolution only supports
-// copilot, anthropic, openai, and codex; adding google here without backend
-// support would produce an inconsistent routing configuration.
 var piProviderDomains = getLoadedDomainSets().PiProviderDomains
 
 // PiDefaultDomains are the static default domains for backward compatibility when
@@ -148,12 +151,12 @@ func extractProviderFromModel(model string) (string, error) {
 	if model == "" {
 		return "", nil
 	}
-	parts := strings.SplitN(model, "/", 2)
-	if len(parts) < 2 {
+	prefix, _, hasSlash := strings.Cut(model, "/")
+	if !hasSlash {
 		// No slash: no "provider/model" format; no provider to extract.
 		return "", nil
 	}
-	provider := strings.ToLower(parts[0])
+	provider := strings.ToLower(prefix)
 	if provider == "" { //nolint:tolowerequalfold
 		return "", fmt.Errorf("invalid engine.model %q: provider prefix is empty; use provider/model format (for example: openai/gpt-4.1, anthropic/claude-sonnet-4)", model)
 	}
@@ -317,6 +320,7 @@ func getDomainsFromRuntimes(runtimes map[string]any) []string {
 //   - "clojure": Clojure/Clojars
 //   - "containers": container registries (Docker, GHCR, etc.)
 //   - "copilot-vendor": plan-specific Copilot API hosts and Copilot telemetry (opt-in)
+//   - "codex-vendor": optional Codex authentication and telemetry hosts (opt-in)
 //   - "dart": Dart/Flutter ecosystem
 //   - "deno": Deno runtime (deno.land, jsr.io, googleapis.deno.dev, fresh.deno.dev)
 //   - "dotnet": .NET and NuGet ecosystem
@@ -388,6 +392,7 @@ var ecosystemPriority = []string{
 	"clojure",
 	"containers",
 	"copilot-vendor",
+	"codex-vendor",
 	"dart",
 	"defaults",
 	"dev-tools",
@@ -466,7 +471,8 @@ func GetDomainEcosystem(domain string) string {
 	return "" // No ecosystem found
 }
 
-// matchesDomain checks if a domain matches a pattern (supports wildcards)
+// matchesDomain classifies ecosystem domains using exact or explicit wildcard matches.
+// This is not AWF enforcement: AWF also treats bare domains as suffix rules.
 func matchesDomain(domain, pattern string) bool {
 	// Exact match
 	if domain == pattern {
@@ -650,6 +656,7 @@ var engineDefaultDomains = map[constants.EngineName][]string{
 	constants.ClaudeEngine:  ClaudeDefaultDomains,
 	constants.CodexEngine:   CodexDefaultDomains,
 	constants.GeminiEngine:  GeminiDefaultDomains,
+	constants.AgyEngine:     AgyDefaultDomains,
 }
 
 // GetDefaultDomainsForEngine returns the engine's default required domains.
@@ -803,7 +810,10 @@ func GetAPITargetDomains(apiTarget string) []string {
 // When engine.api-target is set, both the API hostname and its base hostname are added to the allow-list.
 // Returns the original string unchanged when apiTarget is empty.
 func mergeAPITargetDomains(domainsStr string, apiTarget string) string {
-	extraDomains := GetAPITargetDomains(apiTarget)
+	return mergeAllowedDomainList(domainsStr, GetAPITargetDomains(apiTarget)...)
+}
+
+func mergeAllowedDomainList(domainsStr string, extraDomains ...string) string {
 	if len(extraDomains) == 0 {
 		return domainsStr
 	}

@@ -10,7 +10,6 @@ import (
 
 // TestCommandGroupAssignments verifies that commands are assigned to appropriate groups
 func TestCommandGroupAssignments(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name            string
 		commandName     string
@@ -49,7 +48,6 @@ func TestCommandGroupAssignments(t *testing.T) {
 		{name: "status command in analysis group", commandName: "status", expectedGroup: "analysis", shouldHaveGroup: true},
 		{name: "list command in analysis group", commandName: "list", expectedGroup: "analysis", shouldHaveGroup: true},
 		{name: "health command in analysis group", commandName: "health", expectedGroup: "analysis", shouldHaveGroup: true},
-		{name: "outcomes command in analysis group", commandName: "outcomes", expectedGroup: "analysis", shouldHaveGroup: true},
 		{name: "checks command in analysis group", commandName: "checks", expectedGroup: "analysis", shouldHaveGroup: true},
 		// Hidden commands should still be grouped so they appear in the correct
 		// section when explicitly shown (for example in full help/test contexts).
@@ -63,21 +61,22 @@ func TestCommandGroupAssignments(t *testing.T) {
 		{name: "hash-frontmatter command in utilities group", commandName: "hash-frontmatter", expectedGroup: "utilities", shouldHaveGroup: true},
 		{name: "project command in utilities group", commandName: "project", expectedGroup: "utilities", shouldHaveGroup: true},
 		{name: "json-schema command in utilities group", commandName: "json-schema", expectedGroup: "utilities", shouldHaveGroup: true},
+		{name: "skill command in utilities group", commandName: "skill", expectedGroup: "utilities", shouldHaveGroup: true},
 
 		// Commands without groups (intentionally)
 		{name: "version command without group", commandName: "version", expectedGroup: "", shouldHaveGroup: false},
 		// Note: help command is special in Cobra and managed separately, so we don't test it here
 	}
 
-	// Build a command lookup map once before running parallel subtests.
-	// Cobra's Commands() triggers a lazy sort that is not thread-safe: calling it
-	// concurrently from multiple goroutines can corrupt the internal commands slice,
-	// causing intermittent "command not found" failures. Fetching commands here
-	// (serially, before any subtest calls t.Parallel()) ensures the sort runs
-	// exactly once and the resulting map is read-only in the subtests.
+	// Keep the parent test serial: Cobra's Commands() lazily sorts shared state,
+	// so even map construction must not overlap other top-level tests.
+	// Subtests can read the completed map in parallel.
 	commandMap := make(map[string]*cobra.Command, len(rootCmd.Commands()))
 	for _, cmd := range rootCmd.Commands() {
 		commandMap[cmd.Name()] = cmd
+	}
+	if commandMap["outcomes"] != nil {
+		t.Fatal("outcomes must be exposed through logs, not as a standalone command")
 	}
 
 	for _, tt := range tests {
@@ -141,11 +140,10 @@ func TestCommandGroupsExist(t *testing.T) {
 // TestNoCommandsInAdditionalCommandsWithGroups verifies that commands that should have groups
 // are not appearing in the "Additional Commands" section
 func TestNoCommandsInAdditionalCommandsWithGroups(t *testing.T) {
-	t.Parallel()
 	// Commands that should NOT be in Additional Commands (should have groups)
 	commandsShouldHaveGroups := []string{"remove", "update", "deploy", "trial", "mcp-server", "pr"}
 
-	// Build a command lookup map once before running parallel subtests.
+	// Keep map construction in the serial parent test, before parallel subtests.
 	// See TestCommandGroupAssignments for the rationale.
 	commandMap := make(map[string]*cobra.Command, len(rootCmd.Commands()))
 	for _, cmd := range rootCmd.Commands() {

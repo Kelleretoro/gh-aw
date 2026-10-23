@@ -98,7 +98,7 @@ var toolConstraintBuilders = map[string]toolConstraintBuilder{
 	"update_release": func(safeOutputs *SafeOutputsConfig) []string {
 		return updateReleaseConstraints(safeOutputs.UpdateRelease)
 	},
-	"missing_tool": func(safeOutputs *SafeOutputsConfig) []string { return missingToolConstraints(safeOutputs.MissingTool) },
+	"report_missing_tool": func(safeOutputs *SafeOutputsConfig) []string { return missingToolConstraints(safeOutputs.MissingTool) },
 	"link_sub_issue": func(safeOutputs *SafeOutputsConfig) []string {
 		return linkSubIssueConstraints(safeOutputs.LinkSubIssue)
 	},
@@ -323,6 +323,9 @@ func markPullRequestAsReadyForReviewConstraints(config *MarkPullRequestAsReadyFo
 func addCommentConstraints(config *AddCommentsConfig) []string {
 	constraints := buildConstraints(config, func(config *AddCommentsConfig, constraints *[]string) {
 		appendMaxConstraint(constraints, config.Max, "Maximum %d comment(s) can be added.")
+		if config.MaxLinks > 0 {
+			*constraints = append(*constraints, fmt.Sprintf("Maximum %d link(s) in the comment body, excluding generated metadata.", config.MaxLinks))
+		}
 		appendTargetConstraint(constraints, config.Target)
 		appendStringConstraint(constraints, config.TargetRepoSlug, "Comments will be added in repository %q.")
 		if config.NormalizeClosingKeywords != nil && *config.NormalizeClosingKeywords {
@@ -414,7 +417,16 @@ func createCheckRunConstraints(config *CreateCheckRunConfig) []string {
 
 func addLabelsConstraints(config *AddLabelsConfig) []string {
 	return buildConstraints(config, func(config *AddLabelsConfig, constraints *[]string) {
-		appendMaxConstraint(constraints, config.Max, "Maximum %d label(s) can be added.")
+		if config.Max == nil {
+			*constraints = append(*constraints, fmt.Sprintf("Maximum %d add_labels call(s) allowed.", defaultMaxAddLabelsCalls))
+		} else {
+			appendMaxConstraint(constraints, config.Max, "Maximum %d add_labels call(s) allowed.")
+		}
+		if config.MaxLabels == nil {
+			*constraints = append(*constraints, fmt.Sprintf("Maximum %d label(s) per call.", defaultMaxLabelsPerAddLabelsCall))
+		} else {
+			appendMaxConstraint(constraints, config.MaxLabels, "Maximum %d label(s) per call.")
+		}
 		if len(config.Allowed) > 0 {
 			*constraints = append(*constraints, fmt.Sprintf("Only these labels are allowed: %s.", formatStringList(config.Allowed)))
 		}

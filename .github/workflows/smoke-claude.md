@@ -28,6 +28,9 @@ max-turns: 100
 model: claude-sonnet-4-6
 engine:
   id: claude
+  fallback-models:
+    - anthropic/claude-haiku-4-5
+    - anthropic/claude-sonnet-5
   bare: true
 inlined-imports: true
 imports:
@@ -40,6 +43,9 @@ imports:
   - shared/smoke-test-brevity.md
   - shared/playwright-title-test.md
   - shared/reporting.md
+  - uses: shared/session-artifact-check.md
+    with:
+      session-artifact: agent-stdio
 network:
   allowed:
     - defaults
@@ -54,7 +60,7 @@ sandbox:
   agent:
     config:
       filesystem:
-        allowWrite:
+        allow-write:
           - /tmp/gh-aw/agent
 tools:
   agentic-workflows:
@@ -68,7 +74,7 @@ tools:
     - "*"
 runtimes:
   go:
-    version: "1.26"
+    version: "1.27.3"
 checkout:
   fetch: ["*"]
   fetch-depth: 0
@@ -145,6 +151,21 @@ safe-outputs:
 timeout-minutes: 10
 features:
   gh-aw-detection: false
+post-steps:
+  - name: Assert unified-session contract
+    if: always()
+    uses: actions/github-script@v9.0.0
+    with:
+      script: |
+        const path = require("node:path");
+        const { sessionContractMain } = require(path.join(process.env.RUNNER_TEMP, "gh-aw/actions/smoke_model_routing_assertions.cjs"));
+        await sessionContractMain({
+          core,
+          engine: "claude",
+          expectModelInventory: true,
+          copilotInventory: false,
+          resolutionRoles: ["main"],
+        });
 ---
 
 # Smoke Test: Claude Engine Validation.
@@ -155,7 +176,7 @@ For tests below, mark a test as passed only if the required tool call succeeds.
 
 1. **GitHub MCP Testing**: Review the last 2 merged pull requests in ${{ github.repository }}
 2. **GH CLI Testing (via `gh-proxy`)**: Use `bash` to run `gh pr list --repo ${{ github.repository }} --limit 2 --json number,title,author`
-3. **Make Build Testing**: Use the `mcpscripts-make` tool to build the project (use args: "build") and verify it succeeds
+3. **Make Build Testing**: Use the `mcpscripts-make` tool to build the project (use args: ["build"]) and verify it succeeds
 4. **Playwright Testing**: Use playwright-cli to navigate to https://github.com and verify the page title contains "GitHub": run `playwright-cli browser_navigate --url https://github.com` then `playwright-cli browser_snapshot` in bash
 5. **Tavily Web Search Testing**: Use the Tavily MCP server to perform a web search for "GitHub Agentic Workflows" and verify that results are returned with at least one item
 6. **File Writing Testing**: Create a test file `/tmp/gh-aw/agent/smoke-test-claude-${{ github.run_id }}.txt` with content "Smoke test passed for Claude at $(date)" (create the directory if it doesn't exist)

@@ -9,6 +9,102 @@ import (
 	"testing"
 )
 
+func TestValidateMainWorkflowFrontmatter_CheckoutAllowPrivateRepos(t *testing.T) {
+	for _, value := range []any{true, false, nil, "true", 1, "${{ vars.ALLOW_PRIVATE_REPOS }}"} {
+		checkout := map[string]any{
+			"repo": "${{ vars.REPOS }}", "path": "targets", "allowed-repos": "org/*", "allow-private-repos": value,
+		}
+		for _, config := range []any{checkout, []any{checkout}} {
+			err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(map[string]any{
+				"on": "workflow_dispatch", "engine": "copilot", "checkout": config,
+			}, "workflow.md")
+			_, valid := value.(bool)
+			if (err == nil) != valid {
+				t.Fatalf("allow-private-repos=%v: validation error = %v, valid %t", value, err, valid)
+			}
+		}
+	}
+}
+
+func TestValidateMainWorkflowFrontmatter_CheckoutMulti(t *testing.T) {
+	for _, value := range []any{true, false, nil, "true", 1, "${{ vars.MULTI }}"} {
+		checkout := map[string]any{"multi": value, "repo": "${{ vars.REPO }}"}
+		for _, config := range []any{checkout, []any{checkout}} {
+			err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(map[string]any{
+				"on": "workflow_dispatch", "engine": "copilot", "checkout": config,
+			}, "workflow.md")
+			_, valid := value.(bool)
+			if (err == nil) != valid {
+				t.Fatalf("multi=%v: validation error = %v, valid %t", value, err, valid)
+			}
+		}
+	}
+}
+
+func TestValidateMainWorkflowFrontmatter_CheckoutMaxRepos(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		value   any
+		wantErr bool
+	}{
+		{name: "positive", value: 2},
+		{name: "zero", value: 0, wantErr: true},
+		{name: "negative", value: -1, wantErr: true},
+		{name: "fraction", value: 1.5, wantErr: true},
+		{name: "unsafe integer", value: uint64(1 << 53), wantErr: true},
+		{name: "string", value: "2", wantErr: true},
+		{name: "expression", value: "${{ inputs.max }}", wantErr: true},
+		{name: "boolean", value: true, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(map[string]any{
+				"on":     "workflow_dispatch",
+				"engine": "copilot",
+				"checkout": map[string]any{
+					"repo": "${{ vars.REPOS }}", "path": "targets", "allowed-repos": "org/*", "max-repos": tt.value,
+				},
+			}, "workflow.md")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validation error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateIncludedFileFrontmatter_InternalMCPInfrastructureCapability(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		value   any
+		wantErr bool
+	}{
+		{name: "omitted"},
+		{name: "enabled rejected", value: true, wantErr: true},
+		{name: "disabled rejected", value: false, wantErr: true},
+		{name: "string rejected", value: "true", wantErr: true},
+		{name: "number rejected", value: 1, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			capabilities := map[string]any{}
+			if tt.value != nil {
+				capabilities["cli-only-mcp-infrastructure"] = tt.value
+			}
+			err := ValidateIncludedFileFrontmatterWithSchemaAndLocation(map[string]any{
+				"engine": map[string]any{
+					"id":           "custom-capability-engine",
+					"display-name": "Custom capability engine",
+					"behaviors": map[string]any{
+						"execution":    map[string]any{"command-name": "custom-capability-engine"},
+						"capabilities": capabilities,
+					},
+				},
+			}, "workflow.md")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validation error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateMainWorkflowFrontmatter_IssueFieldActivityTypes(t *testing.T) {
 	frontmatter := map[string]any{
 		"on": map[string]any{
@@ -22,6 +118,125 @@ func TestValidateMainWorkflowFrontmatter_IssueFieldActivityTypes(t *testing.T) {
 	if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "workflow.md"); err != nil {
 		t.Fatalf("expected issue field activity types to validate: %v", err)
 	}
+
+}
+
+func TestValidateMainWorkflowFrontmatter_MaxToolCalls(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		value   any
+		wantErr bool
+	}{
+		{name: "positive integer", value: 10},
+		{name: "expression", value: "${{ inputs.max-tool-calls }}"},
+		{name: "zero", value: 0, wantErr: true},
+		{name: "negative", value: -1, wantErr: true},
+		{name: "fraction", value: 1.5, wantErr: true},
+		{name: "plain string", value: "10", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(map[string]any{
+				"on":             "workflow_dispatch",
+				"max-tool-calls": test.value,
+			}, "workflow.md")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validation error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateMainWorkflowFrontmatter_DockerImagePullPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		policy  any
+		wantErr bool
+	}{
+		{policy: "always"},
+		{policy: "never"},
+		{policy: "", wantErr: true},
+		{policy: "sometimes", wantErr: true},
+		{policy: true, wantErr: true},
+	} {
+		err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(map[string]any{
+			"on": "workflow_dispatch", "docker-image-pull-policy": tt.policy,
+		}, "workflow.md")
+		if (err != nil) != tt.wantErr {
+			t.Errorf("policy %v: error = %v, want error %v", tt.policy, err, tt.wantErr)
+		}
+	}
+}
+
+func TestValidateMainWorkflowFrontmatter_NVX(t *testing.T) {
+	valid := map[string]any{
+		"on": "workflow_dispatch",
+		"sandbox": map[string]any{
+			"agent": map[string]any{
+				"runtime": "nvx",
+				"nvx": map[string]any{
+					"preview":                       true,
+					"network-isolation":             true,
+					"api-proxy":                     true,
+					"layer-path":                    "${{ runner.temp }}/nvx/layer",
+					"openvmm-path":                  "${{ runner.temp }}/nvx/openvmm",
+					"kernel-path":                   "${{ runner.temp }}/nvx/vmlinux",
+					"initramfs-path":                "${{ runner.temp }}/nvx/initramfs.cpio.gz",
+					"artifact-manifest-path":        "${{ runner.temp }}/nvx/manifest.json",
+					"artifact-manifest-bundle-path": "${{ runner.temp }}/nvx/manifest.sigstore.jsonl",
+				},
+			},
+		},
+	}
+
+	if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(valid, "workflow.md"); err != nil {
+		t.Fatalf("expected complete expression-valued NVX configuration to validate: %v", err)
+	}
+
+	t.Run("accepts defaulted NVX settings", func(t *testing.T) {
+		frontmatter := map[string]any{
+			"on": "workflow_dispatch",
+			"sandbox": map[string]any{
+				"agent": map[string]any{
+					"runtime": "nvx",
+					"nvx":     map[string]any{},
+				},
+			},
+		}
+		if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "workflow.md"); err != nil {
+			t.Fatalf("expected defaulted NVX configuration to validate: %v", err)
+		}
+	})
+
+	t.Run("rejects removed guest libc option", func(t *testing.T) {
+		frontmatter := map[string]any{
+			"on": "workflow_dispatch",
+			"sandbox": map[string]any{
+				"agent": map[string]any{
+					"runtime": "nvx",
+					"nvx": map[string]any{
+						"guest-libc": "musl",
+					},
+				},
+			},
+		}
+		if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "workflow.md"); err == nil {
+			t.Fatal("expected removed guest-libc option to fail schema validation")
+		}
+	})
+
+	t.Run("NVX settings require the NVX runtime", func(t *testing.T) {
+		frontmatter := map[string]any{
+			"on": "workflow_dispatch",
+			"sandbox": map[string]any{
+				"agent": map[string]any{
+					"runtime": "docker",
+					"nvx":     valid["sandbox"].(map[string]any)["agent"].(map[string]any)["nvx"],
+				},
+			},
+		}
+		if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "workflow.md"); err == nil {
+			t.Fatal("expected NVX settings with Docker runtime to fail schema validation")
+		}
+	})
 }
 
 func TestValidateMainWorkflowFrontmatter_RejectsUnsupportedTopLevelFields(t *testing.T) {
@@ -1422,7 +1637,7 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_OperationalValueGr
 			}
 
 			if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "/tmp/gh-aw/operational-value-grader-test.md"); err != nil {
-				t.Fatalf("expected operational-value evaluator to pass schema validation, got: %v", err)
+				t.Fatal(err)
 			}
 		})
 	}
@@ -1825,6 +2040,25 @@ func TestMainWorkflowSchema_CreateDiscussionRequiredCategoryAllowed(t *testing.T
 
 	if err := validateWithSchema(frontmatter, mainWorkflowSchema, "main workflow file"); err != nil {
 		t.Fatalf("expected create-discussion.required-category to pass schema validation, got: %v", err)
+	}
+}
+
+func TestMainWorkflowSchema_SandboxAgentRouterImageAllowed(t *testing.T) {
+	t.Parallel()
+
+	frontmatter := map[string]any{
+		"on": "daily",
+		"sandbox": map[string]any{
+			"agent": map[string]any{
+				"images": map[string]any{
+					"router": "registry.example.com/approved/router:v0.1.3@sha256:" + strings.Repeat("a", 64),
+				},
+			},
+		},
+	}
+
+	if err := validateWithSchema(frontmatter, mainWorkflowSchema, "main workflow file"); err != nil {
+		t.Fatalf("expected sandbox.agent.images.router to pass schema validation, got: %v", err)
 	}
 }
 
@@ -3003,11 +3237,25 @@ func TestMainWorkflowSchema_SandboxAgentImagesCanonicalReferences(t *testing.T) 
 				},
 			},
 		}
+
 	}
 
 	valid := "registry.example.com/approved/squid:v0.28.4@sha256:" + strings.Repeat("a", 64)
 	if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatterWithImage(valid), "/tmp/gh-aw/sandbox-agent-images-valid-test.md"); err != nil {
 		t.Fatalf("expected canonical digest-pinned image to pass schema validation: %v", err)
+	}
+
+	apiProxyImage := "registry.example.com/approved/api-proxy:v0.28.4@sha256:" + strings.Repeat("b", 64)
+	apiProxyFrontmatter := frontmatterWithImage(valid)
+	apiProxyFrontmatter["sandbox"].(map[string]any)["agent"].(map[string]any)["images"].(map[string]any)["api-proxy"] = apiProxyImage
+	if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(apiProxyFrontmatter, "/tmp/gh-aw/sandbox-agent-images-api-proxy-test.md"); err != nil {
+		t.Fatalf("expected kebab-cased image role to pass schema validation: %v", err)
+	}
+
+	camelCaseFrontmatter := frontmatterWithImage(valid)
+	camelCaseFrontmatter["sandbox"].(map[string]any)["agent"].(map[string]any)["images"].(map[string]any)["apiProxy"] = apiProxyImage
+	if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(camelCaseFrontmatter, "/tmp/gh-aw/sandbox-agent-images-camel-case-test.md"); err == nil {
+		t.Fatal("expected camel-cased image role to be rejected by schema validation")
 	}
 
 	for _, invalid := range []string{
@@ -3155,7 +3403,7 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 				"agent": map[string]any{
 					"targets": map[string]any{
 						"openai": map[string]any{
-							"authHeader": "api-key",
+							"auth-header": "api-key",
 						},
 					},
 				},
@@ -3175,7 +3423,7 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 				"agent": map[string]any{
 					"targets": map[string]any{
 						"anthropic": map[string]any{
-							"authHeader": "api-key",
+							"auth-header": "api-key",
 						},
 					},
 				},
@@ -3195,7 +3443,7 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 				"agent": map[string]any{
 					"targets": map[string]any{
 						"openai": map[string]any{
-							"authHeader": 42,
+							"auth-header": 42,
 						},
 					},
 				},
@@ -3207,6 +3455,26 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 		}
 	})
 
+	t.Run("camel-cased authHeader is rejected", func(t *testing.T) {
+		frontmatter := map[string]any{
+			"on":     "push",
+			"engine": "codex",
+			"sandbox": map[string]any{
+				"agent": map[string]any{
+					"targets": map[string]any{
+						"openai": map[string]any{
+							"authHeader": "api-key",
+						},
+					},
+				},
+			},
+		}
+		err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "/tmp/gh-aw/awf-auth-header-camel-case-test.md")
+		if err == nil {
+			t.Error("camel-cased authHeader should be rejected by schema validation")
+		}
+	})
+
 	t.Run("unknown provider in targets is rejected", func(t *testing.T) {
 		frontmatter := map[string]any{
 			"on":     "push",
@@ -3215,12 +3483,13 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 				"agent": map[string]any{
 					"targets": map[string]any{
 						"unknown-provider": map[string]any{
-							"authHeader": "api-key",
+							"auth-header": "api-key",
 						},
 					},
 				},
 			},
 		}
+
 		err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "/tmp/gh-aw/awf-unknown-provider-test.md")
 		if err == nil {
 			t.Error("unknown provider in sandbox.agent.targets should be rejected")
@@ -3235,7 +3504,7 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 				"agent": map[string]any{
 					"targets": map[string]any{
 						"copilot": map[string]any{
-							"extraHeaders": map[string]any{
+							"extra-headers": map[string]any{
 								"x-openrouter-title": "my-workflow",
 								"http-referer":       "https://github.com/org/repo",
 							},
@@ -3258,7 +3527,7 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 				"agent": map[string]any{
 					"targets": map[string]any{
 						"copilot": map[string]any{
-							"extraBodyFields": map[string]any{
+							"extra-body-fields": map[string]any{
 								"custom-field": "custom-value",
 							},
 						},
@@ -3280,7 +3549,7 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 				"agent": map[string]any{
 					"targets": map[string]any{
 						"copilot": map[string]any{
-							"sessionId": "${{ github.run_id }}",
+							"session-id": "${{ github.run_id }}",
 						},
 					},
 				},
@@ -3300,13 +3569,13 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 				"agent": map[string]any{
 					"targets": map[string]any{
 						"copilot": map[string]any{
-							"extraHeaders": map[string]any{
+							"extra-headers": map[string]any{
 								"x-openrouter-title": "my-workflow",
 							},
-							"extraBodyFields": map[string]any{
+							"extra-body-fields": map[string]any{
 								"custom-field": "custom-value",
 							},
-							"sessionId": "${{ github.run_id }}",
+							"session-id": "${{ github.run_id }}",
 						},
 					},
 				},
@@ -3326,7 +3595,7 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 				"agent": map[string]any{
 					"targets": map[string]any{
 						"copilot": map[string]any{
-							"extraHeaders": map[string]any{
+							"extra-headers": map[string]any{
 								"x-count": 42,
 							},
 						},
@@ -3359,6 +3628,48 @@ func TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_AwfApiProxyTargets
 			t.Error("unknown field in copilot target should be rejected by schema validation")
 		}
 	})
+}
+
+func TestMainWorkflowSchema_SandboxFieldsUseKebabCase(t *testing.T) {
+	t.Parallel()
+
+	valid := map[string]any{
+		"on":     "push",
+		"engine": "copilot",
+		"sandbox": map[string]any{
+			"agent": map[string]any{
+				"config": map[string]any{
+					"filesystem": map[string]any{
+						"deny-read":   []any{"/secret"},
+						"allow-write": []any{"/workspace"},
+						"deny-write":  []any{"/root"},
+					},
+					"ignore-violations":            map[string]any{"git *": []any{"/tmp"}},
+					"enable-weaker-nested-sandbox": true,
+				},
+			},
+		},
+	}
+	if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(valid, "/tmp/gh-aw/sandbox-kebab-case-test.md"); err != nil {
+		t.Fatalf("expected kebab-cased sandbox fields to pass schema validation: %v", err)
+	}
+
+	invalid := map[string]any{
+		"on":     "push",
+		"engine": "copilot",
+		"sandbox": map[string]any{
+			"agent": map[string]any{
+				"config": map[string]any{
+					"filesystem": map[string]any{
+						"allowWrite": []any{"/workspace"},
+					},
+				},
+			},
+		},
+	}
+	if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(invalid, "/tmp/gh-aw/sandbox-camel-case-test.md"); err == nil {
+		t.Fatal("expected camel-cased sandbox field to be rejected by schema validation")
+	}
 }
 
 // TestValidateMainWorkflowFrontmatter_OnPermissionsVulnerabilityAlerts validates that
@@ -3445,6 +3756,7 @@ func TestGetParsedSchemaDocReturnsObject(t *testing.T) {
 		if err != nil {
 			t.Fatalf("getParsedSchemaDoc(%s) returned error: %v", name, err)
 		}
+
 		if len(doc) == 0 {
 			t.Errorf("getParsedSchemaDoc(%s) returned empty document", name)
 		}
@@ -3456,5 +3768,77 @@ func TestGetParsedSchemaDocReturnsObject(t *testing.T) {
 
 	if _, err := getParsedSchemaDoc(`null`); err == nil {
 		t.Error("getParsedSchemaDoc() should return an error for a null schema")
+	}
+}
+
+func TestValidateMainWorkflowFrontmatterAcceptsDeclarativeMemorySchemas(t *testing.T) {
+	frontmatter := map[string]any{
+		"on": "workflow_dispatch",
+		"tools": map[string]any{
+			"repo-memory": map[string]any{
+				"allowed-extensions": []any{".json", ".jsonl"},
+				"validation": map[string]any{
+					"json-schemas": []any{
+						map[string]any{
+							"file":   "state.json",
+							"format": "json",
+							"schema": map[string]any{
+								"type":                 "object",
+								"required":             []any{"version", "items"},
+								"additionalProperties": false,
+								"properties": map[string]any{
+									"version": map[string]any{"enum": []any{1}},
+									"items":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+								},
+							},
+						},
+						map[string]any{
+							"file":   "archive/events.jsonl",
+							"format": "jsonl",
+							"schema": map[string]any{
+								"type":                 "object",
+								"required":             []any{"id", "status"},
+								"additionalProperties": false,
+								"properties": map[string]any{
+									"id":     map[string]any{"type": "integer"},
+									"status": map[string]any{"enum": []any{"open", "closed"}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "memory-schema-example.md"); err != nil {
+		t.Fatalf("expected declarative memory schema frontmatter to validate, got: %v", err)
+	}
+}
+
+func TestMainWorkflowSchemaAcceptsModelAliasKeys(t *testing.T) {
+	t.Parallel()
+
+	valid := map[string]any{
+		"on":     "push",
+		"engine": "codex",
+		"models": map[string]any{
+			"luna":    []any{"copilot/gpt-5.6*"},
+			"opus":    []any{"copilot/claude-opus-5*", "anthropic/*opus*"},
+			"allowed": []any{"copilot/*"},
+		},
+	}
+	if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(valid, "/tmp/gh-aw/model-alias-keys-test.md"); err != nil {
+		t.Fatalf("expected alias keys under models: to pass schema validation, got: %v", err)
+	}
+
+	for name, value := range map[string]any{
+		"string instead of list": "copilot/gpt-5.6*",
+		"empty list":             []any{},
+		"empty entry":            []any{""},
+	} {
+		invalid := map[string]any{"on": "push", "engine": "codex", "models": map[string]any{"luna": value}}
+		if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(invalid, "/tmp/gh-aw/model-alias-keys-invalid-test.md"); err == nil {
+			t.Errorf("expected %s alias value to fail schema validation", name)
+		}
 	}
 }

@@ -3,6 +3,7 @@ package workflow
 import (
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
@@ -41,6 +42,14 @@ func (c *Compiler) addActivationSecretValidationStep(ctx *activationJobBuildCont
 		}
 		stepIDs = append(stepIDs, "validate-secret")
 	}
+	for _, step := range buildFallbackProviderValidationSteps(ctx.data) {
+		for _, line := range step {
+			ctx.steps = append(ctx.steps, line+"\n")
+			if id, ok := strings.CutPrefix(line, "        id: "); ok {
+				stepIDs = append(stepIDs, id)
+			}
+		}
+	}
 	for i, secretValidationStep := range buildSafeOutputSecretValidationSteps(ctx.data) {
 		for _, line := range secretValidationStep {
 			ctx.steps = append(ctx.steps, line+"\n")
@@ -51,7 +60,7 @@ func (c *Compiler) addActivationSecretValidationStep(ctx *activationJobBuildCont
 		compilerActivationJobLog.Printf("Skipped secret validation steps (no required secrets)")
 		return
 	}
-	if len(stepIDs) == 1 && stepIDs[0] == "validate-secret" {
+	if len(stepIDs) == 1 && stepIDs[0] == "validate-secret" { //nolint:uncheckedsliceindex // len(stepIDs) guarantees index 0 is in range
 		ctx.outputs["secret_verification_result"] = "${{ steps.validate-secret.outputs.verification_result }}"
 		compilerActivationJobLog.Printf("Added engine secret validation step to activation job")
 		return
@@ -161,7 +170,7 @@ func (c *Compiler) addActivationCheckoutAndBaseRestoreStep(ctx *activationJobBui
 	data := ctx.data
 	checkoutSteps := c.generateCheckoutGitHubFolderForActivation(data)
 	ctx.steps = append(ctx.steps, checkoutSteps...)
-	if len(checkoutSteps) > 0 {
+	if len(checkoutSteps) > 0 && (!isPRCheckoutDisabled(data) || dynamicWorkflowsEnabled(ctx.engine, data.EngineConfig)) {
 		compilerActivationJobLog.Print("Adding step to save agent config folders for base branch restoration")
 		folders, files := resolveAgentManifestPaths(c.engineRegistry, data)
 		ctx.steps = append(ctx.steps, generateSaveBaseGitHubFoldersStep(
@@ -201,6 +210,7 @@ func (c *Compiler) addActivationVersionCheckStep(ctx *activationJobBuildContext)
 	ctx.steps = append(ctx.steps, fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", ctx.data)))
 	ctx.steps = append(ctx.steps, "        env:\n")
 	ctx.steps = append(ctx.steps, fmt.Sprintf("          GH_AW_COMPILED_VERSION: \"%s\"\n", c.version))
+	ctx.steps = append(ctx.steps, fmt.Sprintf("          GH_AW_HAS_SAFE_OUTPUTS: \"%t\"\n", ctx.data.SafeOutputs != nil))
 	ctx.steps = append(ctx.steps, buildTemplatableBoolEnvVar("GH_AW_BLOCKED_VERSION_REPORT_AS_ISSUE", activationBlockedVersionReportAsIssueValue(ctx))...)
 	ctx.steps = append(ctx.steps, fmt.Sprintf("          GH_AW_WORKFLOW_NAME: %q\n", ctx.data.Name))
 	ctx.steps = append(ctx.steps, "        with:\n")
@@ -274,6 +284,7 @@ func (c *Compiler) addActivationSingleSkillInstallStep(ctx *activationJobBuildCo
 	ctx.steps = append(ctx.steps, formatYAMLEnv("          ", "GH_AW_INFO_ENGINE_ID", engineID))
 	ctx.steps = append(ctx.steps, formatYAMLEnv("          ", "GH_AW_GH_SKILL_AGENT_NAME", skillInstallAgentName))
 	ctx.steps = append(ctx.steps, formatYAMLEnv("          ", "GH_AW_SKILL_DIR", skillDir))
+	ctx.steps = append(ctx.steps, formatYAMLEnv("          ", "GH_AW_SKILL_INSTALL_INDEX", strconv.Itoa(stepNumber)))
 	ctx.steps = append(ctx.steps, formatYAMLEnv("          ", "GH_AW_FRONTMATTER_SKILLS", skillRef.Skill))
 	ctx.steps = append(ctx.steps, fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", ctx.data)))
 	ctx.steps = append(ctx.steps, "        with:\n")
@@ -290,7 +301,8 @@ func (c *Compiler) resolveFrontmatterSkillToken(ctx *activationJobBuildContext, 
 		return tokenExpr
 	}
 	stepID := fmt.Sprintf("frontmatter-skill-app-token-%d", stepNumber)
-	ctx.steps = append(ctx.steps, c.buildGitHubAppTokenMintStepWithMeta(
+	ctx.steps = append(ctx.steps, c.buildGitHubAppTokenMintStepForJob(
+		"activation",
 		skillRef.GitHubApp,
 		nil,
 		"",

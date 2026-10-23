@@ -1,6 +1,6 @@
 // Package linters is a namespace for gh-aw's custom Go analysis linters.
 //
-// All 73 active analyzers:
+// All 84 active analyzers:
 //
 //   - appendbytestring — flags append(b, []byte(s)...) calls where s is a string that can be simplified to append(b, s...)
 //   - appendoneelement — flags append(s, []T{x}...) calls where a single-element slice literal is spread and can be simplified to append(s, x)
@@ -9,9 +9,12 @@
 //   - bufioscannererunchecked — flags bufio.Scanner loops that do not check Err after scanning completes
 //   - bytesbufferstring — reports string(buf.Bytes()) calls where buf is a bytes.Buffer value and suggests buf.String() instead
 //   - bytescomparestring — flags string(a) == string(b) and string(a) != string(b) comparisons where a and b are []byte values and recommends bytes.Equal for clearer intent
+//   - closeerrorunchecked — reports Close() method calls where the error return value is explicitly discarded
+//   - consolestderr — flags stdout-aware console formatters and renderers written directly to stderr
 //   - contextcancelnotdeferred — flags context cancel functions called directly instead of deferred
 //   - ctxbackground — flags context.Background() inside functions that already receive a context
 //   - deferinloop — flags defer statements placed directly inside for or range loop bodies
+//   - deferrerrorunchecked — flags deferred calls that discard an error return value
 //   - errorfwrapv — flags fmt.Errorf calls that pass error arguments without %w wrapping
 //   - errormessage — flags non-actionable error message patterns in changed files
 //   - errortypeassertion — flags type assertions from error to concrete types and recommends errors.As
@@ -20,10 +23,13 @@
 //   - execcommandwithoutcontext — flags exec.Command calls inside functions that already receive context.Context
 //   - fileclosenotdeferred — flags file Close() calls that are not deferred
 //   - fmterrorfnoverbs — flags fmt.Errorf calls with no format verbs, recommending errors.New
+//   - formatintitoa — flags strconv.FormatInt(int64(x), 10) for int arguments that should use strconv.Itoa
+//   - fprintferrorunchecked — flags fmt.Fprintf/Fprint/Fprintln assignments that explicitly discard all return values
 //   - fprintlnsprintf — flags fmt.Fprintln(..., fmt.Sprintf(...)) patterns
 //   - generatedyamlheredoc — flags shell heredocs embedded in generated workflow YAML and directs callers to JavaScript rendering
 //   - globwalkignorederror — flags filepath.Glob and os.ReadDir calls where the error return is discarded with _
 //   - goroutinemissingrecover — flags goroutines started via a function literal whose body does not install a top-level defer/recover guard
+//   - goroutineresourceleak — flags goroutine resource acquisitions without immediate deferred cleanup, channels without a close or safely buffered send/receive pair, and loop-launched goroutines without WaitGroup synchronization
 //   - hardcodedfilepath — flags hard-coded file path string literals that match known path constants or should be extracted as named constants
 //   - httpnoctx — flags HTTP calls that do not accept a context.Context
 //   - httprespbodyclose — flags HTTP response bodies that are not closed
@@ -41,10 +47,12 @@
 //   - nilctxpassed — flags function calls where nil is passed as a context.Context argument
 //   - osexitinlibrary — flags os.Exit calls in library packages
 //   - osgetenvlibrary — flags os.Getenv calls in library packages
+//   - osisnotexist — flags legacy os error predicates that should use errors.Is or errors.As for wrapped errors
 //   - ossetenvlibrary — flags os.Setenv calls in library packages
 //   - packagelevelmutableslicemap — reports mutation of package-level slice/map variables from inside function bodies, which risks data races and cross-call state leaks
 //   - panic-in-library-code — flags panic() calls in library packages
 //   - rawloginlib — flags direct usage of the standard log package in library packages
+//   - reflectdeepequalusage — flags reflect.DeepEqual calls that should use typed equality or type-specific comparison functions
 //   - regexpcompileinfunction — flags regexp.MustCompile/Compile calls inside functions
 //   - regexpdynamicpattern — flags regexp compile calls whose pattern is not a compile-time constant
 //   - seenmapbool — flags map[string]bool used as a set that should use map[string]struct{}
@@ -68,10 +76,13 @@
 //   - timenowsub — reports time.Now().Sub(t) calls that should be simplified to time.Since(t)
 //   - tolowerequalfold — flags case-insensitive comparisons via ToLower/ToUpper that should use EqualFold
 //   - trimleftright — flags strings.TrimLeft/TrimRight calls with a multi-character literal cutset where TrimPrefix/TrimSuffix was likely intended
+//   - typeassertionnil — flags single-value type assertions to pointer types and recommends the two-value form
 //   - typeassertionokdiscarded — flags two-value type assertions whose ok result is discarded
 //   - uncheckedsliceindex — reports slice and string indexes without proven bounds
+//   - unchecked_deferredclose — reports defer Close() calls that ignore error return values
 //   - uncheckedtypeassertion — flags unchecked single-value type assertions
 //   - uncheckedflushreturn — flags Flush() method calls where the error return is discarded
+//   - walkdirignoredeerror — flags filepath.Walk/WalkDir calls where the error return is discarded
 //   - walkfuncerrshadow — flags filepath.Walk/WalkDir callbacks whose err parameter shadows an outer err variable assigned from the walk call
 //   - wgdonenotdeferred — flags non-deferred sync.WaitGroup.Done() calls
 //   - writebytestring — flags w.Write([]byte(s)) calls where s is a string that can be replaced with io.WriteString(w, s)

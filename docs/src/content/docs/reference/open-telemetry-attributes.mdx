@@ -89,7 +89,7 @@ These attributes appear on built-in workflow setup, agent, and conclusion spans 
     <tr><td><code>gh-aw.steering_event_count</code></td><td>Count of steering events recorded during the run.</td></tr>
     <tr><td><code>gh-aw.action_minutes</code></td><td>Elapsed runtime converted to minutes.</td></tr>
     <tr><td><code>gh-aw.tracker.id</code></td><td>Tracker identifier when present.</td></tr>
-    <tr><td><code>gh-aw.aic</code></td><td>AI credits consumed for the run when available.</td></tr>
+    <tr><td><code>gh-aw.aic</code></td><td>AI credits consumed by the cost-owning job (agent, detection, or engine), encoded as a double when available. Explicit zero is preserved; missing cost data is omitted, not zero-filled.</td></tr>
     <tr><td><code>gh-aw.max_ai_credits</code></td><td>Configured max AI credits budget for the run when available.</td></tr>
     <tr><td><code>gh-aw.max_ai_credits_exceeded</code></td><td>Whether the run exceeded the max AI credits budget.</td></tr>
     <tr><td><code>gh-aw.ai_credits_rate_limit_error</code></td><td>Whether an AI-credits rate-limit or budget-exhaustion signal was detected.</td></tr>
@@ -127,6 +127,8 @@ These attributes appear on built-in workflow setup, agent, and conclusion spans 
   </tbody>
 </table>
 
+For AIC rollups, use `gh-aw.aic` on the dedicated agent span (`gh-aw.agent.agent`) or, when no dedicated span exists, the cost-owning job's conclusion span. It is emitted once per owning job, alongside `gh-aw.workflow.name`, `gh-aw.run.id`, and `gh-aw.repository`. Individual model/tool spans and downstream non-owning jobs need not carry AIC. Deduplicate spans mirrored to multiple backends by trace ID and span ID. Missing or unqueryable cost is unknown, not zero; backend field-validation errors alone do not prove an exporter failure.
+
 Working-Set Rebuild Factor measures cumulative context reconstruction relative to peak invocation context. It is an efficiency/trajectory metric, not a measurement of semantic coherence debt and not a predictor of task success. Numeric working-set attributes are emitted on the built-in conclusion span only when the measurement exists.
 
 ## Agent and GenAI attributes
@@ -144,6 +146,8 @@ These attributes carry model, token, and stop-reason data on built-in agent span
     <tr><td><code>gen_ai.system</code></td><td>Compatibility GenAI system/provider name used by existing gh-aw dashboards and backends.</td></tr>
     <tr><td><code>gh-aw.engine.id</code></td><td>Raw gh-aw engine identifier.</td></tr>
     <tr><td><code>gen_ai.request.model</code></td><td>Requested model name.</td></tr>
+    <tr><td><code>gh-aw.model.requested</code></td><td>Configured model request, including a routing placeholder when applicable.</td></tr>
+    <tr><td><code>gh-aw.model.effort</code></td><td>Effective reasoning effort for the selected routed model.</td></tr>
     <tr><td><code>gen_ai.operation.name</code></td><td>Always <code>chat</code> for built-in agent spans.</td></tr>
     <tr><td><code>gen_ai.workflow.name</code></td><td>Workflow name repeated in GenAI namespace.</td></tr>
     <tr><td><code>gen_ai.response.model</code></td><td>Resolved runtime model when available.</td></tr>
@@ -156,9 +160,40 @@ These attributes carry model, token, and stop-reason data on built-in agent span
   </tbody>
 </table>
 
+## Model-routing attributes
+
+These attributes are emitted at most once per run, on the agent job's conclusion span, when model routing is active. Values are selected from agent-provenance routing records, with routing metadata and proxy-log fallbacks when the unified session file is unavailable.
+
+<table>
+  <thead>
+    <tr>
+      <th>Attribute</th>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td><code>gh-aw.model_routing.status</code></td><td>string</td><td>Routing status, such as <code>selected</code>, <code>failed</code>, or <code>rejected</code>.</td></tr>
+    <tr><td><code>gh-aw.model_routing.mode</code></td><td>string</td><td>Routing mode when available.</td></tr>
+    <tr><td><code>gh-aw.model_routing.router_version</code></td><td>string</td><td>Router version when available.</td></tr>
+    <tr><td><code>gh-aw.model_routing.failure_code</code></td><td>string</td><td>Low-cardinality routing failure code; emitted only when status is not <code>selected</code>.</td></tr>
+    <tr><td><code>gh-aw.model_routing.objective</code></td><td>string</td><td>Selection objective, for example <code>cost</code>, when present.</td></tr>
+    <tr><td><code>gh-aw.model_routing.task_type</code></td><td>string</td><td>Validated task-type classification label when present.</td></tr>
+    <tr><td><code>gh-aw.model_routing.scope</code></td><td>string</td><td>Validated scope classification label when present.</td></tr>
+    <tr><td><code>gh-aw.model_routing.complexity</code></td><td>string</td><td>Validated task-complexity classification label when present.</td></tr>
+    <tr><td><code>gh-aw.model_routing.degraded</code></td><td>boolean</td><td>Whether classification was degraded, when a selection record provides the flag.</td></tr>
+    <tr><td><code>gh-aw.model_routing.classifier_aic</code></td><td>double</td><td>AI credits summed from agent-provenance token-usage events attributed to routing classification, when available. This value is separate from, and is not added to, <code>gh-aw.aic</code>.</td></tr>
+    <tr><td><code>gh-aw.model_routing.deviated_requests</code></td><td>integer</td><td>Count of requests not served as selected, using the same endpoint-only deviation normalization as routing audit.</td></tr>
+  </tbody>
+</table>
+
+Routing spans do not include ranked choices, selected IDs, conversation hashes, classifier rationale or degraded-reason text, or per-request details. Non-routed runs and non-agent conclusion spans do not include <code>gh-aw.model_routing.*</code> attributes. Classifier AI credits are not added to or subtracted from <code>gh-aw.aic</code>.
+
 ## Workflow-call and episode attributes
 
 These attributes are emitted when a run participates in an episode or nested workflow-call structure.
+
+The episode ID stays fixed across hops. Each child records its immediate caller's hop ID as its parent, not the caller's parent. Workflow references distinguish reusable workflow hops that share a GitHub run ID; the logs rollup remains run-level and does not emit edges between hops within that shared run.
 
 <table>
   <thead>
@@ -171,9 +206,9 @@ These attributes are emitted when a run participates in an episode or nested wor
     <tr><td><code>gh-aw.episode.id</code></td><td>Episode identifier used to roll up related runs.</td></tr>
     <tr><td><code>gh-aw.episode.kind</code></td><td>Episode kind such as <code>run</code> or <code>workflow_call</code>.</td></tr>
     <tr><td><code>gh-aw.hop.id</code></td><td>Current hop identifier within an episode.</td></tr>
-    <tr><td><code>gh-aw.hop.parent_id</code></td><td>Parent hop identifier when nested.</td></tr>
+    <tr><td><code>gh-aw.hop.parent_id</code></td><td>Immediate caller's hop identifier when nested; omitted for root hops.</td></tr>
     <tr><td><code>gh-aw.workflow_call.id</code></td><td>Current workflow-call hop identifier.</td></tr>
-    <tr><td><code>gh-aw.workflow_call.parent_id</code></td><td>Parent workflow-call hop identifier.</td></tr>
+    <tr><td><code>gh-aw.workflow_call.parent_id</code></td><td>Legacy alias of <code>gh-aw.hop.parent_id</code>.</td></tr>
     <tr><td><code>gh-aw.origin.event</code></td><td>Original triggering event for the root execution.</td></tr>
     <tr><td><code>gh-aw.root.repo</code></td><td>Root repository for the episode.</td></tr>
     <tr><td><code>gh-aw.root.workflow_id</code></td><td>Root workflow identifier.</td></tr>

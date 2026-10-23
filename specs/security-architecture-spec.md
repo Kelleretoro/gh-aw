@@ -7,7 +7,7 @@ sidebar:
 
 # GitHub Agentic Workflows Security Architecture Specification
 
-**Version**: 1.0.1  
+**Version**: 1.1.4<br>
 **Status**: Candidate Recommendation  
 **Latest Version**: https://github.com/github/gh-aw/blob/main/specs/security-architecture-spec.md  
 **Editors**: GitHub Next (GitHub, Inc.)
@@ -22,7 +22,7 @@ The security architecture employs defense-in-depth principles including input sa
 
 ## Status of This Document
 
-This is a Candidate Recommendation specification and represents the current state of the GitHub Agentic Workflows security architecture as implemented in version 1.0.0. This specification is subject to updates based on security research, community feedback, and operational experience. Future versions may introduce additional security controls or refine existing requirements.
+This is a Candidate Recommendation specification and represents the current state of the GitHub Agentic Workflows security architecture. This specification is subject to updates based on security research, community feedback, and operational experience. Future versions may introduce additional security controls or refine existing requirements.
 
 **Publication Date**: January 29, 2026  
 **Governance**: This specification is maintained by GitHub Next and governed by GitHub's security and research processes.
@@ -78,7 +78,7 @@ This specification does NOT cover:
 - Application-level security for workflows (responsibility of workflow authors)
 - GitHub Actions platform security (covered by GitHub documentation)
 - Operational security procedures for managing workflows
-- Incident response or security monitoring procedures
+- General incident response or security monitoring procedures (the transport-trust update procedure in §6.8 is included)
 
 ### 1.3 Design Goals
 
@@ -229,6 +229,7 @@ The security architecture protects against:
 4. **Privilege Escalation**: Unauthorized elevation of permissions or capabilities
 5. **Supply Chain Attacks**: Compromised dependencies or actions
 6. **Resource Exhaustion**: Denial of service through infinite loops or resource consumption
+7. **Compromised Certificate Authorities**: An attacker with network interception capability and a formerly trusted intermediate CA key can impersonate allowed HTTPS destinations to clients that have not applied distrust updates. Domain allowlisting, browser updates, and unsigned checksums fetched alongside artifacts do not independently prevent this attack.
 
 **Threat Model Clarification**: While the input sanitization layer prevents template injection through GitHub event context, AI agents may still access untrusted data at runtime through MCP tools. For example, the GitHub MCP server can return issue titles, PR bodies, and comments that were not pre-sanitized by the activation job. This is an accepted architectural tradeoff that enables dynamic workflows while relying on:
 - **Threat detection**: Analyzes agent output for malicious behavior before execution
@@ -537,6 +538,44 @@ network:
 **NI-14**: The network allowlist MUST also apply to content sanitization:
 - URIs from non-allowed domains MUST be replaced with `(redacted)`
 - GitHub domains SHOULD be allowed by default
+
+### 6.8 Transport Trust and Bootstrap Integrity
+
+Destination authorization, endpoint authentication, and artifact authentication are separate boundaries. Ordinary hostname/chain validation is necessary but insufficient when the client still trusts a compromised CA. SSL interception adds another verifier: updating the client-side proxy CA does not update the proxy's upstream trust store.
+
+| Requirement | Contract and evidence |
+|---|---|
+| **TT-01 TLS policy** | The following hardened bootstrap curl paths MUST restrict both initial and redirected URLs to HTTPS and MUST retain hostname/chain validation: `install_awf_binary.sh`, `install_copilot_cli.sh`, `install_threat_detect_binary.sh`, the GitHub CLI key installer (`install_gh_cli.sh`), Cloud Hypervisor setup downloads (including `cloud_hypervisor_setup_bundle.sh`'s latest-release API probe), and the generated Compose installer in `copilot_engine_installation.go`. No insecure certificate override or HTTP retry is permitted on these paths. The inline Maven bootstrap in `copilot_engine_installation.go` remains outside this TLS policy and TT-02's independent archive-integrity guarantees. |
+| **TT-02 Independent release integrity** | AWF and downloaded Copilot CLI archives MUST authenticate their checksum manifest against a release-bound SHA256 digest before consuming it. The trusted setup action's `release_integrity.sh` supplies built-in pins; literal workflow `sandbox.agent.checksums-sha256` (AWF `checksums.txt`) and `engine.checksums-sha256` (Copilot `SHA256SUMS.txt`) MUST allow independently provisioned overrides for explicit semantic release versions. Missing, duplicate or malformed trusted pins and mismatched bytes MUST fail installation before archive extraction, installation or execution. Explicit Copilot pins MUST bypass toolcache activation and verify both host and requested musl guest archives. Pins MUST propagate with their versions to matching detection/eval installations; engine normalization MUST NOT carry another engine's version or pin. Replacing both the artifact and its network-served checksum MUST NOT bypass authentication. A bundle integrity failure MUST NOT trigger an AWF binary fallback. Threat-detect retains compiler-supplied asset digests; Compose retains architecture-specific compiler digests and an inline verifier in the generated installer, without sourcing a job-writable helper; `install_gh_cli.sh` authenticates the GitHub CLI apt signing key before installation. Cloud Hypervisor/NVX attestation checks remain independent requirements. |
+| **TT-03 Toolchain evidence** | Release builds MUST reject Go toolchains older than 1.27.3 and development/prerelease toolchains. `scripts/check-go-toolchain.sh` checks the actual compiler; `scripts/build-release.sh` inspects each native binary's embedded toolchain and records `dist/build-toolchain.txt`. Repository modules, lint tooling, the devcontainer and owned workflow Go pins use 1.27.3; user-selected Go runtimes remain author-controlled and are not attested by compilation. Generated root capture and Serena setup MUST clear inherited `GOROOT` when discovering the selected local toolchain and refresh the host environment before subsequent builds. |
+| **TT-04 Runtime evidence** | Setup MUST log a bounded inventory of available host TLS consumers without credentials, environment dumps, or authenticated URLs. Missing inspection tools and uninspected container/proxy trust stores MUST be identified rather than reported as compliant. `runtime_trust_inventory.sh` supplies host versions; image operators retain responsibility for image contents and actual trust-store selection. |
+
+The trusted bootstrap baseline includes the setup action and its digest table, literal author-supplied version/pin pairs, compiler, GitHub Actions control plane, and runner/toolcache provisioning. It excludes attacker-controlled network responses. A preinstalled Copilot CLI from a trusted runner toolcache retains the existing cache policy only when no explicit manifest pin is supplied; cache contents are not newly authenticated by download checks. An arbitrary runner binary, compromised setup action, or malicious workflow author is not repaired by a digest table.
+
+Compiler validation MUST reject malformed or nonliteral supplied digests, missing/dynamic versions paired with pins, and pins for unsupported or skipped installers. Only the built-in Copilot CLI installer accepts `engine.checksums-sha256`, including an explicit `safe-outputs.threat-detection.engine` override. A disabled/custom AWF sandbox or custom engine command cannot consume these pins. Without supplied pins, existing built-in digests and trusted toolcache behavior remain unchanged. `schema_release_integrity_test.go` and `release_integrity_validation_test.go` cover schema types, extraction, validation, generation, inheritance and identity boundaries; `release_integrity_test.sh` exercises custom release downloads, cache bypass and musl verification with real digest checks.
+
+#### Runtime trust inventory and ownership
+
+| Consumer | Trust authority to inspect | Owner and required update evidence |
+|---|---|---|
+| gh-aw and gh Go binaries | Embedded Go `crypto/x509` plus platform verifier/root store | Release maintainers record the actual build toolchain; runner operators inspect separately provisioned `gh`. A newer `go` executable does not patch existing binaries. |
+| Host Git/curl and apt | curl TLS backend, OS CA/blocklist packages, apt signing keys | Runner-image operators update and rebuild images; TLS bootstrap of signing keys also requires independent key authentication. |
+| Node and engine CLIs | Node/OpenSSL version, bundled/system CAs and vendor distrust implementation | Runtime vendors and runner operators provide patched-version/distrust evidence. Do not invent a Node patch floor while its vendor fix is pending. |
+| Python clients | OpenSSL/system CAs or requests/certifi bundle actually selected by the client | Runtime-image operators update the selected bundle; certifi 2026.10.19 addresses this incident. Merely installing certifi does not change every client's CA source. |
+| AWF Squid/API/CLI proxies | Upstream TLS verifier inside each digest-pinned image | AWF maintainers rebuild affected images; gh-aw maintainers review and refresh digests. Pinning freezes bytes, including an outdated trust store. |
+| MCP servers and guest/container engines | Each image or guest's TLS implementation, custom CA configuration and dependency bundles | Image/guest owners rebuild and attest each consumer separately. Updating only the host or browser is insufficient. |
+
+#### Emergency distrust procedure
+
+1. Confirm affected keys, cross-signs and vendor guidance from the [incident report](https://emudhra.we-have-a-problem.com) and [Go advisory](https://groups.google.com/g/golang-announce/c/66pojueaQek). Track key/SPKI identity across alternative chains, not only one certificate fingerprint. Do not download or use compromised private keys.
+2. Inventory the consumers above and their deployed versions/digests. Treat unavailable vendor evidence as unknown, not protected. Do not rely on universal OCSP/CRL consumption or a successful HTTPS probe.
+3. Update supported trust stores and runtimes, rebuild distributed Go binaries and affected images, and review new pins from an independently authenticated release process. Never acquire an emergency trusted pin solely from the same potentially intercepted download channel. Reject rollback to known-vulnerable releases; do not change historical run results.
+4. Exercise offline distrust tests for affected keys and their cross-signs, artifact-plus-checksum replacement, rejection before execution, supported architecture selection, and HTTPS downgrade rejection. Keep a valid-chain control to distinguish a deliberate distrust failure from an otherwise broken verifier.
+5. Publish new compiler/setup releases and refreshed image digests through the normal release process. Record build-toolchain evidence and remaining unpatched consumers. Do not disable certificate validation or weaken the sandbox to restore availability; temporarily suspend affected execution where no trustworthy client is available.
+
+#### Conformance evidence and limits
+
+`release_integrity_test.sh`, `install_awf_binary_test.sh`, `install_threat_detect_binary_test.sh`, `scripts/check-go-toolchain_test.sh`, and the focused Go installer/compiler tests exercise these controls. `TestTransportTrustRejectsCompromisedCAKeysAcrossCrossSigns` checks a representative original/cross-signed public-certificate pair against Go's native key-level distrust using explicit trust anchors; `TestTransportTrustAcceptsUnaffectedCA` is the valid-chain control. These are offline verifier tests, not live TLS or comprehensive vendor/store attestations. `TestTransportTrustBootstrapRedirectPolicy` uses a local trusted HTTPS server to verify that an HTTP redirect is refused before its destination is contacted. Broader package-manager downloads and upstream images need their own signature/lockfile and vendor deployment evidence; this change does not attest or patch upstream images. A compiler-wide rejection rule for unauthenticated downloads is a candidate, not an active `CTR-*` rule, until implementation and deployment evidence satisfy the compiler specification's candidacy process.
 
 ---
 
@@ -968,13 +1007,15 @@ if: github.event.pull_request.head.repo.id == github.repository_id
 - Repository ID match: `github.event.workflow_run.repository.id == github.repository_id`
 - Not from fork: `!github.event.workflow_run.repository.fork`
 
-**RS-05a**: For `workflow_dispatch` triggers where the `aw_context` input encodes a pull request context (`item_type == "pull_request"`), the implementation MUST enforce all of the following before executing a PR checkout:
+**RS-05a**: Before any PR checkout, the implementation MUST enforce the following actor-trust and ref-isolation controls. The repository-scope and parse-resilience requirements apply to `workflow_dispatch` PR contexts encoded in `aw_context` (`item_type == "pull_request"`):
 
-1. **Repository scope**: If `aw_context.repo` is present, the implementation MUST compare it against the current repository identity (`context.repo.owner/context.repo.repo`). A mismatch MUST cause checkout to be skipped with a warning; cross-repository PR checkout is NOT supported.
+1. **Repository scope** (`workflow_dispatch` PR contexts): If `aw_context.repo` is present, the implementation MUST compare it against the current repository identity (`context.repo.owner/context.repo.repo`). A mismatch MUST cause checkout to be skipped with a warning; cross-repository PR checkout is NOT supported.
 2. **Actor trust**: The triggering actor MUST satisfy `assertTrustedCheckoutRuntime()`, which enforces two properties with different scopes:
    - **Fork-runtime rejection** (`workflow_dispatch` PR replay ONLY): the runtime repository MUST NOT be a fork. This check MUST NOT be evaluated for other PR-capable triggers (`pull_request`, `pull_request_target`, `pull_request_review`, `pull_request_review_comment`, `issue_comment`), because a structurally forked base repository is a legitimate topology for those triggers and rejecting it produces a false positive (see the risk matrix below). The payload MUST contain `repository.fork` as the boolean `false`; missing or malformed fork metadata MUST fail closed rather than be treated as trusted.
-   - **Permission floor** (ALL PR checkout paths): the actor MUST hold write-or-higher repository permission. For centralized command or label dispatches where the runtime actor is `github-actions[bot]`, the platform-set `sender.type` MUST be `Bot`, a command/label marker MUST be present, and the originating `aw_context.actor` MUST be a different identity with write-or-higher permission. Missing or inconsistent identity metadata MUST fail closed before permission lookup. Bot/app actors MAY use `sender.type == "Bot"` only as an identity signal; it MUST NOT bypass the repository permission check. If a bot/app actor's repository permission cannot be verified, checkout MUST fail closed.
-3. **Parse resilience**: Malformed `aw_context` JSON MUST be caught; the implementation MUST emit a warning and skip checkout rather than propagating the parse error.
+   - **Permission floor** (all PR checkout paths except the two same-repository bot cases below): the actor MUST hold write-or-higher repository permission. For centralized command or label dispatches where the runtime actor is `github-actions[bot]`, the platform-set `sender.type` MUST be `Bot`, a command/label marker MUST be present, and the originating `aw_context.actor` MUST be a different identity with write-or-higher permission. Missing or inconsistent identity metadata MUST fail closed before permission lookup.
+   - **Same-repository bot PR events**: `pull_request` or `pull_request_target` `opened`, `synchronize`, `ready_for_review`, or `reopened` events MAY bypass the collaborator-permission lookup only when `sender.type == "Bot"`, `sender.login` matches the triggering actor, and the positive runtime repository ID, PR head repository ID, and PR base repository ID are equal. `ready_for_review` and `reopened` are PR lifecycle transitions, not evidence of a branch push; they are trusted only as explicitly allowed event actions under the same Bot identity and same-repository provenance checks. Missing or inconsistent identity or repository metadata, forked PRs, and all other event actions MUST NOT use this exception and MUST satisfy the permission floor.
+   - **Same-repository allow-listed bot comments and reviews**: `issue_comment`, `pull_request_review_comment`, and `pull_request_review` events MAY bypass the collaborator-permission lookup only when `sender.type == "Bot"`, `sender.login` exactly matches `comment.user.login` or `review.user.login` as appropriate, the sender login is canonically equivalent to the triggering actor (the App slug and its `[bot]` form are equivalent), the actor is explicitly listed in `on.bots`, and the positive runtime repository ID equals both the fetched PR head and base repository IDs. Missing or mismatched identities, an unlisted actor, missing or mismatched repository IDs, and fork PRs MUST NOT use this exception and MUST satisfy the permission floor. Failure to fetch or verify the PR details MUST fail closed.
+3. **Parse resilience** (`workflow_dispatch` PR contexts): Malformed `aw_context` JSON MUST be caught; the implementation MUST emit a warning and skip checkout rather than propagating the parse error.
 4. **Ref isolation**: The PR head MUST be fetched exclusively via `refs/pull/N/head` from the current repository's origin, using array-based execution (no shell interpolation).
 
 The implementation MUST NOT perform checkout unless `aw_context.item_number` is a positive safe integer or its canonical decimal string representation. Values requiring JavaScript coercion (including booleans, whitespace, exponent notation, hexadecimal notation, fractional values, objects, and arrays) MUST be rejected before actor, API, or git operations.
@@ -987,13 +1028,14 @@ Centralized actor propagation relies on the repository's `actions: write` trust 
 | --- | --- | --- |
 | `pull_request` (same-repo head) | yes/no | Allowed after actor trust check; direct branch fetch. |
 | `pull_request` (fork head) | yes/no | Allowed after actor trust check; fetches `refs/pull/N/head`. |
-| `pull_request_target`, `pull_request_review`, `pull_request_review_comment`, `issue_comment` on a PR | yes/no | Allowed after actor trust check; fetches `refs/pull/N/head` from the base context. |
+| `pull_request_target` on a PR | yes/no | Allowed after actor trust check; fetches `refs/pull/N/head` from the base context. |
+| `pull_request_review`, `pull_request_review_comment`, `issue_comment` on a PR | yes/no | Allow-listed same-repository Bot comments or reviews may use the author exception; all other actors require write-or-higher permission. Checkout fetches `refs/pull/N/head` from the base context. |
 | `workflow_dispatch` with valid PR `aw_context` | no | Allowed after actor trust check; fetches `refs/pull/N/head`. |
 | `workflow_dispatch` with valid PR `aw_context` | yes | Rejected before actor/API/git operations. |
 | `workflow_dispatch` with valid PR `aw_context` and no `repository` payload | unverifiable | Rejected (fail closed); the implementation MUST NOT infer non-fork status from absent data. |
 | Any trigger without PR context, or a malformed/non-PR/cross-repository `aw_context` | any | Checkout is skipped before the fork-runtime check is reached. |
 
-Only the fork-runtime rejection row is scope-limited to `workflow_dispatch`; the permission floor and ref-isolation properties apply uniformly across every row.
+Only the fork-runtime rejection row is scope-limited to `workflow_dispatch`. Ref isolation applies uniformly across every row; the permission floor applies except for the explicitly constrained same-repository bot branch-event and allow-listed bot-comment/review cases.
 
 **RS-05a and the `on.fork` frontmatter field**: The `fork` GitHub Actions event (`on: {fork: null}`, exposed as `on: repository forked` in the DSL) is unrelated to RS-05a and does not interact with it. That event fires in the base/upstream repository when someone forks it, carries no `pull_request` payload, and is not `workflow_dispatch`, so `pullRequest` is never resolved in `checkout_pr_branch.cjs` and `assertTrustedCheckoutRuntime()` is never invoked for it — checkout is skipped before the fork-runtime check is reached (last row of the risk matrix above), regardless of `payload.repository.fork`. This is also distinct from the `pull_request`/`pull_request_target` `forks:` allowlist field (RS-04-adjacent), which gates workflow *activation* for inbound PRs from a forked head repository and is evaluated in the compiled `if:` condition, not in `assertTrustedCheckoutRuntime()`.
 
@@ -2040,7 +2082,7 @@ roles: [admin, maintainer]  # Restrict to trusted roles
 
 - **[ACTIONLINT]** "actionlint: Static checker for GitHub Actions workflow files." https://github.com/rhysd/actionlint
 
-- **[ZIZMOR]** "zizmor: Security scanner for GitHub Actions." https://github.com/woodruffw/zizmor
+- **[ZIZMOR]** zizmor maintainers and contributors. "zizmor: Security scanner for CI/CD systems." https://github.com/zizmorcore/zizmor. [Audit Rules](https://docs.zizmor.sh/audits/); [MIT License](https://github.com/zizmorcore/zizmor/blob/main/LICENSE). Selected gh-aw AST checks build on zizmor's security research, audit definitions, names, and remediation guidance; gh-aw's independent implementations do not imply equivalent coverage or upstream endorsement.
 
 - **[GHAW-DOCS]** "GitHub Agentic Workflows Documentation." https://github.com/github/gh-aw
 
@@ -2049,6 +2091,49 @@ roles: [admin, maintainer]  # Restrict to trusted roles
 ---
 
 ## Change Log
+
+### Version 1.1.4 (Transport Trust and Bootstrap Integrity)
+
+**Published**: October 20, 2026
+
+- Adds the compromised-intermediate-CA threat and TT-01 through TT-04 bootstrap, toolchain and inventory contracts, separate from domain authorization.
+- Authenticates AWF/Copilot checksum manifests independently, pins Compose and apt signing-key bytes, and rejects HTTPS bootstrap downgrade.
+- Documents per-consumer trust ownership, emergency distrust updates and remaining upstream/package-manager coverage limitations.
+
+### Version 1.1.3 (RS-05a Same-Repository Bot PR Event Checkout)
+
+**Published**: October 16, 2026
+
+- Extends the same-repository bot branch-event exception to `ready_for_review` and `reopened` for `pull_request` and `pull_request_target`.
+- Preserves the Bot sender/runtime actor match and positive runtime, PR-head, and PR-base repository ID equality requirements; all other actions retain the collaborator permission floor.
+- Updates RS-05a conformance mapping and bounded TLA+ evidence.
+
+### Version 1.1.2 (RS-05a Allow-Listed App Review Checkout)
+
+**Published**: October 12, 2026
+
+- Extends the allow-listed same-repository GitHub App checkout exception to `pull_request_review` in addition to `issue_comment` and `pull_request_review_comment`.
+- Requires exact sender/comment-or-review-author login equality, canonical sender/runtime actor equivalence, an explicit `on.bots` entry, and matching positive runtime, PR head, and PR base repository IDs.
+- Preserves the collaborator-permission floor for forks, unlisted bots, identity or repository mismatches, and all other actors; unavailable PR details fail closed.
+- Updates RS-05a unit-test, Z3, and TLA+ evidence in `security-architecture-spec-validation.md`.
+
+### Version 1.1.1 (RS-05a Allow-Listed App Comment Checkout)
+
+**Published**: October 9, 2026
+
+- Adds a narrowly scoped same-repository checkout exception for allow-listed GitHub App comments on `issue_comment` and `pull_request_review_comment` events.
+- Requires exact sender/comment-author login equality, canonical sender/runtime actor equivalence, an explicit `on.bots` entry, and matching positive runtime, PR head, and PR base repository IDs.
+- Preserves the collaborator-permission floor for forks, unlisted bots, identity or repository mismatches, and all other actors; unavailable PR details fail closed.
+- Updates the RS-05a unit-test and Z3 evidence in `security-architecture-spec-validation.md`.
+
+### Version 1.1.0 (RS-05a Trust Contract Revision)
+
+**Published**: October 1, 2026
+
+- Adds a same-repository bot exception to the RS-05a permission floor for `pull_request` and `pull_request_target` `opened` or `synchronize` events when sender identity and runtime, PR head, and PR base repository IDs are verified.
+- Preserves collaborator-permission checks for forks, unverifiable metadata, comments, reviews, dispatches, and all other event actions.
+- Updates the RS-05a validation evidence and Z3 proof mapping in `security-architecture-spec-validation.md`.
+- Backed by focused unit tests for successful branch events and independent rejection of each missing or mismatched trust condition.
 
 ### Version 1.0.1 (Editorial Update, addendum: September 24, 2026)
 
@@ -2145,5 +2230,7 @@ The revalidation cadence **SHOULD** also include a review of `specs/security-arc
 The most recent full validation pass against this specification was completed on **2026-07-15**. The results are recorded in `specs/security-architecture-spec-validation.md`. Any changes to MUST-level requirements after this date require a new validation pass per the triggers above.
 
 Sync check on **2026-08-25** found no new minor-version bump, reported security incident, or reference-implementation change requiring a full revalidation since the 2026-07-15 pass. This maintenance pass synchronized §9/§11 prose to the existing `pkg/workflow/threat_detection_config.go` parser and `pkg/workflow/threat_detection_inline_engine.go` runtime behavior; because it clarifies MUST-level runtime sequencing text, a targeted §9/§11 revalidation is scheduled with the Security Architecture maintainers by **2026-09-01**. The known Appendix G.10 partial-coverage gaps remain tracked there.
+
+On **2026-10-09**, RS-05a was targeted-revalidated against the allow-listed same-repository App comment implementation, unit tests, and Z3 safety model for Version 1.1.1. Version 1.1.2 extends that contract to `pull_request_review` and updates its conformance mapping and formal model; targeted revalidation of those additions is pending in `security-architecture-spec-validation.md` §7b. Version 1.1.3 extends the same-repository bot branch-event exception to `ready_for_review` and `reopened`; targeted revalidation of those additions is also pending in §7b. This does not replace the full revalidation pass required by the policy. The previous RS-05a branch-event revalidation was completed on 2026-10-01.
 
 *This specification is provided under the MIT License.*

@@ -62,8 +62,7 @@ All diagnostic output MUST go to `stderr` using `console` formatting helpers. St
 | `gh aw forecast` | `NewForecastCommand` | Forecast token usage and costs for agentic workflows |
 | `gh aw trial` | `NewTrialCommand` | Run trial workflow executions |
 | `gh aw deploy` | `NewDeployCommand` | Deploy agentic workflows to a target repository using a pull request |
-| `gh aw outcomes` | `NewOutcomesCommand` | Check what happened to a workflow run's safe outputs |
-| `gh aw outcomes history` | `NewOutcomesHistorySubcommand` | Score recent closed issues and merged PRs against the objective mapping |
+| `gh aw logs --outcomes` | `NewLogsCommand` | Check what happened to selected runs' safe outputs |
 | _No `gh aw deps` command_ | `deps_*.go` (internal utilities) | Dependency reporting/advisory helpers used by other commands |
 | `gh aw doctor` | `NewDoctorCommand` | Run diagnostics to verify CLI authentication and repository setup |
 | `gh aw version` | `versionCmd` (main.go) | Show version information |
@@ -84,13 +83,13 @@ The `cli` package is intentionally large and command-oriented. The tables below 
 | `ResolvedWorkflow` | struct | Metadata and fetched content for a single resolved workflow source. |
 | `ResolvedWorkflows` | struct | Batch resolution result for `gh aw add`, including warnings and bootstrap profile metadata. |
 | `RunOptions` | struct | Options for triggering workflows on GitHub, including enable/push/wait/dry-run behavior. |
+| `WorkflowRunFlags` | struct | Shared run flags embedded in `RunOptions` and `RunWorkflowOptions`. |
 | `WorkflowRunResult` | struct | JSON-friendly result for a triggered or simulated workflow run. |
 | `HealthConfig` | struct | Configuration for workflow health analysis. |
 | `WorkflowHealth` | struct | Per-workflow health metrics computed from historical runs. |
 | `HealthSummary` | struct | Aggregate health summary across workflows. |
 | `ChecksConfig` | struct | Inputs for normalizing CI check state for a pull request. |
 | `ChecksResult` | struct | Normalized check-rollup result returned by `FetchChecksResult`. |
-| `OutcomesConfig` | struct | Configuration for safe-output outcome evaluation for a single run. |
 | `OutcomesData` | struct | Structured outcomes report for JSON output. |
 | `UpdateWorkflowsOptions` | struct | Options controlling `gh aw update` behavior for sourced workflows. |
 | `WorkflowStatus` | struct | Status view for a workflow, combining list metadata with latest run state. |
@@ -138,12 +137,9 @@ The `cli` package is intentionally large and command-oriented. The tables below 
 | `RunHealth` | `func RunHealth(config HealthConfig) error` | Computes workflow health metrics for one workflow or all workflows. |
 | `CalculateWorkflowHealth` | `func CalculateWorkflowHealth(workflowName string, runs []WorkflowRun, threshold float64) WorkflowHealth` | Calculates success-rate and trend metrics for one workflow. |
 | `CalculateHealthSummary` | `func CalculateHealthSummary(workflowHealths []WorkflowHealth, period string, threshold float64) HealthSummary` | Aggregates workflow health results. |
-| `GroupRunsByWorkflow` | `func GroupRunsByWorkflow(runs []WorkflowRun) map[string][]WorkflowRun` | Groups historical runs by workflow identifier. |
 | `NewChecksCommand` | `func NewChecksCommand() *cobra.Command` | Constructs the `gh aw checks` command. |
 | `RunChecks` | `func RunChecks(config ChecksConfig) error` | Emits normalized PR check state. |
 | `FetchChecksResult` | `func FetchChecksResult(repoOverride string, prNumber string) (*ChecksResult, error)` | Returns normalized CI state for a pull request. |
-| `NewOutcomesCommand` | `func NewOutcomesCommand() *cobra.Command` | Constructs the `gh aw outcomes` command. |
-| `RunOutcomes` | `func RunOutcomes(ctx context.Context, config OutcomesConfig) error` | Evaluates what happened to safe outputs from a workflow run. |
 | `EvaluateOutcomes` | `func EvaluateOutcomes(ctx context.Context, items []CreatedItemReport, repoOverride string, mapping *github.ObjectiveMapping) []OutcomeReport` | Evaluates current state for created GitHub objects. |
 | `ComputeOutcomeSummary` | `func ComputeOutcomeSummary(reports []OutcomeReport, mapping *github.ObjectiveMapping) OutcomeSummary` | Summarizes outcome reports. |
 | `NewUpdateCommand` | `func NewUpdateCommand(validateEngine func(string) error) *cobra.Command` | Constructs the `gh aw update` command. |
@@ -326,7 +322,6 @@ The `cli` package exports many types used across its command implementations. Th
 | `OutcomeReport` | struct | Result of evaluating one safe output item — outcome, timing, human engagement, and objective value |
 | `OutcomeStatus` | string alias | Outcome classification: `accepted`, `rejected`, `ignored`, `pending`, `skipped`, `unknown`, `lifecycle`, `lifecycle_close`, `error` |
 | `OutcomeSummary` | struct | Aggregated outcome statistics across multiple safe output items |
-| `OutcomesHistoryConfig` | struct | Configuration for `RunOutcomesHistory` |
 | `PRCheckRun` | struct | A single CI check run attached to a pull request |
 | `PRCommitStatus` | struct | A commit status context for a pull request |
 | `PRInfo` | type alias | Backward-compatible alias for `PullRequest` |
@@ -432,10 +427,10 @@ The `cli` package exports many types used across its command implementations. Th
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `ZizmorImage` | `"ghcr.io/zizmorcore/zizmor:latest"` | Default image for Zizmor security scanner. |
-| `PoutineImage` | `"ghcr.io/boostsecurityio/poutine:latest"` | Default image for Poutine supply-chain scanner. |
-| `ActionlintImage` | `"rhysd/actionlint:1.7.12"` | Default image for Actionlint workflow linter. |
-| `RunnerGuardImage` | `"ghcr.io/vigilant-llc/runner-guard:latest"` | Default image for Runner Guard sandbox. |
+| `ZizmorImage` | `"ghcr.io/zizmorcore/zizmor:1.31.1@sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9"` | Default image for Zizmor security scanner. |
+| `PoutineImage` | `"ghcr.io/boostsecurityio/poutine:1.1.6@sha256:722a8e0999b583c1540fe2974e691032b2d9d21b9256a17965132b6bfd0081b0"` | Default image for Poutine supply-chain scanner. |
+| `ActionlintImage` | `"rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667"` | Default image for Actionlint workflow linter. |
+| `RunnerGuardImage` | `"ghcr.io/vigilant-llc/runner-guard:3.1.5@sha256:2df426ef96d21f1622e05b21329f26bd263fc46110609cefb6afe43457613ac0"` | Default image for Runner Guard sandbox. |
 
 #### Timeline Event Constants
 
@@ -474,10 +469,60 @@ data, err := cli.CompileWorkflows(ctx, cli.CompileConfig{
 
 ```go
 err := cli.RunWorkflowOnGitHub(ctx, "my-workflow", cli.RunOptions{
-    Repo:    "owner/repo",
-    Verbose: true,
+    WorkflowRunFlags: cli.WorkflowRunFlags{
+        RepoOverride: "owner/repo",
+        Verbose:      true,
+    },
 })
 ```
+
+#### Migrating workflow run option literals
+
+`RunOptions` and `RunWorkflowOptions` now embed `WorkflowRunFlags`, as requested
+by issue [#67198](https://github.com/github/gh-aw/issues/67198). This is a breaking
+Go source API change: promoted fields cannot be keys in an outer struct's
+composite literal.
+
+Before (no longer compiles):
+
+```go
+runOpts := cli.RunOptions{
+    RepoOverride: "owner/repo",
+    Verbose:      true,
+    Enable:       true,
+}
+interactiveOpts := cli.RunWorkflowOptions{
+    WorkflowName: "my-workflow",
+    RepoOverride: "owner/repo",
+    Verbose:      true,
+}
+```
+
+After:
+
+```go
+runOpts := cli.RunOptions{
+    WorkflowRunFlags: cli.WorkflowRunFlags{
+        RepoOverride: "owner/repo",
+        Verbose:      true,
+    },
+    Enable: true,
+}
+interactiveOpts := cli.RunWorkflowOptions{
+    WorkflowRunFlags: cli.WorkflowRunFlags{
+        RepoOverride: "owner/repo",
+        Verbose:      true,
+    },
+    WorkflowName: "my-workflow",
+}
+```
+
+Move `Verbose`, `EngineOverride`, `RepoOverride`, `RefOverride`, `AutoMergePRs`,
+`Push`, `DryRun`, and `Approve` into the nested `WorkflowRunFlags` literal.
+Keep mode-specific fields on the outer struct. Field selectors and assignments
+(for example, `runOpts.RepoOverride` and `interactiveOpts.Verbose = true`),
+zero-value defaults, and flat JSON serialization remain unchanged. CLI flags
+and runtime behavior are unchanged; CLI users do not need to migrate.
 
 ### Auditing a run
 
@@ -632,7 +677,7 @@ This appendix is generated from the current non-test Go source files in this pac
 | `outcome_evaluation.go` | `EvidenceStrength` | `type EvidenceStrength string` | EvidenceStrength describes how confidently the outcome can be inferred. |
 | `outcome_evaluation.go` | `OutcomeStatus` | `type OutcomeStatus string` | OutcomeStatus is the normalized classification for a safe output outcome. |
 | `packages.go` | `IncludeDependency` | `type IncludeDependency struct { SourcePath string // Path in the source (local) TargetPath string // Relative path where it should be copied in .github/workflows IsOptional bool // Whether this is an optional include (@include?) }` | IncludeDependency represents a file dependency from @include directives |
-| `run_interactive.go` | `RunWorkflowOptions` | `type RunWorkflowOptions struct { WorkflowName string Verbose bool EngineOverride string RepoOverride string RefOverride string AutoMergePRs bool Push bool DryRun bool }` | RunWorkflowOptions holds parameters for RunSpecificWorkflowInteractively. |
+| `run_interactive.go` | `RunWorkflowOptions` | `type RunWorkflowOptions struct { WorkflowRunFlags WorkflowName string requiredInputsOnly bool }` | RunWorkflowOptions holds parameters for interactive workflow runs. |
 | `token_usage_types.go` | `SubagentModelActual` | `type SubagentModelActual struct { Model string `json:"model"` Provider string `json:"provider,omitempty"` Requests int `json:"requests"` }` | SubagentModelActual captures model usage observed in token-usage logs. |
 | `token_usage_types.go` | `SubagentModelRequest` | `type SubagentModelRequest struct { AgentName string `json:"agent_name"` RequestedModel string `json:"requested_model"` InvocationCount int `json:"invocation_count"` EffectiveModel string `json:"effective_model,omitempty"` ReasonCode string `json:"reason_code,omitempty"` }` | SubagentModelRequest captures requested/effective model attribution for a sub-agent. |
 | `audit_report.go` | `AuditData` | `type AuditData struct { ... }` | AuditData is the top-level audit report payload assembled from all extracted artifacts and analyses. |
@@ -705,7 +750,7 @@ This appendix is generated from the current non-test Go source files in this pac
 | `logs_artifact_set.go` | `const` | `ArtifactSetUsage` | `const ArtifactSetUsage ArtifactSet = "usage"` | ArtifactSetUsage downloads the compact usage artifact produced by the conclusion job (aw-info. |
 | `logs_models.go` | `const` | `APICallCooldown` | `const APICallCooldown = 500 * time.Millisecond` | APICallCooldown is the minimum pause between successive batch-fetch iterations to avoid hitting the GitHub API rate limit when processing many runs in a single invocation. |
 | `logs_models.go` | `const` | `BatchSize` | `const BatchSize = 100` | BatchSize is the number of runs to fetch in each iteration |
-| `logs_models.go` | `const` | `BatchSizeForAllWorkflows` | `const BatchSizeForAllWorkflows = 250` | BatchSizeForAllWorkflows is the larger batch size when searching for agentic workflows There can be a really large number of workflow runs in a repository, so we are generous in the batch size when used without qualific… |
+| `logs_models.go` | `const` | `BatchSizeForAllWorkflows` | `const BatchSizeForAllWorkflows = 100` | Batch size when searching across all agentic workflows, capped at the GitHub API page size to avoid extra round-trips. |
 | `logs_models.go` | `const` | `GitHubActionsRetentionDays` | `const GitHubActionsRetentionDays = 90` | GitHubActionsRetentionDays is GitHub's default log-retention window for GitHub Actions workflow runs. |
 | `logs_models.go` | `const` | `MaxConcurrentDownloads` | `const MaxConcurrentDownloads = 10` | MaxConcurrentDownloads limits the number of parallel artifact downloads |
 | `logs_models.go` | `const` | `MaxIterations` | `const MaxIterations = 20` | MaxIterations limits how many batches we fetch to prevent infinite loops |
@@ -719,9 +764,9 @@ This appendix is generated from the current non-test Go source files in this pac
 | `mcp_registry_types.go` | `const` | `StatusActive` | `const StatusActive = "active"` | Status constants for server status |
 | `mcp_registry_types.go` | `const` | `StatusInactive` | `const StatusInactive = "inactive"` | Status constants for server status |
 | `docker_images.go` | `const` | `GrantImage` | `const GrantImage = "anchore/grant:v0.6.8@sha256:..."` | GrantImage is the pinned image used to run Grant license scanning. |
-| `docker_images.go` | `const` | `GrypeImage` | `const GrypeImage = "anchore/grype:v0.118.0@sha256:..."` | GrypeImage is the pinned image used to run Grype vulnerability scanning. |
+| `docker_images.go` | `const` | `GrypeImage` | `const GrypeImage = "anchore/grype:v0.120.1@sha256:..."` | GrypeImage is the pinned image used to run Grype vulnerability scanning. |
 | `docker_images.go` | `const` | `ShellcheckImage` | `const ShellcheckImage = "koalaman/shellcheck:v0.11.0@sha256:..."` | ShellcheckImage is the pinned image used for shellcheck validation. |
-| `docker_images.go` | `const` | `SyftImage` | `const SyftImage = "anchore/syft:v1.51.1@sha256:..."` | SyftImage is the pinned image used for Syft SBOM generation. |
+| `docker_images.go` | `const` | `SyftImage` | `const SyftImage = "anchore/syft:v1.54.1@sha256:..."` | SyftImage is the pinned image used for Syft SBOM generation. |
 | `docker_images.go` | `const` | `YamllintImage` | `const YamllintImage = "pipelinecomponents/yamllint:latest@sha256:..."` | YamllintImage is the pinned image used for yamllint checks. |
 | `flags.go` | `const` | `EngineFlagFilterUsage` | `const EngineFlagFilterUsage = "Filter logs by AI engine (...)"` | EngineFlagFilterUsage is the CLI help text for `--engine` log filtering. |
 | `flags.go` | `const` | `EngineFlagOverrideUsage` | `const EngineFlagOverrideUsage = "Override AI engine (...)"` | EngineFlagOverrideUsage is the CLI help text for `--engine-override`. |
@@ -846,7 +891,6 @@ This appendix is generated from the current non-test Go source files in this pac
 | `logs_metrics.go` | `ExtractLogMetricsFromRun` | `func ExtractLogMetricsFromRun(processedRun ProcessedRun) workflow.LogMetrics` | Extracts log metrics from a processed run's log directory. |
 | `mcp_safe_update_cache.go` | `CollectLockFileManifests` | `func CollectLockFileManifests(workflowsDir string) map[string]*workflow.GHAWManifest` | Collects manifests from lock files so they cannot be tampered with by the agent. |
 | `mcp_safe_update_cache.go` | `WritePriorManifestFile` | `func WritePriorManifestFile(cache map[string]*workflow.GHAWManifest) (string, error)` | Writes a prior-manifest cache file and returns its path; caller must remove it when done. |
-| `outcomes_history.go` | `RunOutcomesHistory` | `func RunOutcomesHistory(config OutcomesHistoryConfig) error` | Runs the outcomes-history report for a given configuration. |
 | `project_command.go` | `RunProjectNew` | `func RunProjectNew(ctx context.Context, config ProjectConfig) error` | Executes the project creation logic. |
 | `remove_command.go` | `RemoveWorkflows` | `func RemoveWorkflows(pattern string, keepOrphans bool, workflowDir string) error` | Removes workflows matching a pattern. |
 | `run_interactive.go` | `RunSpecificWorkflowInteractively` | `func RunSpecificWorkflowInteractively(ctx context.Context, opts RunWorkflowOptions) error` | Runs a known workflow interactively, collecting inputs if the workflow defines any. |
@@ -876,7 +920,27 @@ Method-form symbols on exported types (e.g. `(*FileTracker).TrackCreated`, `(*Do
 | `mcp_schema.go` | `MarshalOutputSchema` | `func MarshalOutputSchema(schema *jsonschema.Schema) ([]byte, error)` | Serializes a generated output schema using the CLI's standard indented JSON format. |
 | `models_command.go` | `NewModelsCommand` | `func NewModelsCommand() *cobra.Command` | Creates the `models` command that lists model catalog pricing, aliases, and observed automation models. |
 
+### Additional exported symbols (verified 2026-10-06)
+
+| File | Symbol | Kind | Description |
+|------|--------|------|-------------|
+| `sessions_command.go` | `NewSessionsCommand` | `func NewSessionsCommand() *cobra.Command` | Creates the `sessions` command. |
+| `work_command.go` | `NewWorkCommand` | `func NewWorkCommand() *cobra.Command` | Creates the `work` command. |
+| `mcp_schema.go` | `GenerateOutputSchema` | `func GenerateOutputSchema[T any]() (*jsonschema.Schema, error)` | Generates a JSON schema for the CLI output type `T`. |
+| `validation_issue.go` | `(ValidationIssue).ToFinding` | `func (v ValidationIssue) ToFinding(severity scanfindings.SeverityLevel) scanfindings.Finding` | Converts a validation issue into a scan finding of the given severity. |
+| `gateway_logs_types.go` | `(RPCMessageEntry).EffectiveType` | `func (e RPCMessageEntry) EffectiveType() string` | Returns the message type; the legacy `type` field takes precedence over `event` (schema `rpc-message/v2`). |
+| `logs_models.go` | `NumericID` | `type NumericID int64` | Integer identifier accepting either a JSON number or its string form. |
+| `experiments_analyze_statistics.go` | `ExperimentReadiness` | `type ExperimentReadiness string` | Whether normal analysis requirements have enough usable data. |
+| `experiments_analyze_statistics.go` | `GuardrailStatusCode` | `type GuardrailStatusCode string` | Stable machine-readable outcome of a guardrail evaluation. |
+| `friction_cost.go` | `FrictionCostSummary`, `FrictionCost`, `FrictionTokens`, `FrictionUncertain`, `FrictionDriverSummary`, `FrictionGroup`, `FrictionEvent`, `FrictionUnmeasuredDriver` | structs | Precomputed estimated avoidable marginal cost of execution-friction events in a run (AIC is the canonical unit). |
+| `logs_work_queue.go` | `WorkQueueReport`, `WorkQueueSnapshot`, `WorkQueueWorker`, `WorkQueueTransaction`, `WorkQueueOperation` | structs | Activation-time queue facts, agent intent, and operations observed in a run's job logs (runtime queue protocol). |
+| `logs_usage_activity.go` | `LedgerActivity`, `LedgerCompactionActivity` | structs | Ledger mutations and repo-memory compaction statistics. |
+
+Methods on unexported types (e.g. `cachedLogsJSONLWriter.Append*`, `githubGraderRunArtifactSource.Load`) are not part of the public API.
+
 ## Source Synchronization
+
+Re-verified on 2026-10-06: the exported symbols listed above were previously undocumented and are now covered.
 
 Reviewed against recent source updates on 2026-08-08; the "Additional exported top-level functions" table above was added after diffing the full exported-symbol list against this README. Re-verified on 2026-09-26: diffed the full exported top-level function list against all documented tables and added the "Additional exported top-level functions (verified 2026-09-26)" table above for 10 previously undocumented functions. No other public-contract deltas were identified beyond the sections above.
 

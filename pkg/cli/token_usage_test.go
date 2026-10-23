@@ -715,6 +715,201 @@ func TestAnalyzeTokenUsageAICOnly(t *testing.T) {
 	})
 }
 
+func TestAnalyzeTokenUsageAICOnlyIncompleteRecords(t *testing.T) {
+	t.Parallel()
+	pricedAWF := `{"event":"token_usage","model":"unpriced","ai_credits_this_response":1.25,"ai_credits_total":1.25}`
+	unpricedAWF := `{"event":"token_usage","provider":"unknown","model":"unpriced","input_tokens":10}`
+	for _, tc := range []struct {
+		name     string
+		files    map[string]string
+		aic      float64
+		found    bool
+		warnings []string
+	}{
+		{name: "no usage"},
+		{name: "empty stream", files: map[string]string{"usage/agent_usage.jsonl": "\n"}},
+		{name: "non-usage metadata", files: map[string]string{"usage/aw-info.jsonl": "{\"workflow\":\"test\"}\ninvalid\n"}},
+		{name: "legacy zero", files: map[string]string{"usage/agent_usage.jsonl": `{"aic":0}`}, found: true},
+		{name: "legacy positive", files: map[string]string{"usage/agent_usage.jsonl": `{"aic":2.5}`}, aic: 2.5, found: true},
+		{name: "AWF zero", files: map[string]string{"usage/token_usage.jsonl": `{"event":"token_usage","ai_credits_this_response":0,"ai_credits_total":0}`}, found: true},
+		{
+			name:     "unpriced legacy",
+			files:    map[string]string{"usage/detection_usage.jsonl": `{"model":"unpriced","input_tokens":10}`},
+			warnings: []string{"detection_usage.jsonl line 1: unpriced usage"},
+		},
+		{
+			name:     "unpriced AWF",
+			files:    map[string]string{"usage/token_usage.jsonl": unpricedAWF},
+			warnings: []string{"token_usage.jsonl line 1: unpriced usage"},
+		},
+		{
+			name:     "malformed legacy",
+			files:    map[string]string{"usage/agent_usage.jsonl": "invalid"},
+			warnings: []string{"agent_usage.jsonl line 1: malformed usage record"},
+		},
+		{
+			name:     "malformed AWF",
+			files:    map[string]string{"usage/token_usage.jsonl": "{"},
+			warnings: []string{"token_usage.jsonl line 1: malformed usage record"},
+		},
+		{
+			name:     "invalid AWF fields",
+			files:    map[string]string{"usage/token_usage.jsonl": `{"event":"token_usage","input_tokens":[]}`},
+			warnings: []string{"token_usage.jsonl line 1: invalid usage fields"},
+		},
+		{
+			name:     "invalid legacy fields with cost",
+			files:    map[string]string{"usage/agent_usage.jsonl": `{"aic":1.25,"input_tokens":[]}`},
+			aic:      1.25,
+			found:    true,
+			warnings: []string{"agent_usage.jsonl line 1: invalid usage fields"},
+		},
+		{
+			name:     "mixed legacy malformed",
+			files:    map[string]string{"usage/agent_usage.jsonl": "{\"aic\":1.25}\ninvalid"},
+			aic:      1.25,
+			found:    true,
+			warnings: []string{"agent_usage.jsonl line 2: malformed usage record"},
+		},
+		{
+			name:     "mixed legacy unpriced",
+			files:    map[string]string{"usage/agent_usage.jsonl": "{\"aic\":1.25}\n{\"model\":\"unpriced\",\"input_tokens\":10}"},
+			aic:      1.25,
+			found:    true,
+			warnings: []string{"agent_usage.jsonl line 2: unpriced usage"},
+		},
+		{
+			name:     "mixed AWF malformed",
+			files:    map[string]string{"usage/token_usage.jsonl": pricedAWF + "\ninvalid"},
+			aic:      1.25,
+			found:    true,
+			warnings: []string{"token_usage.jsonl line 2: malformed usage record"},
+		},
+		{
+			name:     "mixed AWF unpriced",
+			files:    map[string]string{"usage/token_usage.jsonl": pricedAWF + "\n" + unpricedAWF},
+			aic:      1.25,
+			found:    true,
+			warnings: []string{"token_usage.jsonl line 2: unpriced usage", "fallback accounting"},
+		},
+		{
+			name:     "schema-detected AWF stream",
+			files:    map[string]string{"usage/agent_usage.jsonl": pricedAWF + "\n" + unpricedAWF},
+			aic:      1.25,
+			found:    true,
+			warnings: []string{"agent_usage.jsonl line 2: unpriced usage", "fallback accounting"},
+		},
+		{
+			name: "agent cost with malformed detection",
+			files: map[string]string{
+				"usage/agent_usage.jsonl":     `{"aic":1.25}`,
+				"usage/detection_usage.jsonl": "invalid",
+			},
+			aic: 1.25, found: true,
+			warnings: []string{"detection_usage.jsonl line 1: malformed usage record"},
+		},
+		{
+			name: "zero agent cost with malformed detection",
+			files: map[string]string{
+				"usage/agent_usage.jsonl":     `{"aic":0}`,
+				"usage/detection_usage.jsonl": "invalid",
+			},
+			found:    true,
+			warnings: []string{"detection_usage.jsonl line 1: malformed usage record"},
+		},
+		{
+			name: "detection cost with unpriced agent",
+			files: map[string]string{
+				"usage/agent_usage.jsonl":     `{"model":"unpriced","input_tokens":10}`,
+				"usage/detection_usage.jsonl": `{"aic":1.25}`,
+			},
+			aic: 1.25, found: true,
+			warnings: []string{"agent_usage.jsonl line 1: unpriced usage"},
+		},
+		{
+			name: "JSON fallback retains malformed stream warnings",
+			files: map[string]string{
+				"usage/agent_usage.jsonl": "invalid",
+				"agent_usage.json":        `{"ai_credits":1.25}`,
+			},
+			aic: 1.25, found: true,
+			warnings: []string{"agent_usage.jsonl line 1: malformed usage record"},
+		},
+		{
+			name: "JSON fallback retains sandbox warnings",
+			files: map[string]string{
+				"sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl": "invalid",
+				"agent_usage.json": `{"ai_credits":1.25}`,
+			},
+			aic: 1.25, found: true,
+			warnings: []string{"token-usage.jsonl line 1: malformed usage record"},
+		},
+		{
+			name: "artifact cost retains malformed sandbox warnings",
+			files: map[string]string{
+				"usage/agent_usage.jsonl":                                `{"aic":1.25}`,
+				"sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl": "invalid",
+			},
+			aic: 1.25, found: true,
+			warnings: []string{"token-usage.jsonl line 1: malformed usage record"},
+		},
+		{
+			name: "artifact cost retains unpriced sandbox warnings",
+			files: map[string]string{
+				"usage/agent_usage.jsonl":                                `{"aic":1.25}`,
+				"sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl": unpricedAWF,
+			},
+			aic: 1.25, found: true,
+			warnings: []string{"token-usage.jsonl line 1: unpriced usage"},
+		},
+		{
+			name: "artifact cost does not double count sandbox cost",
+			files: map[string]string{
+				"usage/agent_usage.jsonl":                                `{"aic":1.25}`,
+				"sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl": pricedAWF,
+			},
+			aic: 1.25, found: true,
+		},
+		{
+			name: "JSON fallback retains unpriced stream warnings",
+			files: map[string]string{
+				"usage/agent/token_usage.jsonl": unpricedAWF,
+				"agent_usage.json":              `{"ai_credits":1.25}`,
+			},
+			aic: 1.25, found: true,
+			warnings: []string{"token_usage.jsonl line 1: unpriced usage"},
+		},
+		{
+			name:     "unpriced JSON fallback",
+			files:    map[string]string{"agent_usage.json": `{"model":"unpriced","input_tokens":10}`},
+			warnings: []string{"agent_usage.json: unpriced usage"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			for path, content := range tc.files {
+				path = filepath.Join(dir, filepath.FromSlash(path))
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				require.NoError(t, os.WriteFile(path, []byte(content+"\n"), 0o600))
+			}
+			summary, err := analyzeTokenUsageAICOnly(dir, false)
+			require.NoError(t, err)
+			if !tc.found && len(tc.warnings) == 0 {
+				assert.Nil(t, summary)
+				return
+			}
+			require.NotNil(t, summary)
+			assert.Equal(t, tc.found, summary.AICFound)
+			assert.InDelta(t, tc.aic, summary.TotalAIC, 1e-9)
+			require.Len(t, summary.Warnings, len(tc.warnings), "warnings must survive fallback without duplication")
+			for i, warning := range tc.warnings {
+				assert.Contains(t, summary.Warnings[i], warning)
+			}
+		})
+	}
+}
+
 func TestExtractUsageRecord(t *testing.T) {
 	t.Run("returns nested usage record", func(t *testing.T) {
 		record := extractUsageRecord(map[string]any{"ai_credits": 1.5})
@@ -814,7 +1009,7 @@ func TestTokenUsageSummaryMethods(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotContains(t, string(encoded), "reasoning_tokens", "row JSON should preserve legacy shape")
 
-		rendered := console.RenderStruct(rows)
+		rendered := console.RenderStructStdout(rows)
 		assert.Contains(t, rendered, "Input", "row table should keep quartet columns")
 		assert.Contains(t, rendered, "Output", "row table should keep quartet columns")
 		assert.Contains(t, rendered, "Cache Read", "row table should keep quartet columns")
@@ -1007,7 +1202,7 @@ func TestAnalyzeTokenUsage(t *testing.T) {
 		require.Contains(t, summary.ByModel, "unknown", "unknown model bucket should be present")
 	})
 
-	t.Run("records requested sub-agent models and mismatch when token logs do not show requested model", func(t *testing.T) {
+	t.Run("does not infer sub-agent models from agent stdio", func(t *testing.T) {
 		tmpDir := testutil.TempDir(t, "analyze-subagent-model-mismatch")
 		logsDir := filepath.Join(tmpDir, "sandbox", "firewall", "logs", "api-proxy-logs")
 		require.NoError(t, os.MkdirAll(logsDir, 0o755))
@@ -1023,18 +1218,10 @@ func TestAnalyzeTokenUsage(t *testing.T) {
 		summary, err := analyzeTokenUsage(tmpDir, false)
 		require.NoError(t, err)
 		require.NotNil(t, summary)
-		require.Len(t, summary.SubagentModelRequests, 3)
-		require.Len(t, summary.SubagentModelActuals, 1)
-		assert.Equal(t, 3, summary.MismatchCount)
-		assert.Equal(t, "claude-sonnet-4-6", summary.SubagentModelActuals[0].Model)
-		require.Contains(t, summary.Warnings, subagentStdioWarning)
-
-		for _, req := range summary.SubagentModelRequests {
-			assert.Equal(t, "claude-haiku-4.5", req.RequestedModel)
-			assert.Equal(t, 1, req.InvocationCount)
-			assert.Equal(t, "claude-sonnet-4-6", req.EffectiveModel)
-			assert.Equal(t, modelMismatchReasonModelNotObserved, req.ReasonCode)
-		}
+		require.Empty(t, summary.SubagentModelRequests)
+		require.Empty(t, summary.SubagentModelActuals)
+		assert.Zero(t, summary.MismatchCount)
+		require.Empty(t, summary.Warnings)
 	})
 
 	t.Run("records token-usage-missing reason when sub-agent model request is present but no model actuals exist", func(t *testing.T) {
@@ -1045,12 +1232,10 @@ func TestAnalyzeTokenUsage(t *testing.T) {
 		summary, err := analyzeTokenUsage(tmpDir, false)
 		require.NoError(t, err)
 		require.NotNil(t, summary)
-		require.Len(t, summary.SubagentModelRequests, 1)
+		require.Empty(t, summary.SubagentModelRequests)
 		assert.Empty(t, summary.SubagentModelActuals)
-		assert.Equal(t, 1, summary.MismatchCount)
-		assert.Equal(t, modelMismatchReasonTokenUsageMissing, summary.SubagentModelRequests[0].ReasonCode)
-		assert.Empty(t, summary.SubagentModelRequests[0].EffectiveModel)
-		require.Contains(t, summary.Warnings, subagentStdioWarning)
+		assert.Zero(t, summary.MismatchCount)
+		require.Empty(t, summary.Warnings)
 	})
 
 	t.Run("falls back to agent_usage.json in usage subdir when token_usage.jsonl is empty", func(t *testing.T) {
@@ -1092,12 +1277,9 @@ func TestAnalyzeTokenUsage(t *testing.T) {
 		summary, err := analyzeTokenUsage(tmpDir, false)
 		require.NoError(t, err)
 		require.NotNil(t, summary)
-		require.Len(t, summary.SubagentModelRequests, 1)
-		assert.Equal(t, "small", summary.SubagentModelRequests[0].RequestedModel)
-		assert.Equal(t, "gpt-5-mini", summary.SubagentModelRequests[0].EffectiveModel)
-		assert.Equal(t, modelMismatchReasonModelNotObserved, summary.SubagentModelRequests[0].ReasonCode)
-		assert.Equal(t, 1, summary.MismatchCount)
-		require.Contains(t, summary.Warnings, subagentStdioWarning)
+		require.Empty(t, summary.SubagentModelRequests)
+		assert.Zero(t, summary.MismatchCount)
+		require.Empty(t, summary.Warnings)
 	})
 }
 

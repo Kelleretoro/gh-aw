@@ -216,6 +216,8 @@ func logsTargetContinuationOptions(opts LogsDownloadOptions) continuationOptions
 		startDate:             opts.StartDate,
 		endDate:               opts.EndDate,
 		engine:                opts.Engine,
+		dryRun:                opts.DryRun,
+		noDryRun:              opts.NoDryRun,
 		branch:                opts.Ref,
 		afterRunID:            opts.AfterRunID,
 		ignoreWorkflowRuns:    opts.IgnoreWorkflowRuns,
@@ -237,6 +239,7 @@ func DownloadWorkflowLogsForTargets( //nolint:largefunc // Keeps shared collecti
 	targets []logsWorkflowTarget,
 	initialErrors []error,
 ) (err error) {
+	opts = normalizeLogsDownloadOptions(opts)
 	if len(targets) == 0 {
 		return errors.Join(initialErrors...)
 	}
@@ -258,6 +261,9 @@ func DownloadWorkflowLogsForTargets( //nolint:largefunc // Keeps shared collecti
 	}()
 	allAPIRateLimits := startGitHubAPIRateLimitReports(activeCtx, logsTargetRateLimitHosts(targets))
 	results := collectLogsTargets(activeCtx, opts, targets)
+	if slices.ContainsFunc(targets, func(target logsWorkflowTarget) bool { return target.repoOverride == "" }) {
+		resolveLogsCollectionTargetRepositories(results, workflowRunListRepository(""))
+	}
 	processedRuns, continuations, timeoutReached, countLimitReached, storageLimitReached, allErrors := mergeLogsTargetResults(results, initialErrors)
 	renderLogsCollectionStats(opts.collectionStats)
 	for _, err := range allErrors {
@@ -265,6 +271,14 @@ func DownloadWorkflowLogsForTargets( //nolint:largefunc // Keeps shared collecti
 	}
 	if ctx.Err() != nil {
 		return context.Cause(ctx)
+	}
+	processedRuns = sortAndLimitLogsTargetRuns(processedRuns, opts.Count, opts.Verbose)
+	var outcomeReports []OutcomesData
+	if opts.Outcomes {
+		outcomeReports, err = collectLogsOutcomes(ctx, processedRuns, opts.OutcomesDir, opts.Verbose)
+		if err != nil {
+			return err
+		}
 	}
 	finishGitHubAPIRateLimitReports(activeCtx, allAPIRateLimits, opts.JSONOutput)
 	cacheGitHubAPIRateLimitReports(opts.cachedJSONLWriter, allAPIRateLimits...)
@@ -278,7 +292,6 @@ func DownloadWorkflowLogsForTargets( //nolint:largefunc // Keeps shared collecti
 		return err
 	}
 
-	processedRuns = sortAndLimitLogsTargetRuns(processedRuns, opts.Count, opts.Verbose)
 	artifactFilter, err := resolveLogsArtifactFilter(opts.ArtifactSets, opts.Verbose)
 	if err != nil {
 		return err
@@ -289,21 +302,25 @@ func DownloadWorkflowLogsForTargets( //nolint:largefunc // Keeps shared collecti
 		format:            opts.Format,
 		reportFile:        opts.ReportFile,
 		jsonOutput:        opts.JSONOutput,
+		episodes:          opts.Episodes,
 		toolGraph:         opts.ToolGraph,
 		train:             opts.Train,
 		drain3Weights:     opts.Drain3Weights,
 		audit:             opts.Audit,
 		verbose:           opts.Verbose,
 		artifactFilter:    artifactFilter,
+		includeWorkQueue:  workQueueEvidenceRequested(opts.ArtifactSets),
 		startDate:         opts.StartDate,
 		endDate:           opts.EndDate,
 		checkStaleness:    true,
 		countLimitReached: countLimitReached,
+		countLimitTargets: logsCountLimitedTargets(results),
 		suppressRender:    opts.SuppressRender,
 		continuations:     continuations,
 		apiRateLimit:      apiRateLimit,
 		apiRateLimits:     apiRateLimits,
 		cachedJSONLWriter: opts.cachedJSONLWriter,
+		outcomeReports:    outcomeReports,
 	})
 }
 
@@ -337,6 +354,7 @@ func logsTargetRateLimitHosts(targets []logsWorkflowTarget) []string {
 }
 
 func collectLogsTargets(ctx context.Context, opts LogsDownloadOptions, targets []logsWorkflowTarget) []logsTargetResult {
+	opts = normalizeLogsDownloadOptions(opts)
 	resultChannel := make(chan logsTargetResult, len(targets))
 	var wg sync.WaitGroup
 	workerCount := min(len(targets), getMaxConcurrentWorkflowDownloads())

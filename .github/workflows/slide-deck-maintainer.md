@@ -20,7 +20,9 @@ permissions:
 concurrency:
   job-discriminator: ${{ inputs.focus || github.run_id }}
 tracker-id: slide-deck-maintainer
-engine: copilot
+engine:
+  id: copilot
+  copilot-sdk: true
 imports:
   - uses: shared/skip-if-issue-open.md
     with:
@@ -84,7 +86,7 @@ steps:
       done
 
   - name: Setup Node.js
-    uses: actions/setup-node@v7.0.0
+    uses: actions/setup-node@v7.1.0
     with:
       node-version: "24"
       cache: npm
@@ -203,7 +205,7 @@ fi
 - `documentation` → next is `source-code`
 - Any other/missing value → use `documentation`
 
-If the file exists but is malformed or unreadable, call `missing_data` with `data_type: "cache_memory"` and `reason: "cache_memory_miss"`, then default to `documentation`.
+If the file exists but is malformed or unreadable, call `report_missing_data` with `data_type: "cache_memory"` and `reason: "cache_memory_miss"`, then default to `documentation`.
 
 The schema is:
 ```json

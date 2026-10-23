@@ -114,6 +114,45 @@ type Finding struct {
 	// Context holds the source lines surrounding the finding, used when
 	// rendering the finding to a terminal. It is optional.
 	Context []string `json:"-"`
+	// Locations retains every source/sink scope for differential matching.
+	// File/Line/Column above remain the single human-facing display location.
+	Locations []SourceLocation `json:"-"`
+}
+
+// SourceLocation identifies a scanner's semantic scope, not just its first token.
+// An empty Path means the scanner did not provide a reliable YAML scope.
+type SourceLocation struct {
+	File   string
+	Path   string
+	Role   string
+	Line   int
+	Column int
+}
+
+// NewFindingParams contains scanner-adapted fields for NewFinding.
+type NewFindingParams struct {
+	RuleID        string
+	SeverityLabel string
+	Message       string
+	File          string
+	Line          int
+	Column        int
+	FileLines     []string
+}
+
+// NewFinding converts scanner-adapted fields into a shared finding, normalizing
+// severity and attaching source context. The integration supplies its formatted
+// message and display location, including any scanner-specific defaults.
+func NewFinding(params NewFindingParams) Finding {
+	return Finding{
+		RuleID:   params.RuleID,
+		Severity: ParseSeverity(params.SeverityLabel),
+		Message:  params.Message,
+		File:     params.File,
+		Line:     params.Line,
+		Column:   params.Column,
+		Context:  ContextLines(params.FileLines, params.Line),
+	}
 }
 
 // CompilerError converts the finding into the console error format shared by all

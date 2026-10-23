@@ -5,24 +5,44 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
 	"github.com/github/gh-aw/pkg/sliceutil"
 	"github.com/github/gh-aw/pkg/stringutil"
 )
 
-var compilerYamlHeaderLog = logger.New("workflow:compiler_yaml:header")
+func collectDetectionPolicyForManifest(data *WorkflowData) *GHAWManifestDetectionPolicy {
+	policy := &GHAWManifestDetectionPolicy{Mode: "disabled"}
+	if IsDetectionJobEnabled(data.SafeOutputs) {
+		policy.Mode = "enabled"
+	}
+	if IsConditionalDetection(data.SafeOutputs) {
+		policy.Mode = "conditional"
+		policy.Condition = *data.SafeOutputs.ThreatDetection.EnabledExpr
+	}
+	return policy
+}
 
 // generateWorkflowHeader generates the YAML header section including comments
 // for description, source, imports/includes, frontmatter-hash, stop-time, and manual-approval.
 // All ANSI escape codes are stripped from the output.
 // The gh-aw-metadata line is placed first for easy machine parsing.
-func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowData, frontmatterHash string, bodyHash string, secrets []string, actions []string) error {
+func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowData, frontmatterHash string, bodyHash string, secrets []string, actions []string, repoConfig *RepoConfig) error {
 	// Skip the ASCII art banner in wasm/editor mode — it takes up too much space
 	if c.skipHeader {
 		return nil
 	}
+	c.generateLockMetadataHeader(yaml, data, frontmatterHash, bodyHash)
+	if err := c.generateManifestHeader(yaml, data, secrets, actions); err != nil {
+		return err
+	}
+	generateDescriptiveHeader(yaml, data, shouldIncludeLockFileLogo(repoConfig, c.noLogo))
+	generateSourceHeader(yaml, data)
+	generateConfigHeader(yaml, data, secrets, actions)
+	generateApprovalHeader(yaml, data)
+	return nil
+}
 
+func (c *Compiler) generateLockMetadataHeader(yaml *strings.Builder, data *WorkflowData, frontmatterHash, bodyHash string) {
 	// Add lock metadata as the very first line for easy machine parsing.
 	// Single-line JSON format to minimize merge conflicts.
 	if frontmatterHash != "" {
@@ -49,22 +69,24 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 		agentInfo.AgentImageRunner = resolveAgentImageRunnerIdentifier(data.RawFrontmatter)
 		metadata := GenerateLockMetadata(LockHashInfo{FrontmatterHash: frontmatterHash, BodyHash: bodyHash}, data.StopTime, c.effectiveStrictMode(data.RawFrontmatter), agentInfo)
 		metadata.Docs = data.Docs
+		metadata.DryRun = data.DryRun
 		if metadata.CompilerVersion == "" && c.GetActionTag() != "" {
 			metadata.CompilerVersion = c.GetVersion()
 		}
 		metadataJSON, err := metadata.ToJSON()
 		if err != nil {
 			// Fallback to legacy format if JSON serialization fails
-			fmt.Fprintf(yaml, "# frontmatter-hash: %s\n", frontmatterHash)
+			fmt.Fprintf(yaml, "# frontmatter-hash: %s\n", frontmatterHash) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 		} else {
-			fmt.Fprintf(yaml, "# gh-aw-metadata: %s\n", metadataJSON)
+			fmt.Fprintf(yaml, "# gh-aw-metadata: %s\n", metadataJSON) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 		}
 	}
+}
 
+func (c *Compiler) generateManifestHeader(yaml *strings.Builder, data *WorkflowData, secrets, actions []string) error {
 	// Embed the gh-aw-manifest immediately after gh-aw-metadata for easy machine parsing.
-	// The manifest records all secrets, external actions, container images, and frontmatter
-	// skills detected at compile time so that subsequent compilations can perform safe update
-	// enforcement.
+	// The manifest records safe-update inventory and normalized webhook declarations
+	// for CAO discovery without interpreting generated workflow steps.
 	manifest := NewGHAWManifest(secrets, actions, data.ActionResolutionFailures, data.DockerImagePins, data.Redirect, data.Skills, data.Plugins, data.RawFrontmatter["on"])
 	if data.ParsedFrontmatter != nil {
 		manifest.ThreatDetectionSuppressions = data.ParsedFrontmatter.ThreatDetectionSuppressions
@@ -77,18 +99,24 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 	}
 	manifest.MemoryValidationScripts = collectMemoryValidationScripts(data)
 	manifest.MCPServers = collectMCPServersForManifest(data)
-	if manifestJSON, err := manifest.ToJSON(); err == nil {
-		fmt.Fprintf(yaml, "# gh-aw-manifest: %s\n", manifestJSON)
-	} else {
-		compilerYamlHeaderLog.Printf("Failed to serialize gh-aw-manifest: %v. Safe update mode will not be available for future compilations of this workflow.", err)
+	manifest.ThreatDetection = collectDetectionPolicyForManifest(data)
+	manifest.Admission = data.AdmissionEnabled
+	manifest.WebhookSubscriptions = data.WebhookSubscriptions
+	manifestJSON, err := manifest.ToJSON()
+	if err != nil {
+		return fmt.Errorf("cannot generate gh-aw-manifest header: %w", err)
 	}
+	fmt.Fprintf(yaml, "# gh-aw-manifest: %s\n", manifestJSON) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
+	return nil
+}
 
+func generateDescriptiveHeader(yaml *strings.Builder, data *WorkflowData, logo bool) {
 	// Add workflow header with logo and instructions
 	sourceFile := "the corresponding .md file"
 	if data.Source != "" {
 		sourceFile = data.Source
 	}
-	header := GenerateWorkflowHeader(sourceFile, "gh-aw", "")
+	header := GenerateWorkflowHeader(sourceFile, "gh-aw", "", logo)
 	yaml.WriteString(header)
 
 	// Add description comment if provided
@@ -97,7 +125,7 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 		// Split description into lines and prefix each with "# "
 		descriptionLines := strings.SplitSeq(strings.TrimSpace(cleanDescription), "\n")
 		for line := range descriptionLines {
-			fmt.Fprintf(yaml, "# %s\n", strings.TrimSpace(line))
+			fmt.Fprintf(yaml, "# %s\n", strings.TrimSpace(line)) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 		}
 	}
 
@@ -111,22 +139,24 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 		first := true
 		for line := range intentLines {
 			if first {
-				fmt.Fprintf(yaml, "# Intent: %s\n", strings.TrimSpace(line))
+				fmt.Fprintf(yaml, "# Intent: %s\n", strings.TrimSpace(line)) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 				first = false
 				continue
 			}
 			// Indent continuation lines so they stay visually attached to the intent block
-			fmt.Fprintf(yaml, "#         %s\n", strings.TrimSpace(line))
+			fmt.Fprintf(yaml, "#         %s\n", strings.TrimSpace(line)) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 		}
 	}
+}
 
+func generateSourceHeader(yaml *strings.Builder, data *WorkflowData) {
 	// Add source comment if provided
 	if data.Source != "" {
 		yaml.WriteString("#\n")
 		cleanSource := stringutil.StripANSI(data.Source)
 		// Normalize to Unix paths (forward slashes) for cross-platform compatibility
 		cleanSource = filepath.ToSlash(cleanSource)
-		fmt.Fprintf(yaml, "# Source: %s\n", cleanSource)
+		fmt.Fprintf(yaml, "# Source: %s\n", cleanSource) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 	}
 
 	// Add manifest of imported/included files if any exist
@@ -149,7 +179,7 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 				cleanFile := stringutil.StripANSI(file)
 				// Normalize to Unix paths (forward slashes) for cross-platform compatibility
 				cleanFile = filepath.ToSlash(cleanFile)
-				fmt.Fprintf(yaml, "#     - %s\n", cleanFile)
+				fmt.Fprintf(yaml, "#     - %s\n", cleanFile) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 			}
 		}
 
@@ -159,7 +189,7 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 				cleanFile := stringutil.StripANSI(file)
 				// Normalize to Unix paths (forward slashes) for cross-platform compatibility
 				cleanFile = filepath.ToSlash(cleanFile)
-				fmt.Fprintf(yaml, "#     - %s\n", cleanFile)
+				fmt.Fprintf(yaml, "#     - %s\n", cleanFile) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 			}
 		}
 	}
@@ -169,6 +199,9 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 		yaml.WriteString("#\n")
 		yaml.WriteString("# inlined-imports: true\n")
 	}
+}
+
+func generateConfigHeader(yaml *strings.Builder, data *WorkflowData, secrets, actions []string) {
 	// Add frontmatter-declared env vars with source attribution.
 	// Note: programmatically injected env vars (e.g. OTEL_* from OTLP config) are not listed here.
 	if len(data.EnvSources) > 0 {
@@ -177,7 +210,7 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 		// Sort keys for deterministic output
 		keys := sliceutil.SortedKeys(data.EnvSources)
 		for _, k := range keys {
-			fmt.Fprintf(yaml, "#   - %s: %s\n", k, data.EnvSources[k])
+			fmt.Fprintf(yaml, "#   - %s: %s\n", k, data.EnvSources[k]) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 		}
 	}
 
@@ -186,7 +219,7 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 		yaml.WriteString("#\n")
 		yaml.WriteString("# Secrets used:\n")
 		for _, s := range secrets {
-			fmt.Fprintf(yaml, "#   - %s\n", s)
+			fmt.Fprintf(yaml, "#   - %s\n", s) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 		}
 	}
 
@@ -195,7 +228,7 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 		yaml.WriteString("#\n")
 		yaml.WriteString("# Custom actions used:\n")
 		for _, a := range actions {
-			fmt.Fprintf(yaml, "#   - %s\n", a)
+			fmt.Fprintf(yaml, "#   - %s\n", a) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 		}
 	}
 
@@ -204,24 +237,25 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 		yaml.WriteString("#\n")
 		yaml.WriteString("# Container images used:\n")
 		for _, img := range data.DockerImages {
-			fmt.Fprintf(yaml, "#   - %s\n", img)
+			fmt.Fprintf(yaml, "#   - %s\n", img) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 		}
 	}
+}
 
+func generateApprovalHeader(yaml *strings.Builder, data *WorkflowData) {
 	// Add stop-time comment if configured
 	if data.StopTime != "" {
 		yaml.WriteString("#\n")
 		cleanStopTime := stringutil.StripANSI(data.StopTime)
-		fmt.Fprintf(yaml, "# Effective stop-time: %s\n", cleanStopTime)
+		fmt.Fprintf(yaml, "# Effective stop-time: %s\n", cleanStopTime) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 	}
 
 	// Add manual-approval comment if configured
 	if data.ManualApproval != "" {
 		yaml.WriteString("#\n")
 		cleanManualApproval := stringutil.StripANSI(data.ManualApproval)
-		fmt.Fprintf(yaml, "# Manual approval required: environment '%s'\n", cleanManualApproval)
+		fmt.Fprintf(yaml, "# Manual approval required: environment '%s'\n", cleanManualApproval) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 	}
 
 	yaml.WriteString("\n")
-	return nil
 }

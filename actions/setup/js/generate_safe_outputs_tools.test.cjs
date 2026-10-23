@@ -3,6 +3,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
+import { normalizeSafeOutputToolArguments } from "./safe_outputs_mcp_arguments.cjs";
+import { normalizeClaimScope } from "./work_queue_claim_scope.cjs";
+import { loadTools, attachHandlers, registerPredefinedTools, registerDynamicTools } from "./safe_outputs_tools_loader.cjs";
+import { createServer, registerTool } from "./mcp_server_core.cjs";
 
 const scriptPath = path.join(__dirname, "generate_safe_outputs_tools.cjs");
 
@@ -43,7 +47,7 @@ describe("generate_safe_outputs_tools", () => {
       },
     },
     {
-      name: "missing_tool",
+      name: "report_missing_tool",
       description: "Reports a missing tool.",
       inputSchema: { type: "object", properties: {} },
     },
@@ -51,7 +55,7 @@ describe("generate_safe_outputs_tools", () => {
 
   beforeEach(() => {
     const testId = Math.random().toString(36).substring(7);
-    testDir = `/tmp/test-generate-tools-${testId}`;
+    testDir = path.join(__dirname, `.test-generate-tools-${testId}`);
     fs.mkdirSync(testDir, { recursive: true });
 
     toolsSourcePath = path.join(testDir, "safe_outputs_tools.json");
@@ -94,8 +98,142 @@ describe("generate_safe_outputs_tools", () => {
     const result = JSON.parse(fs.readFileSync(outputPath, "utf8"));
     expect(result).toHaveLength(2);
     expect(result.map((/** @type {{name: string}} */ t) => t.name)).toEqual(expect.arrayContaining(["create_issue", "add_comment"]));
-    // missing_tool should NOT be included since it's not in config
-    expect(result.map((/** @type {{name: string}} */ t) => t.name)).not.toContain("missing_tool");
+    // report_missing_tool should NOT be included since it's not in config
+    expect(result.map((/** @type {{name: string}} */ t) => t.name)).not.toContain("report_missing_tool");
+  });
+
+  it.each([
+    ["missing_tool", "missing_data"],
+    ["missing-tool", "missing-data"],
+    ["report_missing_tool", "report_missing_data"],
+    ["report-missing-tool", "report-missing-data"],
+  ])("generates and registers canonical diagnostics from %s and %s configuration", (toolKey, dataKey) => {
+    fs.copyFileSync(path.join(__dirname, "safe_outputs_tools.json"), toolsSourcePath);
+    const config = { [toolKey]: {}, [dataKey]: {} };
+    fs.writeFileSync(configPath, JSON.stringify(config));
+    runScript();
+
+    const originalToolsPath = process.env.GH_AW_SAFE_OUTPUTS_TOOLS_PATH;
+    process.env.GH_AW_SAFE_OUTPUTS_TOOLS_PATH = outputPath;
+    try {
+      const server = createServer({ name: "safeoutputs", version: "test" });
+      const normalize = name => name.replace(/-/g, "_").toLowerCase();
+      const tools = attachHandlers(loadTools(server), { defaultHandler: name => args => ({ name, args }) });
+      expect(tools.map(tool => tool.name)).toEqual(["report_missing_tool", "report_missing_data"]);
+      registerPredefinedTools(server, tools, config, registerTool, normalize);
+      registerDynamicTools(server, tools, config, path.join(testDir, "output.jsonl"), registerTool, normalize);
+      expect(Object.keys(server.tools)).toEqual(["report_missing_tool", "report_missing_data"]);
+      for (const name of Object.keys(server.tools)) {
+        expect(server.tools[name].handler({})).toEqual({ name, args: {} });
+      }
+    } finally {
+      if (originalToolsPath === undefined) delete process.env.GH_AW_SAFE_OUTPUTS_TOOLS_PATH;
+      else process.env.GH_AW_SAFE_OUTPUTS_TOOLS_PATH = originalToolsPath;
+    }
+  });
+
+  it("normalizes configuration before tool-specific lookups", () => {
+    fs.writeFileSync(configPath, JSON.stringify({ "ADD-COMMENT": { discussions: true } }));
+    runScript();
+
+    const [tool] = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(tool.name).toBe("add_comment");
+    expect(tool.description).toContain("Discussion comments are enabled");
+    expect(tool.description).toContain("Supports reply_to_id for discussion threading.");
+  });
+
+  it("preserves invalid explicit Claim selectors through argument normalization", () => {
+    fs.writeFileSync(configPath, JSON.stringify({ create_issue: { max: 1 } }));
+    fs.writeFileSync(
+      toolsMetaPath,
+      JSON.stringify({
+        work_queue_scoped: true,
+        dynamic_tools: [{ name: "custom_job", inputSchema: { type: "object", properties: { count: { type: "integer" } } } }],
+      })
+    );
+    runScript();
+    const tools = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    const assignment = count => ({
+      version: 3,
+      dispatch_id: "dispatch",
+      request_id: "request",
+      commit_id: "commit",
+      policy_epoch: "policy",
+      pool: "pool",
+      worker_profile: "worker",
+      claims: Array.from({ length: count }, (_, index) => ({ handle: `h${index + 1}`, claim_id: `c${index + 1}`, work_id: `w${index + 1}`, work: {}, result_refs: [] })),
+    });
+    expect(tools.map(tool => tool.name)).toEqual(["create_issue", "custom_job"]);
+    for (const tool of tools) {
+      for (const claim_handle of ["", " ", "\t", null]) {
+        const normalized = normalizeSafeOutputToolArguments(tool.name, { claim_handle }, undefined, tool.inputSchema);
+        expect(normalized).toHaveProperty("claim_handle", claim_handle);
+        for (const count of [1, 2]) {
+          expect(() => normalizeClaimScope(normalized, assignment(count))).toThrow();
+        }
+      }
+      const selected = normalizeSafeOutputToolArguments(tool.name, { claim_handle: "h1" }, undefined, tool.inputSchema);
+      for (const count of [1, 2]) {
+        expect(normalizeClaimScope(selected, assignment(count)).claim_handle).toBe("h1");
+      }
+      const omitted = normalizeSafeOutputToolArguments(tool.name, {}, undefined, tool.inputSchema);
+      expect(normalizeClaimScope(omitted, assignment(1)).claim_handle).toBe("h1");
+      expect(() => normalizeClaimScope(omitted, assignment(2))).toThrow(/original multi-Claim/);
+    }
+    const custom = tools.find(tool => tool.name === "custom_job");
+    expect(normalizeSafeOutputToolArguments(custom.name, { count: "", claim_handle: "h1" }, undefined, custom.inputSchema)).toEqual({ claim_handle: "h1" });
+  });
+
+  it("does not inject Claim selectors into ordinary workflow tools", () => {
+    fs.writeFileSync(configPath, JSON.stringify({ create_issue: { max: 1 } }));
+    fs.writeFileSync(toolsMetaPath, JSON.stringify({ work_queue_scoped: false }));
+    runScript();
+    const [tool] = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(tool.inputSchema).toEqual(sampleSourceTools[0].inputSchema);
+  });
+
+  it("generates an Anthropic-compatible update_issue schema with update-field guidance", () => {
+    fs.copyFileSync(path.join(__dirname, "safe_outputs_tools.json"), toolsSourcePath);
+    fs.writeFileSync(configPath, JSON.stringify({ update_issue: { target: "*" } }));
+
+    runScript();
+
+    const [tool] = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(tool.name).toBe("update_issue");
+    expect(tool.inputSchema.type).toBe("object");
+    expect(tool.inputSchema.additionalProperties).toBe(false);
+    for (const keyword of ["anyOf", "oneOf", "allOf"]) {
+      expect(tool.inputSchema).not.toHaveProperty(keyword);
+    }
+    expect(tool.description).toContain("REQUIRED: Provide at least one of: status, title, body, labels, assignees, or milestone.");
+    expect(tool.inputSchema.properties.milestone.type).toEqual(["number", "string", "null"]);
+    expect(tool.inputSchema.properties.milestone.description).toContain("Use null to clear.");
+  });
+
+  it("mounts dedicated built-in ledger tools without exposing the low-level append tool", () => {
+    fs.writeFileSync(toolsSourcePath, JSON.stringify([...sampleSourceTools, { name: "ledger_append", inputSchema: { type: "object", properties: { ledger: { type: "string" } } } }]));
+    const builtin = { name: "ledger_map_put", _ledger_type: "map", _ledger_operation: "put", inputSchema: { type: "object", properties: { key: { type: "string" } } } };
+    fs.writeFileSync(configPath, JSON.stringify({ ledger_append: { ledgers: [{ name: "cache", type: "map" }] } }));
+    fs.writeFileSync(toolsMetaPath, JSON.stringify({ dynamic_tools: [builtin] }));
+    runScript();
+    expect(JSON.parse(fs.readFileSync(outputPath, "utf8")).map((/** @type {{name: string}} */ tool) => tool.name)).toEqual(["ledger_map_put"]);
+
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        ledger_append: {
+          ledgers: [
+            { name: "cache", type: "map" },
+            { name: "events", type: "log" },
+          ],
+        },
+      })
+    );
+    runScript();
+    const mixed = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(mixed.map((/** @type {{name: string}} */ tool) => tool.name)).toEqual(["ledger_append", "ledger_map_put"]);
+    expect(mixed[0].inputSchema.properties.ledger.enum).toEqual(["events"]);
+    expect(mixed[0].inputSchema.required).toContain("ledger");
   });
 
   it("preserves namespaced public names", () => {
@@ -187,6 +325,149 @@ describe("generate_safe_outputs_tools", () => {
     const createIssueTool = result.find((/** @type {{name: string}} */ t) => t.name === "create_issue");
     expect(createIssueTool).toBeDefined();
     expect(createIssueTool.inputSchema.required).toEqual(expect.arrayContaining(["title", "temporary_id"]));
+  });
+
+  it("replaces array item schemas when specified in tools_meta", () => {
+    fs.writeFileSync(
+      toolsSourcePath,
+      JSON.stringify([
+        {
+          name: "add_labels",
+          description: "Adds labels.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              labels: { type: "array", items: { oneOf: [{ type: "string" }, { type: "object" }] } },
+            },
+            required: ["labels"],
+          },
+        },
+      ])
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ add_labels: {} }));
+    const itemSchema = {
+      type: "object",
+      required: ["name", "confidence"],
+      additionalProperties: false,
+      properties: {
+        name: { type: "string" },
+        confidence: { type: "string", enum: ["HIGH", "MEDIUM", "LOW"] },
+      },
+    };
+    fs.writeFileSync(
+      toolsMetaPath,
+      JSON.stringify({
+        description_suffixes: {},
+        repo_params: {},
+        dynamic_tools: [],
+        item_schemas: { add_labels: { labels: itemSchema } },
+      })
+    );
+
+    runScript();
+
+    const result = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(result[0].inputSchema.properties.labels.items).toEqual(itemSchema);
+    expect(result[0].inputSchema.properties.labels.description).toContain("plain string label names are not permitted");
+    expect(result[0].description).not.toContain("INTENT ENCOURAGED:");
+  });
+
+  it("keeps issue-intent requirements and guidance with a narrowed add_labels item schema", () => {
+    fs.writeFileSync(
+      toolsSourcePath,
+      JSON.stringify([
+        {
+          name: "add_labels",
+          description: "Adds labels.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              labels: {
+                type: "array",
+                items: {
+                  oneOf: [
+                    { type: "string" },
+                    {
+                      type: "object",
+                      required: ["name"],
+                      properties: {
+                        name: { type: "string" },
+                        rationale: { type: "string" },
+                        confidence: { type: "string" },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      ])
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ add_labels: { issue_intent: true } }));
+    const itemSchema = {
+      type: "object",
+      required: ["name", "rationale", "confidence"],
+      additionalProperties: false,
+      properties: {
+        name: { type: "string" },
+        rationale: { type: "string" },
+        confidence: { type: "string", enum: ["HIGH", "MEDIUM", "LOW"] },
+      },
+    };
+    fs.writeFileSync(
+      toolsMetaPath,
+      JSON.stringify({
+        description_suffixes: {},
+        repo_params: {},
+        dynamic_tools: [],
+        item_schemas: { add_labels: { labels: itemSchema } },
+      })
+    );
+
+    runScript();
+
+    const result = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    const addLabelsTool = result.find((/** @type {{name: string}} */ t) => t.name === "add_labels");
+    expect(addLabelsTool.inputSchema.properties.labels.items).toEqual(itemSchema);
+    expect(addLabelsTool.inputSchema.properties.labels.items.required).toEqual(expect.arrayContaining(["name", "rationale", "confidence"]));
+    expect(addLabelsTool.inputSchema.properties.labels.description).toContain("Plain string label names are not permitted");
+    expect(addLabelsTool.description).toContain("INTENT REQUIRED:");
+  });
+
+  it("describes configured string-only add_labels schemas accurately", () => {
+    fs.writeFileSync(
+      toolsSourcePath,
+      JSON.stringify([
+        {
+          name: "add_labels",
+          description: "Adds labels.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              labels: { type: "array", items: { oneOf: [{ type: "string" }, { type: "object" }] } },
+            },
+          },
+        },
+      ])
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ add_labels: {} }));
+    fs.writeFileSync(
+      toolsMetaPath,
+      JSON.stringify({
+        description_suffixes: {},
+        repo_params: {},
+        dynamic_tools: [],
+        item_schemas: { add_labels: { labels: { type: "string" } } },
+      })
+    );
+
+    runScript();
+
+    const result = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(result[0].inputSchema.properties.labels.items).toEqual({ type: "string" });
+    expect(result[0].inputSchema.properties.labels.description).toContain("Each label must be a plain string");
+    expect(result[0].description).not.toContain("INTENT ENCOURAGED:");
   });
 
   it("adds anyOf alternative requirements for assign_milestone", () => {

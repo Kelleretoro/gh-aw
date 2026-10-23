@@ -35,11 +35,16 @@ type InitOptions struct {
 	CodespaceEnabled bool
 	Completions      bool
 	CreatePR         bool
+	AutoMerge        bool
+	PRMessage        string
 	RootCmd          CommandProvider
 }
 
 // InitRepository initializes the repository for agentic workflows
 func InitRepository(opts InitOptions) error {
+	if err := requireAutoMergePR(opts.AutoMerge, opts.CreatePR); err != nil {
+		return err
+	}
 	initLog.Print("Starting repository initialization for agentic workflows")
 
 	ctx := ctxutil.OrBackground(opts.Ctx)
@@ -115,11 +120,11 @@ func InitRepository(opts InitOptions) error {
 		}
 		if err := deleteLegacyAgentFiles(opts.Verbose); err != nil {
 			initLog.Printf("Failed to delete legacy agent files: %v", err)
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to delete legacy agent files: %v", err)))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to delete legacy agent files: %v", err)))
 		}
 		if err := deleteAgenticWorkflowDesignerSkillDir(opts.Verbose); err != nil {
 			initLog.Printf("Failed to delete legacy agentic-workflow-designer skill directory: %v", err)
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to delete legacy agentic-workflow-designer skill directory: %v", err)))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to delete legacy agentic-workflow-designer skill directory: %v", err)))
 		}
 	}
 
@@ -211,11 +216,8 @@ func InitRepository(opts InitOptions) error {
 		initLog.Print("Create PR enabled - preparing to create branch, commit, push, and create PR")
 		fmt.Fprintln(os.Stderr, "")
 
-		prBody := "This PR initializes the repository for agentic workflows by:\n" +
-			"- Configuring .gitattributes\n" +
-			"- Creating GitHub Copilot custom instructions\n" +
-			"- Setting up workflow prompts and skills"
-		if _, err := CreatePRWithChanges(ctx, "init-agentic-workflows", "chore: initialize agentic workflows", "Initialize agentic workflows", prBody, opts.Verbose); err != nil {
+		prBody := buildInitPRBody(opts)
+		if _, err := createPRWithChanges(ctx, "init-agentic-workflows", "chore: initialize agentic workflows", "Initialize agentic workflows", prBody, opts.Verbose, opts.AutoMerge); err != nil {
 			return err
 		}
 	}

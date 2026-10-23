@@ -26,6 +26,15 @@ Persona-lens view of the same facts as the canonical [Decision Matrix](triggers.
 | Designer | PR review is metadata/content-aware via GitHub reads only | Add `playwright` for screenshot/visual checks; add `cache-memory` when baselines or snapshot history are required |
 | Legal / Compliance | Policy/dependency review is repo-state and metadata driven | Add `cache-memory` when recurring audits need prior-run evidence/comparison state |
 
+## Replace Previous Results
+
+When a recurring digest or PR-reactive update is superseded by the newest result, prefer replacing the prior output instead of accumulating stale results:
+
+- For recurring issue digests, use `create-issue` with `close-older-issues: true`.
+- For rolling PR comments, use `add-comment` with `hide-older-comments: true`.
+
+Wait for the previous result when only one active issue or PR should exist; keep prior outputs when each result is intentionally distinct or history is required.
+
 ## File Format
 
 Agentic workflows are markdown files with YAML frontmatter.
@@ -65,6 +74,7 @@ See [workflow-editing.md](workflow-editing.md) for when `gh aw compile` is requi
 
 - Set `strict: true` for production workflows.
 - Limit `bash` access to what the workflow actually needs.
+- Keep agent-job permissions read-only when writes are handled solely by safe outputs. For example, `add-comment` needs `pull-requests: read` to inspect a PR, not `pull-requests: write`; `create-issue` needs `issues: read` to check existing issues, not `issues: write`. Safe-output writes run in separate jobs with their own permissions.
 - For visual regression workflows, explicitly name the baseline source (for example `cache-memory` key, artifact, or branch path). See [visual-regression.md](visual-regression.md).
 
 See [workflow-constraints.md](workflow-constraints.md) for the security posture (read-only job, safe-outputs routing, gh-proxy/cli-proxy, network constraints, sanitized text), safer-alternatives pattern, and common risk areas.
@@ -80,6 +90,8 @@ Use `@.github/aw/instructions.md` as the canonical repository-local overlay for 
 ## Trigger Selection
 
 Use the smallest trigger that matches the requested automation. See the [Decision Matrix](triggers.md#decision-matrix) in triggers.md for the canonical trigger-to-use-case mapping, and [workflow-constraints.md](workflow-constraints.md) for the security posture.
+
+Use `pull_request` with `paths:` for checks that need only changed files. When a PR check depends on an artifact produced by another Actions workflow, use `workflow_run` scoped to that workflow with `types: [completed]` and gate on a successful conclusion, rather than racing the artifact producer on `pull_request`. Use `schedule` (with `workflow_dispatch` for manual runs) when an audit must correlate results across runs or inspect drift independently of a single PR or CI run.
 
 ## Ad Hoc Scenario Evaluation
 
@@ -98,12 +110,11 @@ Ad hoc scenario evaluation is a **conversation-mode capability** of the installe
 
 ```yaml
 on:
-  schedule:
-    - cron: "0 9 * * 1" # weekly, Monday 09:00
+  schedule: weekly
   workflow_dispatch:
 permissions:
   contents: read
-  issues: write
+  issues: read
 tools:
   github:
     mode: gh-proxy
@@ -151,6 +162,7 @@ For the full dependency-license/compliance review pattern (paths scoping, licens
 | Editing and recompilation rules | [workflow-editing.md](workflow-editing.md) |
 | Architectural and security constraints | [workflow-constraints.md](workflow-constraints.md) |
 | Common design patterns | [workflow-patterns.md](workflow-patterns.md) |
+| Git-backed work queue dispatchers, workers, and CLI inspection | [work-queue.md](work-queue.md) |
 | Frontmatter schema index | [syntax.md](syntax.md) |
 | Safe outputs index | [safe-outputs.md](safe-outputs.md) |
 | Trigger patterns | [triggers.md](triggers.md) |

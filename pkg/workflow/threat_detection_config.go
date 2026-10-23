@@ -16,6 +16,8 @@ type ThreatDetectionConfig struct {
 	Retries             *int          `yaml:"retries,omitempty"`           // Detector-only retries override passed to threat-detect (--retries)
 	MaxAICredits        int64         `yaml:"max-ai-credits,omitempty"`    // Maximum AI credits budget for threat-detection engine execution
 	Model               string        `yaml:"model,omitempty"`             // Model override for threat detection engine execution
+	CACert              string        `yaml:"ca-cert,omitempty"`           // Host CA certificate path override (inherits the agent path for matching engines)
+	DisableCACert       bool          `yaml:"-"`                           // Explicitly disable inheriting sandbox.agent.ca-cert
 	EngineConfig        *EngineConfig `yaml:"engine-config,omitempty"`     // Extended engine configuration for threat detection
 	EngineDisabled      bool          `yaml:"-"`                           // Internal flag: true when engine is explicitly set to false
 	RunsOn              string        `yaml:"runs-on,omitempty"`           // Runner override for the detection job
@@ -135,7 +137,7 @@ func (c *Compiler) parseThreatDetectionObjectConfig(configMap map[string]any) *T
 }
 
 // parseThreatDetectionScalarFields parses the non-engine fields of the threat-detection
-// object configuration (prompt, steps, post-steps, budgets, runner, and reporting flags)
+// object configuration (prompt, model, steps, post-steps, budgets, runner, and reporting flags)
 // into threatConfig.
 func parseThreatDetectionScalarFields(configMap map[string]any, threatConfig *ThreatDetectionConfig) {
 	// Parse prompt field
@@ -145,6 +147,8 @@ func parseThreatDetectionScalarFields(configMap map[string]any, threatConfig *Th
 		}
 	}
 
+	parseThreatDetectionModel(configMap, threatConfig)
+
 	// Parse steps field (pre-execution steps, run before engine execution)
 	if steps, exists := configMap["steps"]; exists {
 		if stepsArray, ok := steps.([]any); ok {
@@ -152,7 +156,7 @@ func parseThreatDetectionScalarFields(configMap map[string]any, threatConfig *Th
 		}
 	}
 
-	// Parse post-steps field (post-execution steps, run after engine execution)
+	// Parse post-steps field (run after engine execution)
 	if postSteps, exists := configMap["post-steps"]; exists {
 		if postStepsArray, ok := postSteps.([]any); ok {
 			threatConfig.PostSteps = postStepsArray
@@ -190,13 +194,29 @@ func parseThreatDetectionScalarFields(configMap map[string]any, threatConfig *Th
 		threatConfig.RunsOn = renderRunsOnSnippet(runOn)
 	}
 
-	if artifactBaseURL, exists := configMap["artifact-base-url"]; exists {
-		if artifactBaseURLString, ok := artifactBaseURL.(string); ok {
-			threatConfig.ArtifactBaseURL = artifactBaseURLString
-		}
+	parseThreatDetectionNetworkFields(configMap, threatConfig)
+	parseThreatDetectionReportingFields(configMap, threatConfig)
+}
+
+func parseThreatDetectionNetworkFields(configMap map[string]any, threatConfig *ThreatDetectionConfig) {
+	if artifactBaseURL, ok := configMap["artifact-base-url"].(string); ok {
+		threatConfig.ArtifactBaseURL = artifactBaseURL
 	}
 
-	parseThreatDetectionReportingFields(configMap, threatConfig)
+	if caCert, ok := configMap["ca-cert"].(string); ok {
+		threatConfig.CACert = strings.TrimSpace(caCert)
+	} else if caCert, ok := configMap["ca-cert"].(bool); ok {
+		threatConfig.DisableCACert = !caCert
+	}
+}
+
+func parseThreatDetectionModel(configMap map[string]any, threatConfig *ThreatDetectionConfig) {
+	// Parse model override
+	if model, exists := configMap["model"]; exists {
+		if modelStr, ok := model.(string); ok {
+			threatConfig.Model = modelStr
+		}
+	}
 }
 
 // parseThreatDetectionReportingFields parses the fields that control how detection
@@ -251,7 +271,9 @@ func (c *Compiler) parseThreatDetectionEngineField(configMap map[string]any, thr
 		// Handle object format - use extractEngineConfig logic
 		_, engineConfig, model := c.ExtractEngineConfig(map[string]any{"engine": engineObj})
 		threatConfig.EngineConfig = engineConfig
-		threatConfig.Model = model
+		if model != "" {
+			threatConfig.Model = model
+		}
 	}
 }
 

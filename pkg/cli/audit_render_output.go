@@ -17,8 +17,12 @@ import (
 // It is called both when serving from a cached run summary and after a fresh processing pass,
 // ensuring that the two paths produce identical output.
 func renderAuditReport(ctx context.Context, processedRun ProcessedRun, metrics LogMetrics, mcpToolUsage *MCPToolUsageData, opts AuditOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	runID := processedRun.Run.DatabaseID
 	runOutputDir := opts.OutputDir
+	auditLog.Printf("Rendering audit report for run %d (noBaseline=%t, group=%t)", runID, opts.NoBaseline, opts.Group)
 	processedRun.Run.SafeItemsCount = len(resolveCreatedItems(runOutputDir, processedRun.SafeOutputs))
 	auditData, ok := loadCachedAuditData(runOutputDir, processedRun.Run, auditCacheSourceFull)
 	if ok {
@@ -28,7 +32,14 @@ func renderAuditReport(ctx context.Context, processedRun ProcessedRun, metrics L
 			auditData.Comparison = noBaselineComparison()
 		}
 	} else {
-		auditData = buildRenderedAuditDataFromCache(ctx, processedRun, metrics, mcpToolUsage, runOutputDir, opts)
+		var err error
+		auditData, err = buildRenderedAuditDataFromCache(ctx, processedRun, metrics, mcpToolUsage, runOutputDir, opts)
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		auditData.CacheSource = auditCacheSourceFull
 		auditData.SchemaVersion = auditSchemaVersion
 		// Never persist an opt-out result: it would be reused as the full cache entry
@@ -39,9 +50,39 @@ func renderAuditReport(ctx context.Context, processedRun ProcessedRun, metrics L
 			}
 		}
 	}
+	if auditData.Ledger == nil {
+		auditData.Ledger = processedRun.Ledger
+	}
+	// NoBaseline runs avoid writing audit-cache changes, including queue backfills.
+	if mergeWorkQueueReport(&auditData.WorkQueue, processedRun.WorkQueue) && !opts.NoBaseline {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := writeAuditData(runOutputDir, auditData); err != nil {
+			return err
+		}
+	}
+	return renderPreparedAuditReport(ctx, auditData, opts)
+}
+
+func renderPreparedAuditReport(ctx context.Context, auditData AuditData, opts AuditOptions) error {
+	runID := auditData.Overview.RunID
+	runOutputDir := opts.OutputDir
 	if opts.Group {
 		parseAuditLogsIfRequested(runID, runOutputDir, opts)
 		return nil
+	}
+	// Query-specific evidence never enters the shared deterministic audit cache.
+	auditData.EvidenceSearch = nil
+	if opts.Search != "" {
+		search, err := searchAuditSession(ctx, runOutputDir, runID, opts.Search, opts.SearchLimit)
+		if err != nil {
+			return fmt.Errorf("failed to search audit evidence: %w", err)
+		}
+		auditData.EvidenceSearch = search
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := renderAuditOutput(auditData, runOutputDir, opts.JSONOutput, opts.Verbose); err != nil {
 		return err
@@ -53,27 +94,38 @@ func renderAuditReport(ctx context.Context, processedRun ProcessedRun, metrics L
 	return nil
 }
 
-func buildRenderedAuditDataFromCache(ctx context.Context, processedRun ProcessedRun, metrics LogMetrics, mcpToolUsage *MCPToolUsageData, runOutputDir string, opts AuditOptions) AuditData {
+func buildRenderedAuditDataFromCache(ctx context.Context, processedRun ProcessedRun, metrics LogMetrics, mcpToolUsage *MCPToolUsageData, runOutputDir string, opts AuditOptions) (AuditData, error) {
 	auditData, ok := loadCachedAuditData(runOutputDir, processedRun.Run, auditCacheSourceLogs)
 	if !ok {
 		return buildRenderedAuditData(ctx, processedRun, metrics, mcpToolUsage, runOutputDir, opts)
 	}
+	if auditData.Ledger == nil {
+		auditData.Ledger = processedRun.Ledger
+	}
+	mergeWorkQueueReport(&auditData.WorkQueue, processedRun.WorkQueue)
 	createdItems := resolveCreatedItems(runOutputDir, processedRun.SafeOutputs)
-	addAuditOutcomeSummary(ctx, &auditData, createdItems)
-	auditData.Comparison = buildRenderedAuditComparison(ctx, processedRun, createdItems, runOutputDir, opts)
-	return auditData
+	comparison, err := buildRenderedAuditComparison(ctx, processedRun, createdItems, runOutputDir, opts)
+	if err != nil {
+		return AuditData{}, err
+	}
+	auditData.Comparison = comparison
+	return auditData, nil
 }
 
-func buildRenderedAuditData(ctx context.Context, processedRun ProcessedRun, metrics LogMetrics, mcpToolUsage *MCPToolUsageData, runOutputDir string, opts AuditOptions) AuditData {
+func buildRenderedAuditData(ctx context.Context, processedRun ProcessedRun, metrics LogMetrics, mcpToolUsage *MCPToolUsageData, runOutputDir string, opts AuditOptions) (AuditData, error) {
 	currentCreatedItems := resolveCreatedItems(runOutputDir, processedRun.SafeOutputs)
 	auditData := buildAuditData(ctx, processedRun, metrics, mcpToolUsage)
-	auditData.Comparison = buildRenderedAuditComparison(ctx, processedRun, currentCreatedItems, runOutputDir, opts)
-	return auditData
+	comparison, err := buildRenderedAuditComparison(ctx, processedRun, currentCreatedItems, runOutputDir, opts)
+	if err != nil {
+		return AuditData{}, err
+	}
+	auditData.Comparison = comparison
+	return auditData, nil
 }
 
-func buildRenderedAuditComparison(ctx context.Context, processedRun ProcessedRun, createdItems []CreatedItemReport, runOutputDir string, opts AuditOptions) *AuditComparisonData {
+func buildRenderedAuditComparison(ctx context.Context, processedRun ProcessedRun, createdItems []CreatedItemReport, runOutputDir string, opts AuditOptions) (*AuditComparisonData, error) {
 	if opts.NoBaseline {
-		return noBaselineComparison()
+		return noBaselineComparison(), nil
 	}
 	currentSnapshot := buildAuditComparisonSnapshot(processedRun, createdItems)
 	return buildAuditComparisonForRun(ctx, processedRun, currentSnapshot, runOutputDir, opts.Owner, opts.Repo, opts.Hostname, opts.Verbose)
@@ -126,20 +178,25 @@ func parseAuditLogsIfRequested(runID int64, runOutputDir string, opts AuditOptio
 	if !opts.Parse {
 		return
 	}
+	auditLog.Printf("Parsing agent and firewall logs for run %d", runID)
 	parseAgentLogIfRequested(runID, runOutputDir, opts.Verbose)
 	parseFirewallLogsIfRequested(runID, runOutputDir, opts.Verbose)
 }
 
 func parseAgentLogIfRequested(runID int64, runOutputDir string, verbose bool) {
-	awInfoPath := filepath.Join(runOutputDir, "aw_info.json")
-	engine := extractEngineFromAwInfo(awInfoPath, verbose)
-	if engine == nil {
-		if verbose {
-			fmt.Fprintln(os.Stderr, console.FormatInfoMessage("No engine detected (aw_info.json missing or invalid); skipping agent log rendering"))
+	rendered, err := parsePersistedAgentLog(runOutputDir)
+	if !rendered && err == nil {
+		awInfoPath := filepath.Join(runOutputDir, "aw_info.json")
+		engine := extractEngineFromAwInfo(awInfoPath, verbose)
+		if engine == nil {
+			if verbose {
+				fmt.Fprintln(os.Stderr, console.FormatInfoMessage("No engine detected (aw_info.json missing or invalid); skipping agent log rendering"))
+			}
+			return
 		}
-		return
+		err = parseAgentLog(runOutputDir, engine, verbose)
 	}
-	if err := parseAgentLog(runOutputDir, engine, verbose); err != nil {
+	if err != nil {
 		if verbose {
 			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to parse agent log for run %d: %v", runID, err)))
 		}
@@ -147,7 +204,7 @@ func parseAgentLogIfRequested(runID int64, runOutputDir string, verbose bool) {
 	}
 	logMdPath := filepath.Join(runOutputDir, "log.md")
 	if fileutil.FileExists(logMdPath) {
-		fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("✓ Parsed log for run %d → %s", runID, logMdPath)))
+		fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("Parsed log for run %d → %s", runID, logMdPath)))
 	}
 }
 
@@ -160,7 +217,7 @@ func parseFirewallLogsIfRequested(runID int64, runOutputDir string, verbose bool
 	}
 	firewallMdPath := filepath.Join(runOutputDir, "firewall.md")
 	if fileutil.FileExists(firewallMdPath) {
-		fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("✓ Parsed firewall logs for run %d → %s", runID, firewallMdPath)))
+		fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("Parsed firewall logs for run %d → %s", runID, firewallMdPath)))
 	}
 }
 
@@ -168,6 +225,7 @@ func renderAuditCompletion(runOutputDir string, jsonOutput bool) {
 	if jsonOutput {
 		return
 	}
+	auditLog.Printf("Audit complete for %s", runOutputDir)
 	absOutputDir, _ := filepath.Abs(runOutputDir)
 	fmt.Fprintln(os.Stderr, console.FormatSuccessMessage("Audit complete. Logs saved to "+absOutputDir))
 	fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Tip: use --artifacts to select specific artifact sets (agent, firewall, mcp, activation, detection, etc.)"))

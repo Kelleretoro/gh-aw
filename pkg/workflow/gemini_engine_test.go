@@ -114,6 +114,31 @@ func TestGeminiEngineInstallation(t *testing.T) {
 		assert.Empty(t, steps, "Should skip installation when custom command is specified")
 	})
 
+	t.Run("default version is installed and recorded", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Name:         "test-workflow",
+			EngineConfig: &EngineConfig{},
+		}
+
+		steps := engine.GetInstallationSteps(workflowData)
+		assert.Equal(t, string(constants.DefaultGeminiVersion), workflowData.EngineConfig.Version)
+		assert.Contains(t, stepsToString(steps), "npm install --ignore-scripts -g @google/gemini-cli@"+string(constants.DefaultGeminiVersion))
+	})
+
+	t.Run("explicit version overrides the default", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Name: "test-workflow",
+			EngineConfig: &EngineConfig{
+				Version: "0.62.0",
+			},
+		}
+
+		steps := engine.GetInstallationSteps(workflowData)
+		assert.Equal(t, "0.62.0", workflowData.EngineConfig.Version)
+		assert.Contains(t, stepsToString(steps), "npm install --ignore-scripts -g @google/gemini-cli@0.62.0")
+		assert.NotContains(t, stepsToString(steps), "@google/gemini-cli@"+string(constants.DefaultGeminiVersion))
+	})
+
 	t.Run("with firewall", func(t *testing.T) {
 		workflowData := &WorkflowData{
 			Name: "test-workflow",
@@ -334,6 +359,9 @@ func TestGeminiEngineFirewallIntegration(t *testing.T) {
 					Enabled: true,
 				},
 			},
+			SandboxConfig: &SandboxConfig{
+				Agent: &AgentSandboxConfig{ID: "awf"},
+			},
 		}
 
 		steps := engine.GetExecutionSteps(workflowData, "/tmp/test.log")
@@ -347,7 +375,7 @@ func TestGeminiEngineFirewallIntegration(t *testing.T) {
 		// With config file support, domains and apiProxy are in the JSON config
 		assert.Contains(t, stepContent, "allowDomains", "Should include allowDomains in config JSON")
 		assert.Contains(t, stepContent, `\"enabled\":true`, "Should include apiProxy enabled in config JSON")
-		assert.Contains(t, stepContent, "GEMINI_API_BASE_URL: http://host.docker.internal:10003", "Should set GEMINI_API_BASE_URL to LLM gateway URL")
+		assert.Contains(t, stepContent, "GEMINI_API_BASE_URL: http://api-proxy:10003", "Should use the isolated AWF API proxy hostname")
 	})
 
 	t.Run("firewall disabled", func(t *testing.T) {

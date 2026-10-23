@@ -167,6 +167,11 @@ func TestResolveArtifactFilter(t *testing.T) {
 			expected: []string{"activation", "agent"},
 		},
 		{
+			name:     "experiment resolves to experiment and usage artifacts",
+			sets:     []string{"experiment"},
+			expected: []string{constants.ExperimentArtifactName.String(), constants.UsageArtifactName.String()},
+		},
+		{
 			name:     "usage resolves to usage artifact",
 			sets:     []string{"usage"},
 			expected: []string{"usage"},
@@ -177,9 +182,9 @@ func TestResolveArtifactFilter(t *testing.T) {
 			expected: []string{"usage"},
 		},
 		{
-			name:     "graders resolves to usage agent and output fallback",
+			name:     "graders resolves to conclusion custom job and historical artifacts",
 			sets:     []string{"graders"},
-			expected: []string{constants.UsageArtifactName.String(), constants.AgentArtifactName.String(), constants.AgentOutputFallbackArtifactName.String()},
+			expected: []string{constants.UsageArtifactName.String(), constants.GradersArtifactName.String(), constants.AgentArtifactName.String(), constants.AgentOutputFallbackArtifactName.String()},
 		},
 		{
 			name:     "multiple sets are merged and deduplicated",
@@ -280,7 +285,7 @@ func TestValidArtifactSetNames(t *testing.T) {
 	names := ValidArtifactSetNames()
 	require.NotEmpty(t, names, "ValidArtifactSetNames should return non-empty slice")
 
-	expected := []string{"all", "activation", "agent", "detection", "evals", "experiment", "firewall", "github-api", "graders", "info", "mcp", "usage"}
+	expected := []string{"all", "activation", "agent", "detection", "evals", "experiment", "firewall", "github-api", "graders", "info", "mcp", "outcomes", "usage", "work-queue"}
 	assert.ElementsMatch(t, expected, names, "ValidArtifactSetNames should contain all known sets")
 }
 
@@ -451,6 +456,7 @@ func TestShouldDownloadWorkflowRunLogs(t *testing.T) {
 		{name: "usage only", filter: []string{"usage"}, expected: false},
 		{name: "info only", filter: []string{"info"}, expected: false},
 		{name: "activation and usage", filter: []string{"activation", "usage"}, expected: false},
+		{name: "outcome evidence only", filter: []string{"usage", "safe-outputs-items", "agent-output-fallback"}, expected: false},
 		{name: "agent", filter: []string{"agent"}, expected: true},
 		{name: "agent and usage", filter: []string{"agent", "usage"}, expected: true},
 	}

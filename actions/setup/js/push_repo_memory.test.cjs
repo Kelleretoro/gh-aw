@@ -3,11 +3,266 @@ import { execFileSync, execSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { createRequire } from "node:module";
+import vm from "node:vm";
 import { globPatternToRegex } from "./glob_pattern_helpers.cjs";
-import { applyTemporaryIdSubstitutions, configureRepoMemoryMergePolicy, isDeterministicPushValidationError, pushRepoMemoryChangesWithRetry } from "./push_repo_memory.cjs";
+import {
+  applyTemporaryIdSubstitutions,
+  configureRepoMemoryMergePolicy,
+  getCustomValidationFailureDetail,
+  isDeterministicPushValidationError,
+  isUntrustedLedgerArtifact,
+  pushRepoMemoryChangesWithRetry,
+  redactFailureSummary,
+  setPushRepoMemoryFailure,
+} from "./push_repo_memory.cjs";
 
-const mockCore = { info: vi.fn() };
+const mockCore = { info: vi.fn(), setFailed: vi.fn() };
 global.core = mockCore;
+
+describe("push_repo_memory.cjs - nested memory persistence", () => {
+  it("pushes nested files matching recursive globs and warns with skipped paths", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-memory-nested-"));
+    const artifactDir = path.join(tempDir, "artifact");
+    const workspaceDir = path.join(tempDir, "workspace");
+    const core = { info: vi.fn(), warning: vi.fn(), error: vi.fn(), setFailed: vi.fn() };
+    const pushSignedCommits = vi.fn().mockResolvedValue(undefined);
+    const execGitSync = vi.fn(args => {
+      if (args[0] === "status") return "?? archive/deep/history.jsonl\n?? state.json\n";
+      if (args[0] === "rev-parse") return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+      return "";
+    });
+    const scriptPath = path.join(import.meta.dirname, "push_repo_memory.cjs");
+    const require = createRequire(import.meta.url);
+    const module = { exports: {} };
+    const mocks = {
+      "./git_helpers.cjs": { execGitSync },
+      "./git_patch_utils.cjs": { getStagedPatchDiffSizeBytes: () => 100 },
+      "./git_auth_helpers.cjs": { getGitAuthEnv: () => ({}) },
+      "./push_signed_commits.cjs": { pushSignedCommits },
+    };
+
+    try {
+      fs.mkdirSync(path.join(artifactDir, "archive", "deep"), { recursive: true });
+      fs.mkdirSync(workspaceDir);
+      fs.writeFileSync(path.join(artifactDir, "archive", "deep", "history.jsonl"), '{"id":1}\n');
+      fs.writeFileSync(path.join(artifactDir, "state.json"), "{}");
+      fs.writeFileSync(path.join(artifactDir, "archive", "ignored.md"), "ignored");
+      fs.writeFileSync(path.join(artifactDir, "archive", "ignored.bin"), "ignored");
+
+      vm.runInNewContext(fs.readFileSync(scriptPath, "utf8"), {
+        require: id => mocks[id] || require(id),
+        module,
+        core,
+        context: { repo: { owner: "owner", repo: "repo" } },
+        github: {},
+        exec: {},
+        process: {
+          env: {
+            ARTIFACT_DIR: artifactDir,
+            GITHUB_WORKSPACE: workspaceDir,
+            MEMORY_ID: "test",
+            TARGET_REPO: "owner/repo",
+            BRANCH_NAME: "memory/test",
+            GH_TOKEN: "test-token",
+            FILE_GLOB_FILTER: "*.json **/*.jsonl",
+            ALLOWED_EXTENSIONS: '[".json", ".jsonl", ".md"]',
+          },
+        },
+      });
+
+      await module.exports.main();
+
+      expect(core.setFailed).not.toHaveBeenCalled();
+      expect(fs.readFileSync(path.join(workspaceDir, "archive", "deep", "history.jsonl"), "utf8")).toBe('{"id":1}\n');
+      expect(fs.existsSync(path.join(workspaceDir, "state.json"))).toBe(true);
+      expect(fs.existsSync(path.join(workspaceDir, "archive", "ignored.md"))).toBe(false);
+      expect(execGitSync).toHaveBeenCalledWith(["add", "--sparse", "--", ":(literal)archive/deep/history.jsonl", ":(literal)state.json"], { stdio: "inherit", cwd: workspaceDir });
+      expect(pushSignedCommits).toHaveBeenCalledOnce();
+      expect(core.warning).toHaveBeenCalledOnce();
+      expect(core.warning).toHaveBeenCalledWith(expect.stringContaining("archive/ignored.md (no pattern matched)"));
+      expect(core.warning).toHaveBeenCalledWith(expect.stringContaining('archive/ignored.bin (disallowed extension ".bin")'));
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("push_repo_memory.cjs - trusted daily AIC ledger persistence", () => {
+  it.each(
+    [
+      {
+        name: "root-only glob",
+        fileGlobFilter: "*.jsonl",
+        allowedExtensions: '[".json", ".jsonl"]',
+        expectedAgentFiles: ["agent.jsonl"],
+        coveragePassesFilters: false,
+        usagePassesFilters: false,
+      },
+      {
+        name: "JSONL-only extension",
+        fileGlobFilter: "",
+        allowedExtensions: '[".jsonl"]',
+        expectedAgentFiles: ["agent.jsonl", "nested/agent.jsonl"],
+        coveragePassesFilters: false,
+        usagePassesFilters: true,
+      },
+      {
+        name: "JSON-only extension",
+        fileGlobFilter: "",
+        allowedExtensions: '[".json"]',
+        expectedAgentFiles: ["agent.json"],
+        coveragePassesFilters: true,
+        usagePassesFilters: false,
+      },
+      {
+        name: "JSON-only recursive glob",
+        fileGlobFilter: "**/*.json",
+        allowedExtensions: '[".json", ".jsonl"]',
+        expectedAgentFiles: [],
+        coveragePassesFilters: true,
+        usagePassesFilters: false,
+      },
+    ].flatMap(testCase => [undefined, "false", "true"].map(trustedWriter => ({ ...testCase, trustedWriter })))
+  )("applies $name with trusted writer=$trustedWriter", async ({ fileGlobFilter, allowedExtensions, expectedAgentFiles, coveragePassesFilters, usagePassesFilters, trustedWriter }) => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-memory-daily-aic-"));
+    const artifactDir = path.join(tempDir, "artifact");
+    const usageDir = path.join(tempDir, "usage");
+    const workspaceDir = path.join(tempDir, "workspace");
+    const now = Date.parse("2026-09-23T13:02:21.000Z");
+    const repository = "owner/repo";
+    const workflowId = "daily-metrics";
+    const runId = "42";
+    const core = { info: vi.fn(), warning: vi.fn(), error: vi.fn(), setFailed: vi.fn(), setOutput: vi.fn() };
+    const pushSignedCommits = vi.fn().mockResolvedValue(undefined);
+    const require = createRequire(import.meta.url);
+    const { appendCurrentRunLedgerEntry, readLedgerCoverageStart, readLedgerEntries } = require("./daily_aic_repo_memory_ledger.cjs");
+    const scriptPath = path.join(import.meta.dirname, "push_repo_memory.cjs");
+    const module = { exports: {} };
+    const acceptedAgentFiles = expectedAgentFiles.map(file => `?? ${file}`).join("\n");
+    const mocks = {
+      "./git_helpers.cjs": {
+        execGitSync: vi.fn(args => {
+          if (args[0] === "status")
+            return `?? daily-aic-ledger/2026-09-23.jsonl\n?? daily-aic-ledger/coverage-${require("crypto")
+              .createHash("sha256")
+              .update(JSON.stringify([repository, workflowId]))
+              .digest("hex")}.json\n${acceptedAgentFiles}\n`;
+          if (args[0] === "rev-parse") return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+          return "";
+        }),
+      },
+      "./git_patch_utils.cjs": { getStagedPatchDiffSizeBytes: () => 100 },
+      "./git_auth_helpers.cjs": { getGitAuthEnv: () => ({}) },
+      "./push_signed_commits.cjs": { pushSignedCommits },
+    };
+
+    try {
+      fs.mkdirSync(path.join(artifactDir, "nested"), { recursive: true });
+      fs.mkdirSync(usageDir, { recursive: true });
+      fs.mkdirSync(workspaceDir);
+      fs.writeFileSync(path.join(artifactDir, "agent.json"), "{}");
+      fs.writeFileSync(path.join(artifactDir, "agent.jsonl"), "{}\n");
+      fs.writeFileSync(path.join(artifactDir, "nested", "agent.jsonl"), "{}\n");
+      fs.writeFileSync(path.join(usageDir, "agent_usage.jsonl"), `${JSON.stringify({ aic: 7 })}\n`);
+
+      vi.stubEnv("GITHUB_RUN_ID", runId);
+      vi.stubEnv("GITHUB_REPOSITORY", repository);
+      vi.stubEnv("GH_AW_WORKFLOW_ID", workflowId);
+      appendCurrentRunLedgerEntry({ repoMemoryDir: artifactDir, usageRoot: usageDir, now });
+
+      vm.runInNewContext(fs.readFileSync(scriptPath, "utf8"), {
+        require: id => mocks[id] || require(id),
+        module,
+        core,
+        context: { repo: { owner: "owner", repo: "repo" } },
+        github: {},
+        exec: {},
+        process: {
+          env: {
+            ARTIFACT_DIR: artifactDir,
+            GITHUB_WORKSPACE: workspaceDir,
+            MEMORY_ID: "test",
+            TARGET_REPO: "owner/repo",
+            BRANCH_NAME: "memory/test",
+            GH_TOKEN: "test-token",
+            GITHUB_RUN_ID: runId,
+            FILE_GLOB_FILTER: fileGlobFilter,
+            ALLOWED_EXTENSIONS: allowedExtensions,
+            GH_AW_DAILY_AIC_REPO_MEMORY_WRITER: trustedWriter,
+          },
+        },
+      });
+
+      await module.exports.main();
+
+      const repoMemoryDir = workspaceDir;
+      expect(core.setFailed).not.toHaveBeenCalled();
+      expect(readLedgerEntries({ repoMemoryDir, repository, workflowId, now })).toMatchObject(trustedWriter === "true" || usagePassesFilters ? [{ run_id: 42, aic: 7 }] : []);
+      expect(readLedgerCoverageStart({ repoMemoryDir, repository, workflowId, now })).toBe(trustedWriter === "true" || coveragePassesFilters ? now : null);
+      expect(fs.existsSync(path.join(workspaceDir, "agent.json"))).toBe(expectedAgentFiles.includes("agent.json"));
+      expect(fs.existsSync(path.join(workspaceDir, "agent.jsonl"))).toBe(expectedAgentFiles.includes("agent.jsonl"));
+      expect(fs.existsSync(path.join(workspaceDir, "nested", "agent.jsonl"))).toBe(expectedAgentFiles.includes("nested/agent.jsonl"));
+      expect(pushSignedCommits).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllEnvs();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("push_repo_memory.cjs - untrusted ledger artifacts", () => {
+  it("ignores coverage files and artifacts that overwrite trusted shards", () => {
+    const trusted = new Set(["00000000-0000-4000-8000-000000000000"]);
+    expect(isUntrustedLedgerArtifact("ledger/coverage/claim.jsonl", trusted)).toBe(true);
+    expect(isUntrustedLedgerArtifact("ledger/shards/00000000-0000-4000-8000-000000000000.jsonl", trusted)).toBe(true);
+    expect(isUntrustedLedgerArtifact("ledger/shards/00000000-0000-4000-8000-000000000001.jsonl", trusted)).toBe(false);
+    expect(isUntrustedLedgerArtifact("summary.json", trusted)).toBe(false);
+  });
+});
+
+describe("push_repo_memory.cjs - validation failure details", () => {
+  it("includes stdout and stderr diagnostics", () => {
+    expect(getCustomValidationFailureDetail({ stdout: "generic-looking stdout", stderr: "domain schema failed" })).toBe("generic-looking stdout\ndomain schema failed");
+  });
+
+  it.each([
+    ["GH_TOKEN", "gh-token-secret"],
+    ["GITHUB_TOKEN", "github-token-secret"],
+    ["GITHUB_APP_TOKEN", "github-app-token-secret"],
+  ])("redacts %s from failure details", (environmentVariable, secret) => {
+    const previousSecret = process.env[environmentVariable];
+    process.env[environmentVariable] = secret;
+    try {
+      expect(redactFailureSummary(`Failure includes ${secret}`)).toBe("Failure includes [REDACTED]");
+    } finally {
+      if (previousSecret === undefined) {
+        delete process.env[environmentVariable];
+      } else {
+        process.env[environmentVariable] = previousSecret;
+      }
+    }
+  });
+
+  it("logs and reports failures without configured credentials", async () => {
+    const environmentVariable = "GITHUB_APP_TOKEN";
+    const secret = "github-app-token-secret";
+    const previousSecret = process.env[environmentVariable];
+    process.env[environmentVariable] = secret;
+    try {
+      await setPushRepoMemoryFailure(`Push failed with ${secret}`);
+
+      expect(mockCore.info).toHaveBeenCalledWith("Repo-memory push failed: Push failed with [REDACTED]");
+      expect(mockCore.setFailed).toHaveBeenCalledWith("Push failed with [REDACTED]");
+    } finally {
+      if (previousSecret === undefined) {
+        delete process.env[environmentVariable];
+      } else {
+        process.env[environmentVariable] = previousSecret;
+      }
+    }
+  });
+});
 
 describe("push_repo_memory.cjs - temporary ID substitutions", () => {
   it("applies final mappings only to memory files selected for persistence", () => {
@@ -1246,24 +1501,32 @@ describe("push_repo_memory.cjs - shell injection security tests", () => {
     });
 
     it("should safely handle malicious commit messages", () => {
-      // Test that malicious commit messages would be treated as literals
-      const maliciousMessages = ["Update; rm -rf /", "Update && curl evil.com", "Update\nmalicious command", 'Update"; echo hacked'];
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-memory-commit-message-"));
+      const maliciousMessages = ["Update; touch pwned", "Update && touch pwned", "Update\n touch pwned", 'Update"; touch pwned'];
 
-      // With spawnSync and args array, these would be literal commit messages
-      // No shell interpretation occurs
-      for (const message of maliciousMessages) {
-        const { spawnSync } = require("child_process");
-        // Note: This would fail in actual use because there are no staged changes
-        // But it demonstrates that special characters are treated literally
-        const result = spawnSync("git", ["commit", "-m", message], {
-          encoding: "utf8",
-          stdio: "pipe",
-        });
+      try {
+        execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
+        execFileSync("git", ["config", "user.name", "Test"], { cwd: tempDir });
+        execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: tempDir });
 
-        // The command would fail (no staged changes), but importantly:
-        // The malicious part of the message should NOT be executed
-        // Special characters like ; && | should be part of the commit message, not shell operators
-        expect(result.status).not.toBe(0);
+        for (const [index, message] of maliciousMessages.entries()) {
+          const filePath = `file-${index}`;
+          fs.writeFileSync(path.join(tempDir, filePath), "test");
+          execFileSync("git", ["add", filePath], { cwd: tempDir });
+
+          const { spawnSync } = require("child_process");
+          const result = spawnSync("git", ["commit", "-m", message], {
+            cwd: tempDir,
+            encoding: "utf8",
+            stdio: "pipe",
+          });
+
+          expect(result.status).toBe(0);
+          expect(execFileSync("git", ["log", "-1", "--format=%B"], { cwd: tempDir, encoding: "utf8" }).trimEnd()).toBe(message);
+          expect(fs.existsSync(path.join(tempDir, "pwned"))).toBe(false);
+        }
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
       }
     });
 
@@ -1693,9 +1956,27 @@ describe("push_repo_memory.cjs - changed-file limit checks", () => {
     const scriptContent = nodeFs.readFileSync(scriptPath, "utf8");
     const helperContent = nodeFs.readFileSync(helperPath, "utf8");
 
-    expect(scriptContent).toContain("formatJSONFiles(destMemoryPath, maxFileSize)");
+    expect(scriptContent).toContain("formatJSONFiles(destMemoryPath, maxFileSize, isEligibleFile)");
     expect(helperContent).toContain('Buffer.byteLength(formatted, "utf8")');
     expect(helperContent).toContain("Formatted JSON exceeds max file size");
+  });
+});
+
+describe("push_repo_memory.cjs - ledger compaction ownership", () => {
+  it("does not compact ledgers in the agent persistence path (source check)", () => {
+    const nodeFs = require("fs");
+    const nodePath = require("path");
+    const scriptPath = nodePath.join(import.meta.dirname, "push_repo_memory.cjs");
+    const scriptContent = nodeFs.readFileSync(scriptPath, "utf8");
+
+    // Ledger compaction is owned by Agentic Maintenance (plan/apply jobs), never by agent runs.
+    expect(scriptContent).not.toContain("LEDGER_COMPACTION_OPTIONS_B64");
+    expect(scriptContent).not.toContain(".compact(");
+    expect(scriptContent).not.toContain("ledger_compaction");
+  });
+
+  it("treats agent-supplied compaction state as untrusted", () => {
+    expect(isUntrustedLedgerArtifact("ledger/compaction/state.json", new Set())).toBe(true);
   });
 });
 
@@ -1723,28 +2004,127 @@ describe("push_repo_memory.cjs - allowed-extensions persistence filter (regressi
     const scriptPath = nodePath.join(import.meta.dirname, "push_repo_memory.cjs");
     const scriptContent = nodeFs.readFileSync(scriptPath, "utf8");
 
-    expect(scriptContent).toContain("if (filesToCopy.length === 0)");
+    expect(scriptContent).toContain("if (filesToCopy.length === 0 && !formatJSON)");
     expect(scriptContent).toContain("No eligible files to copy from artifact");
   });
 
-  it("filters stale ineligible files already present in the checked-out branch before format/validation (source check)", () => {
-    // Review feedback: after checking out an existing memory branch, files from prior
-    // runs that no longer match the current allowed-extensions/file-glob filters must
-    // not be left in destMemoryPath, since formatJSONFiles/runCustomMemoryValidation
-    // operate on the whole destMemoryPath, not just the newly-copied eligible files.
-    const nodeFs = require("fs");
-    const nodePath = require("path");
-    const scriptPath = nodePath.join(import.meta.dirname, "push_repo_memory.cjs");
-    const scriptContent = nodeFs.readFileSync(scriptPath, "utf8");
+  it.each([false, true])("preserves sibling files through validation and concurrent-head retries (format-json: %s)", async formatJSON => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-memory-shared-"));
+    const remoteDir = path.join(rootDir, "remote.git");
+    const workspaceDir = path.join(rootDir, "workspace");
+    const otherDir = path.join(rootDir, "other");
+    const artifactDir = path.join(rootDir, "artifact");
+    const branchName = "memory/shared";
+    const core = { debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn(), setFailed: vi.fn() };
+    const git = (args, cwd = workspaceDir) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" });
+    const scriptPath = path.join(import.meta.dirname, "push_repo_memory.cjs");
+    const require = createRequire(import.meta.url);
+    const module = { exports: {} };
+    const siblingContent = '{"id":"sibling"}\n';
+    const siblingJSON = '{"sibling":true}';
+    let remoteHead;
 
-    expect(scriptContent).toContain("filterIneligibleMemoryFiles(destMemoryPath, allowedExtensions, fileGlobFilter, core)");
-    // The stale-file filter must run before destMemoryPath is formatted/validated.
-    const filterIdx = scriptContent.indexOf("filterIneligibleMemoryFiles(destMemoryPath");
-    const formatIdx = scriptContent.indexOf("formatJSONFiles(destMemoryPath, maxFileSize)");
-    const validateIdx = scriptContent.indexOf("runCustomMemoryValidation({");
-    expect(filterIdx).toBeGreaterThan(-1);
-    expect(filterIdx).toBeLessThan(formatIdx);
-    expect(filterIdx).toBeLessThan(validateIdx);
+    try {
+      fs.mkdirSync(workspaceDir);
+      fs.mkdirSync(artifactDir);
+      git(["init", "--bare", remoteDir]);
+      git(["init", "-b", branchName]);
+      git(["config", "user.name", "test"]);
+      git(["config", "user.email", "test@example.com"]);
+      fs.writeFileSync(path.join(workspaceDir, "grounding-old.jsonl"), siblingContent);
+      fs.writeFileSync(path.join(workspaceDir, "sibling.json"), siblingJSON);
+      fs.writeFileSync(path.join(workspaceDir, "jailbreak-old.jsonl"), '{"id":"old"}\n');
+      fs.writeFileSync(path.join(workspaceDir, "jailbreak-state.json"), '{"old":true}');
+      git(["add", "."]);
+      git(["commit", "-m", "base"]);
+      git(["remote", "add", "origin", remoteDir]);
+      git(["push", "origin", branchName]);
+      git(["checkout", "-b", "main"]);
+      fs.writeFileSync(path.join(artifactDir, "jailbreak-new.jsonl"), '{"id":"new"}\n');
+      fs.writeFileSync(path.join(artifactDir, "ignored.bin"), "ignored");
+
+      const pushSignedCommits = vi.fn(async ({ cwd, baseRef, gitAuthEnv }) => {
+        if (pushSignedCommits.mock.calls.length === 1) {
+          git(["clone", "--branch", branchName, remoteDir, otherDir]);
+          git(["config", "user.name", "test"], otherDir);
+          git(["config", "user.email", "test@example.com"], otherDir);
+          fs.writeFileSync(path.join(otherDir, "grounding-concurrent.jsonl"), '{"id":"concurrent"}\n');
+          git(["add", "."], otherDir);
+          git(["commit", "-m", "concurrent"], otherDir);
+          git(["push", "origin", "HEAD"], otherDir);
+          remoteHead = git(["rev-parse", "HEAD"], otherDir).trim();
+          const changedPaths = git(["diff", "--name-only", `${baseRef}..HEAD`], cwd)
+            .trim()
+            .split("\n");
+          expect(changedPaths).toEqual(formatJSON ? ["jailbreak-new.jsonl", "jailbreak-state.json"] : ["jailbreak-new.jsonl"]);
+          throw new Error("ERR_API: stale head");
+        }
+        expect(git(["status", "--porcelain"], cwd)).toBe("");
+        expect(fs.readFileSync(path.join(cwd, "grounding-old.jsonl"), "utf8")).toBe(siblingContent);
+        expect(fs.readFileSync(path.join(cwd, "sibling.json"), "utf8")).toBe(siblingJSON);
+        expect(baseRef).toBe(remoteHead);
+        expect(git(["rev-list", "--count", `${remoteHead}..HEAD`], cwd).trim()).toBe("1");
+        expect(fs.existsSync(path.join(cwd, "grounding-concurrent.jsonl"))).toBe(true);
+        expect(gitAuthEnv).toEqual({ REPO_MEMORY_TEST_AUTH: "present" });
+      });
+      const execGitSync = (args, options = {}) => {
+        const localArgs = [...args];
+        if (args[0] === "fetch") localArgs[1] = remoteDir;
+        if (args[0] === "remote" && args[1] === "set-url") localArgs[3] = remoteDir;
+        const result = git(localArgs, options.cwd || workspaceDir);
+        if (args[0] === "rebase") {
+          expect(options.env?.REPO_MEMORY_TEST_ENV).toBe("preserved");
+          expect(options.env?.REPO_MEMORY_TEST_AUTH).toBe("present");
+        }
+        return result;
+      };
+      const mocks = {
+        "./git_helpers.cjs": { execGitSync },
+        "./git_auth_helpers.cjs": { getGitAuthEnv: () => ({ REPO_MEMORY_TEST_AUTH: "present" }) },
+        "./push_signed_commits.cjs": { pushSignedCommits },
+      };
+      vm.runInNewContext(fs.readFileSync(scriptPath, "utf8"), {
+        require: id => mocks[id] || require(id),
+        module,
+        core,
+        context: { repo: { owner: "owner", repo: "repo" } },
+        github: {},
+        exec: {
+          getExecOutput: async () => ({ stdout: `${remoteHead}\trefs/heads/${branchName}\n` }),
+        },
+        setTimeout: callback => callback(),
+        process: {
+          env: {
+            ARTIFACT_DIR: artifactDir,
+            GITHUB_WORKSPACE: workspaceDir,
+            MEMORY_ID: "test",
+            TARGET_REPO: "owner/repo",
+            BRANCH_NAME: branchName,
+            GH_TOKEN: "test-token",
+            FILE_GLOB_FILTER: "jailbreak-*.jsonl jailbreak-*.json",
+            ALLOWED_EXTENSIONS: '[".jsonl", ".json"]',
+            FORMAT_JSON: String(formatJSON),
+            REPO_MEMORY_TEST_ENV: "preserved",
+            VALIDATION_SCRIPT_B64: Buffer.from(
+              `
+              const names = fs.readdirSync(memoryRoot).sort();
+              if (names.join() !== "jailbreak-new.jsonl,jailbreak-old.jsonl,jailbreak-state.json") throw new Error("incorrect validation scope");
+              if (${formatJSON} && !fs.readFileSync(path.join(memoryRoot, "jailbreak-state.json"), "utf8").includes("\\n")) throw new Error("not normalized");
+            `
+            ).toString("base64"),
+          },
+        },
+      });
+
+      await module.exports.main();
+
+      expect(core.setFailed).not.toHaveBeenCalled();
+      expect(pushSignedCommits).toHaveBeenCalledTimes(2);
+      expect(git(["status", "--porcelain"])).toBe("");
+      expect(fs.existsSync(path.join(workspaceDir, "ignored.bin"))).toBe(false);
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
   });
 
   describe("behavioral: scanDirectory's inline eligibility check against real fixtures", () => {
@@ -1902,7 +2282,7 @@ describe("push_repo_memory.cjs - signed commit push (pushSignedCommits delegatio
       expect(scriptContent).toContain("BASE_DELAY_MS * Math.pow(2, attempt)");
     });
 
-    it("refreshes retry base with the authenticated repository URL instead of origin", async () => {
+    it("refreshes retry base with Git environment credentials and no tokenized URL", async () => {
       const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-memory-auth-ls-remote-"));
       const baseRef = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
       const retryRepoUrl = "authenticated-retry-url";
@@ -1923,12 +2303,20 @@ describe("push_repo_memory.cjs - signed commit push (pushSignedCommits delegatio
           ghToken: "token",
           serverHost: "github.com",
           pushSignedCommitsFn,
-          repoUrlWithTokenForRetry: retryRepoUrl,
+          repoUrlForRetry: retryRepoUrl,
           execGetExecOutput,
           sleepFn: vi.fn(),
         });
 
-        expect(execGetExecOutput).toHaveBeenCalledWith("git", ["ls-remote", retryRepoUrl, "refs/heads/memory/test"], { cwd: repoDir, silent: true });
+        expect(execGetExecOutput).toHaveBeenCalledWith("git", ["ls-remote", retryRepoUrl, "refs/heads/memory/test"], {
+          cwd: repoDir,
+          env: {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: `http.${(process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/$/, "")}/.extraheader`,
+            GIT_CONFIG_VALUE_0: `Authorization: basic ${Buffer.from("x-access-token:token").toString("base64")}`,
+          },
+          silent: true,
+        });
         expect(pushSignedCommitsFn).toHaveBeenCalledTimes(2);
         expect(global.core.setFailed).not.toHaveBeenCalled();
       } finally {
@@ -1940,11 +2328,17 @@ describe("push_repo_memory.cjs - signed commit push (pushSignedCommits delegatio
     it("should fail deterministic validation errors without retrying", async () => {
       const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-memory-validation-"));
       const setFailed = vi.fn();
-      const pushSignedCommitsFn = vi.fn().mockRejectedValue(new Error("ERR_VALIDATION: merge commit detected"));
-      global.core = { debug: vi.fn(), info: vi.fn(), warning: vi.fn(), setFailed };
+      const summary = {
+        addRaw: vi.fn(),
+        write: vi.fn(),
+      };
+      const previousGitHubToken = process.env.GH_TOKEN;
+      process.env.GH_TOKEN = "not-a-real-token";
+      const pushSignedCommitsFn = vi.fn().mockRejectedValue(new Error("ERR_VALIDATION: merge commit detected with not-a-real-token"));
+      global.core = { debug: vi.fn(), info: vi.fn(), warning: vi.fn(), setFailed, summary };
       try {
         execSync("git init && git remote add origin https://github.com/owner/repo.git", { cwd: repoDir, stdio: "pipe" });
-        await pushRepoMemoryChangesWithRetry({
+        const pushed = await pushRepoMemoryChangesWithRetry({
           githubClient: {},
           targetOwner: "owner",
           targetRepoName: "repo",
@@ -1960,9 +2354,17 @@ describe("push_repo_memory.cjs - signed commit push (pushSignedCommits delegatio
         });
 
         expect(pushSignedCommitsFn).toHaveBeenCalledTimes(1);
-        expect(setFailed).toHaveBeenCalledWith("Failed to push changes: ERR_VALIDATION: merge commit detected");
+        expect(pushed).toBe(false);
+        expect(setFailed).toHaveBeenCalledWith("Failed to push changes: ERR_VALIDATION: merge commit detected with [REDACTED]");
+        expect(global.core.info).toHaveBeenCalledWith("Repo-memory push failed: Failed to push changes: ERR_VALIDATION: merge commit detected with [REDACTED]");
+        expect(summary.addRaw).not.toHaveBeenCalled();
         expect(isDeterministicPushValidationError("ERR_VALIDATION: policy violation")).toBe(true);
       } finally {
+        if (previousGitHubToken === undefined) {
+          delete process.env.GH_TOKEN;
+        } else {
+          process.env.GH_TOKEN = previousGitHubToken;
+        }
         delete global.core;
         fs.rmSync(repoDir, { recursive: true, force: true });
       }
@@ -1986,7 +2388,7 @@ describe("push_repo_memory.cjs - signed commit push (pushSignedCommits delegatio
           ghToken: "token",
           serverHost: "github.com",
           pushSignedCommitsFn,
-          repoUrlWithTokenForRetry: path.join(repoDir, "missing-remote.git"),
+          repoUrlForRetry: path.join(repoDir, "missing-remote.git"),
           execGetExecOutput: vi.fn().mockResolvedValue({ stdout: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/heads/memory/test\n" }),
           sleepFn: vi.fn(),
         });
@@ -1999,7 +2401,7 @@ describe("push_repo_memory.cjs - signed commit push (pushSignedCommits delegatio
       }
     });
 
-    it("retries a compare-and-swap loss by rebasing onto the refreshed head and preserving both JSONL rows", async () => {
+    it("retries a non-fast-forward push by rebasing onto the refreshed head and preserving both JSONL rows", async () => {
       const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-memory-race-"));
       const remoteDir = path.join(rootDir, "remote.git");
       const seedDir = path.join(rootDir, "seed");
@@ -2034,13 +2436,14 @@ describe("push_repo_memory.cjs - signed commit push (pushSignedCommits delegatio
         const pushSignedCommitsFn = vi.fn(async ({ baseRef: receivedBaseRef, cwd }) => {
           pushBases.push(receivedBaseRef);
           if (pushBases.length === 1) {
-            throw new Error("ERR_API: GraphQL createCommitOnBranch expectedHeadOid did not match");
+            execFileSync("git", ["push", "origin", branchName], { cwd, stdio: "pipe" });
           }
 
           const revList = execSync(`git rev-list --parents ${remoteHead}..HEAD`, { cwd, encoding: "utf8" }).trim();
           const rows = fs.readFileSync(path.join(cwd, "history.jsonl"), "utf8").trim().split("\n");
           expect(revList.split(/\s+/)).toHaveLength(2);
           expect(rows).toEqual(['{"id":"base"}', '{"id":"remote"}', '{"id":"local"}']);
+          execFileSync("git", ["push", "origin", branchName], { cwd, stdio: "pipe" });
         });
 
         await pushRepoMemoryChangesWithRetry({
@@ -2054,7 +2457,7 @@ describe("push_repo_memory.cjs - signed commit push (pushSignedCommits delegatio
           ghToken: "token",
           serverHost: "github.com",
           pushSignedCommitsFn,
-          repoUrlWithTokenForRetry: remoteDir,
+          repoUrlForRetry: remoteDir,
           originUrlForPush: remoteDir,
           execGetExecOutput: async (command, args, options) => ({
             stdout: execFileSync(command, args, { cwd: options.cwd, encoding: "utf8" }),
@@ -2068,12 +2471,14 @@ describe("push_repo_memory.cjs - signed commit push (pushSignedCommits delegatio
         expect(pushBases).toEqual([baseRef, remoteHead]);
         expect(delays).toEqual([501]);
         expect(global.core.setFailed).not.toHaveBeenCalled();
+        expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("fetch first"));
+        expect(execFileSync("git", ["--git-dir", remoteDir, "show", `${branchName}:history.jsonl`], { encoding: "utf8" })).toBe('{"id":"base"}\n{"id":"remote"}\n{"id":"local"}\n');
       } finally {
         randomSpy.mockRestore();
         delete global.core;
         fs.rmSync(rootDir, { recursive: true, force: true });
       }
-    });
+    }, 30_000);
 
     it("should retry at least 10 times with capped full-jitter backoff (regression guard)", () => {
       const nodeFs = require("fs");

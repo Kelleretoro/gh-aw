@@ -27,10 +27,8 @@ func (c *Compiler) parseReplyToPullRequestReviewCommentConfig(outputMap map[stri
 			c.parseBaseSafeOutputConfig(configMap, &config.BaseSafeOutputConfig, 10)
 
 			// Parse target
-			if target, exists := configMap["target"]; exists {
-				if targetStr, ok := target.(string); ok {
-					config.Target = targetStr
-				}
+			if targetStr := extractTargetFromMap(configMap, replyToPRReviewCommentLog); targetStr != "" {
+				config.Target = targetStr
 			}
 
 			// Parse target-repo using shared helper with validation
@@ -63,7 +61,7 @@ func (c *Compiler) parseReplyToPullRequestReviewCommentConfig(outputMap map[stri
 				config.Footer = &footer
 			}
 
-			replyToPRReviewCommentLog.Printf("Parsed reply-to-pull-request-review-comment config: max=%d", config.Max)
+			replyToPRReviewCommentLog.Printf("Parsed reply-to-pull-request-review-comment config: max=%v", config.Max)
 		} else {
 			// If configData is nil or not a map, still set the default max
 			config.Max = defaultIntStr(10)

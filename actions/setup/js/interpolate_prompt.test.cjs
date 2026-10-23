@@ -252,7 +252,12 @@ describe("interpolate_prompt", () => {
         }));
     }),
     describe("main function integration", () => {
+      const { main } = require("./interpolate_prompt.cjs");
       let tmpDir, promptPath, originalEnv;
+      const smokeStrategies = [
+        ["delegated_sequential", "Execute and validate each sub-agent one at a time before moving to the next."],
+        ["inline_strict", "Validate all three results and keep the current inline orchestration behavior."],
+      ];
       /**
        * Apply the STEP 2.5 experiment condition substitution logic from main().
        * Reads GH_AW_EXPERIMENTS_* from process.env and substitutes experiments.name
@@ -280,6 +285,7 @@ describe("interpolate_prompt", () => {
           (tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "interpolate-test-"))),
           (promptPath = path.join(tmpDir, "prompt.txt")),
           (process.env.GH_AW_PROMPT = promptPath),
+          (process.env.GITHUB_WORKSPACE = tmpDir),
           core.info.mockClear(),
           core.setFailed.mockClear());
       }),
@@ -290,12 +296,67 @@ describe("interpolate_prompt", () => {
             }),
             Object.assign(process.env, originalEnv));
         }),
+        it.each(smokeStrategies)("renders only the assigned %s instructions from the sub-agent smoke", async (variant, instruction) => {
+          const workflow = fs.readFileSync(path.join(__dirname, "../../../.github/workflows/smoke-copilot-sub-agents.md"), "utf8");
+          const tasks = workflow.split("\n## Tasks\n")[1].split("\n## Output\n")[0];
+          process.env.GH_AW_EXPERIMENTS_SUB_AGENT_STRATEGY = variant;
+          fs.writeFileSync(promptPath, tasks);
+
+          await main();
+
+          expect(core.setFailed).not.toHaveBeenCalled();
+          const rendered = fs.readFileSync(promptPath, "utf8");
+          expect(rendered).toContain(instruction);
+          for (const [otherVariant, otherInstruction] of smokeStrategies) {
+            if (otherVariant !== variant) expect(rendered).not.toContain(otherInstruction);
+          }
+          expect(rendered).toContain("Call `haiku-whoami`");
+          expect(rendered).not.toContain("{{");
+        }),
+        it.each(smokeStrategies.map(([variant]) => variant))("renders only the assigned %s experiment variant line in the sub-agent smoke output", async variant => {
+          const workflow = fs.readFileSync(path.join(__dirname, "../../../.github/workflows/smoke-copilot-sub-agents.md"), "utf8");
+          const output = workflow.split("\n## Output\n")[1].split("\n## agent:")[0];
+          // GitHub expressions are substituted before interpolate_prompt runs; replace them so only template blocks remain.
+          const outputWithoutExpressions = output.replace(/\$\{\{[^}]*\}\}/g, "EXPR");
+          process.env.GH_AW_EXPERIMENTS_SUB_AGENT_STRATEGY = variant;
+          fs.writeFileSync(promptPath, outputWithoutExpressions);
+
+          await main();
+
+          expect(core.setFailed).not.toHaveBeenCalled();
+          const rendered = fs.readFileSync(promptPath, "utf8");
+          const variantLines = rendered.split("\n").filter(line => line.includes("Experiment variant:"));
+          expect(variantLines).toEqual([`- Experiment variant: \`${variant}\` (scored separately; it does not change the overall status)`]);
+          expect(rendered).not.toContain("{{");
+        }),
         it("should fail when GH_AW_PROMPT is not set", () => {
           delete process.env.GH_AW_PROMPT;
           const mainMatch = interpolatePromptScript.match(/async function main\(\)\s*{[\s\S]*?^}/m);
           if (!mainMatch) throw new Error("Could not extract main function");
           const main = eval(`(${mainMatch[0]})`);
           (main(), expect(core.setFailed).toHaveBeenCalledWith(`${ERR_CONFIG}: GH_AW_PROMPT environment variable is not set`));
+        }),
+        it("should fail when split prompt files do not match the combined prompt", async () => {
+          fs.writeFileSync(path.join(tmpDir, "system.txt"), "System");
+          fs.writeFileSync(path.join(tmpDir, "user.txt"), "User");
+          fs.writeFileSync(promptPath, "Different");
+
+          await main();
+
+          expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining("Split prompt files do not match the combined prompt"));
+          expect(fs.readFileSync(promptPath, "utf8")).toBe("Different");
+        }),
+        it("should fail when template rendering removes the split boundary", async () => {
+          const system = "{{#if false}}\nHidden\n";
+          const user = "{{/if}}\nVisible\n";
+          fs.writeFileSync(path.join(tmpDir, "system.txt"), system);
+          fs.writeFileSync(path.join(tmpDir, "user.txt"), user);
+          fs.writeFileSync(promptPath, system + user);
+
+          await main();
+
+          expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining("Prompt split boundary was lost during processing"));
+          expect(fs.readFileSync(promptPath, "utf8")).toBe(system + user);
         }),
         it("should not corrupt condition when experiment value contains $1 (STEP 2.5)", () => {
           // Regression: GH_AW_EXPERIMENTS_* value containing $1 must not be interpreted as a
@@ -348,6 +409,65 @@ describe("interpolate_prompt", () => {
           expect(fs.readFileSync(templatePath, "utf8")).toBe(templateContent);
           // The prompt.txt should have the interpolated value
           expect(fs.readFileSync(promptPath, "utf8")).toContain("Process: 123");
+        }),
+        it("keeps split prompts synchronized through imports, rendering, and placeholder substitution", async () => {
+          const systemPath = path.join(tmpDir, "system.txt");
+          const userPath = path.join(tmpDir, "user.txt");
+          const system = "<system>\nRepo: ${GH_AW_EXPR_REPO}\n__ACTOR__\n</system>\n";
+          const user = "Task:\n{{#runtime-import .github/workflows/helper.md}}\n{{#if false}}\nHidden\n{{/if}}\n__ACTOR__\n";
+          fs.mkdirSync(path.join(tmpDir, ".github", "workflows"), { recursive: true });
+          fs.writeFileSync(path.join(tmpDir, ".github", "workflows", "helper.md"), "Imported task");
+          fs.writeFileSync(systemPath, system);
+          fs.writeFileSync(userPath, user);
+          fs.writeFileSync(promptPath, system + user);
+          process.env.GH_AW_EXPR_REPO = "github/gh-aw";
+
+          await main();
+          expect(core.setFailed).not.toHaveBeenCalled();
+          expect(fs.readFileSync(path.join(tmpDir, "prompt-template.txt"), "utf8")).toBe(system + user);
+          const importTree = JSON.parse(fs.readFileSync(path.join(tmpDir, "prompt-import-tree.json"), "utf8"));
+          expect(importTree.template).toBe(system + user);
+          expect(importTree.template).not.toContain("\x00GH_AW_PROMPT_SPLIT_");
+          const substitutePlaceholders = require("./substitute_placeholders.cjs");
+          await substitutePlaceholders({ file: promptPath, substitutions: { ACTOR: "developer" } });
+
+          const finalSystem = fs.readFileSync(systemPath, "utf8");
+          const finalUser = fs.readFileSync(userPath, "utf8");
+          expect(finalSystem).toBe("<system>\nRepo: github/gh-aw\ndeveloper\n</system>\n");
+          expect(finalUser).toContain("Imported task");
+          expect(finalUser).not.toContain("runtime-import");
+          expect(finalUser).not.toContain("Hidden");
+          expect(finalUser).toContain("developer");
+          expect(fs.readFileSync(promptPath, "utf8")).toBe(finalSystem + finalUser);
+        }),
+        it("extracts inline agent and skill headings at the start of the split user prompt", async () => {
+          const systemPath = path.join(tmpDir, "system.txt");
+          const userPath = path.join(tmpDir, "user.txt");
+          const system = "<system>\nRules\n</system>";
+          const user = "## agent: `helper`\nAgent body\n## end agent: `helper`\n## skill: `tool`\nSkill body\n## end skill: `tool`\n{{#if false}}\nHidden\n{{/if}}\nTask\n";
+          fs.writeFileSync(systemPath, system);
+          fs.writeFileSync(userPath, user);
+          fs.writeFileSync(promptPath, system + user);
+          const realWriteFileSync = fs.writeFileSync;
+          const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, ...args) => {
+            if (String(file).startsWith(tmpDir)) realWriteFileSync(file, ...args);
+          });
+
+          await main();
+
+          expect(core.setFailed).not.toHaveBeenCalled();
+          const writtenPaths = writeSpy.mock.calls.map(call => String(call[0]));
+          writeSpy.mockRestore();
+          expect(writtenPaths.some(p => p.includes("helper") && !p.startsWith(tmpDir))).toBe(true);
+          expect(writtenPaths.some(p => p.includes("tool") && !p.startsWith(tmpDir))).toBe(true);
+          const finalSystem = fs.readFileSync(systemPath, "utf8");
+          const finalUser = fs.readFileSync(userPath, "utf8");
+          expect(finalSystem).toBe(system);
+          expect(finalUser).not.toContain("Agent body");
+          expect(finalUser).not.toContain("Skill body");
+          expect(finalUser).not.toContain("Hidden");
+          expect(finalUser).toContain("Task");
+          expect(fs.readFileSync(promptPath, "utf8")).toBe(finalSystem + finalUser);
         }),
         it("should write prompt-import-tree.json with version and empty children when no imports", async () => {
           const templateContent = "Hello World";
@@ -405,4 +525,135 @@ describe("interpolate_prompt", () => {
           expect(parentNode.children[0].rawContent).toBe("Leaf content");
         }));
     }));
+});
+
+describe("inline sub-agent experiment model expansion", () => {
+  const { main } = require("./interpolate_prompt.cjs");
+  const agentBlock = model => ["## agent: `file-summarizer`", "---", `model: ${model}`, "description: Summarizes the content of a file in a few concise sentences", "---", "You are a file summarization assistant."].join("\n");
+  let tmpDir, promptPath, originalEnv;
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "interpolate-subagent-test-"));
+    promptPath = path.join(tmpDir, "prompt.txt");
+    process.env.GH_AW_PROMPT = promptPath;
+    process.env.GITHUB_WORKSPACE = tmpDir;
+    process.env.GH_AW_ENGINE_ID = "copilot";
+    core.debug ??= vi.fn();
+    core.info.mockClear();
+    core.setFailed.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    Object.keys(process.env).forEach(k => {
+      if (!(k in originalEnv)) delete process.env[k];
+    });
+    Object.assign(process.env, originalEnv);
+  });
+
+  /**
+   * Runs the real interpolate_prompt main() and returns the sub-agent file it writes.
+   * @param {string} prompt
+   * @returns {Promise<string>}
+   */
+  async function runAndReadAgent(prompt) {
+    fs.writeFileSync(promptPath, prompt, "utf8");
+    const realWriteFileSync = fs.writeFileSync;
+    /** @type {Map<string, string>} */
+    const agentWrites = new Map();
+    vi.spyOn(fs, "writeFileSync").mockImplementation((file, data, ...args) => {
+      if (String(file).endsWith("file-summarizer.agent.md")) agentWrites.set(String(file), String(data));
+      else realWriteFileSync(file, data, ...args);
+    });
+    await main();
+    vi.restoreAllMocks();
+    expect(core.setFailed).not.toHaveBeenCalled();
+    expect([...agentWrites.keys()]).toEqual([expect.stringMatching(/\.github\/agents\/file-summarizer\.agent\.md$/)]);
+    return [...agentWrites.values()][0];
+  }
+
+  const forms = {
+    "runtime-import": async model => {
+      fs.mkdirSync(path.join(tmpDir, ".github", "workflows"), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, ".github", "workflows", "smoke.md"), `---\non: workflow_dispatch\nexperiments:\n  subagent_model: [small, large]\n---\nUse file-summarizer on README.md.\n\n${agentBlock(model)}\n`);
+      return runAndReadAgent("{{#runtime-import .github/workflows/smoke.md}}\n");
+    },
+    inlined: async model => runAndReadAgent(`Use file-summarizer on README.md.\n\n${agentBlock(model)}\n`),
+  };
+
+  describe.each(Object.keys(forms))("%s prompt content", form => {
+    it.each([
+      ["${{ experiments.subagent_model }}", "small"],
+      ["${{ experiments.subagent_model }}", "large"],
+      ["__GH_AW_EXPERIMENTS_SUBAGENT_MODEL__", "small"],
+      ["__GH_AW_EXPERIMENTS_SUBAGENT_MODEL__", "large"],
+      ["${{ experiments.subagent_model }}", "gpt-5.4?effort=low&context=128000"],
+    ])("writes_selected_experiment_model_before_agent_file_write: %s with assignment %s", async (reference, variant) => {
+      process.env.GH_AW_EXPERIMENTS_SUBAGENT_MODEL = variant;
+      const written = await forms[form](reference);
+      expect(written.startsWith(`---\nmodel: ${variant}\n`)).toBe(true);
+      expect(written).not.toContain("${{");
+      expect(written).not.toContain("experiments.");
+      expect(written).not.toContain("__GH_AW_");
+      expect(written).toContain("description: Summarizes the content of a file in a few concise sentences");
+      expect(written).toContain("You are a file summarization assistant.");
+      expect(fs.readFileSync(promptPath, "utf8")).not.toContain("file summarization assistant");
+    });
+
+    it("both_subagent_model_variants_are_reachable", async () => {
+      /** @type {string[]} */
+      const models = [];
+      for (const variant of ["small", "large"]) {
+        process.env.GH_AW_EXPERIMENTS_SUBAGENT_MODEL = variant;
+        const written = await forms[form]("${{ experiments.subagent_model }}");
+        models.push(/^model: (.*)$/m.exec(written)?.[1] ?? "");
+      }
+      expect(models).toEqual(["small", "large"]);
+    });
+
+    it("preserves_plain_subagent_model_and_frontmatter", async () => {
+      process.env.GH_AW_EXPERIMENTS_SUBAGENT_MODEL = "large";
+      const written = await forms[form]("claude-haiku-4.5");
+      expect(written).toBe("---\nmodel: claude-haiku-4.5\ndescription: Summarizes the content of a file in a few concise sentences\n---\nYou are a file summarization assistant.\n");
+    });
+
+    it("fails activation instead of writing an unresolved experiment model", async () => {
+      delete process.env.GH_AW_EXPERIMENTS_SUBAGENT_MODEL;
+      fs.writeFileSync(promptPath, "", "utf8");
+      const writeSpy = vi.spyOn(fs, "writeFileSync");
+      if (form === "runtime-import") {
+        fs.mkdirSync(path.join(tmpDir, ".github", "workflows"), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, ".github", "workflows", "smoke.md"), `Task.\n\n${agentBlock("${{ experiments.subagent_model }}")}\n`);
+        fs.writeFileSync(promptPath, "{{#runtime-import .github/workflows/smoke.md}}\n", "utf8");
+      } else {
+        fs.writeFileSync(promptPath, `Task.\n\n${agentBlock("${{ experiments.subagent_model }}")}\n`, "utf8");
+      }
+      writeSpy.mockClear();
+      await main();
+      expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining('inline sub-agent "file-summarizer" field "model" references ${{ experiments.subagent_model }}'));
+      expect(writeSpy.mock.calls.some(call => String(call[0]).endsWith("file-summarizer.agent.md"))).toBe(false);
+    });
+
+    it.each(["small", undefined])("handles CRLF runtime imports with assignment %s", async variant => {
+      fs.mkdirSync(path.join(tmpDir, ".github", "workflows"), { recursive: true });
+      const imported = `Task.\n\n${agentBlock("${{ experiments.subagent_model }}")}\n`.replace(/\n/g, "\r\n");
+      fs.writeFileSync(path.join(tmpDir, ".github", "workflows", "smoke.md"), imported);
+      const prompt = "{{#runtime-import .github/workflows/smoke.md}}\n";
+      if (variant) {
+        process.env.GH_AW_EXPERIMENTS_SUBAGENT_MODEL = variant;
+        const written = await runAndReadAgent(prompt);
+        expect(written).toContain(`---\r\nmodel: ${variant}\r\n`);
+        expect(written).not.toContain("${{");
+      } else {
+        delete process.env.GH_AW_EXPERIMENTS_SUBAGENT_MODEL;
+        fs.writeFileSync(promptPath, prompt);
+        const writeSpy = vi.spyOn(fs, "writeFileSync");
+        await main();
+        expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining('inline sub-agent "file-summarizer" field "model" references ${{ experiments.subagent_model }}'));
+        expect(writeSpy.mock.calls.some(call => String(call[0]).endsWith("file-summarizer.agent.md"))).toBe(false);
+      }
+    });
+  });
 });

@@ -14,8 +14,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -76,16 +78,22 @@ func buildCreatedFilter(startDate, endDate, beforeDate string) string {
 
 // fetchJobDetailsWithCounts fetches all job information for a workflow run in a single API
 // call and returns the full detail slice together with the count of failed jobs.
-// It is the single source of truth for the jobs endpoint; fetchJobDetails and
-// fetchJobStatuses are thin wrappers that each return only the value they need.
-func fetchJobDetailsWithCounts(ctx context.Context, runID int64, outputDir string, verbose bool) ([]JobInfoWithDuration, int, error) {
+// It is the single source of truth for the jobs endpoint.
+func fetchJobDetailsWithCounts(ctx context.Context, runID int64, outputDir string, verbose bool, attempts ...int) ([]JobInfoWithDuration, int, error) {
 	logsGitHubAPILog.Printf("Fetching job details: runID=%d", runID)
 	if verbose {
 		fmt.Fprintln(os.Stderr, console.FormatVerboseMessage(fmt.Sprintf("Fetching job details for run %d", runID)))
 	}
 
+	endpoint := fmt.Sprintf("repos/{owner}/{repo}/actions/runs/%d", runID)
+	if len(attempts) > 0 {
+		attempt := attempts[0]
+		if attempt > 0 {
+			endpoint = path.Join(endpoint, "attempts", strconv.Itoa(attempt))
+		}
+	}
 	output, err := workflow.RunGHCombinedContext(ctx, "Fetching job details...", "api",
-		fmt.Sprintf("repos/{owner}/{repo}/actions/runs/%d/jobs?per_page=100", runID),
+		path.Join(endpoint, "jobs?per_page=100"),
 		"--paginate", "--slurp")
 	if err != nil {
 		if verbose {
@@ -119,18 +127,25 @@ func parseJobsAPIResponses(output []byte, runID int64, verbose bool) ([]JobInfoW
 
 	jobs := []JobInfoWithDuration{}
 	failedJobs := 0
+	incomplete := len(rawResponses) == 0
 	for _, rawResponse := range rawResponses {
 		var response struct {
-			Jobs []json.RawMessage `json:"jobs"`
+			Jobs       []json.RawMessage `json:"jobs"`
+			TotalCount int               `json:"total_count"`
 		}
 		if err := json.Unmarshal(rawResponse, &response); err != nil {
 			logsGitHubAPILog.Printf("Skipping malformed jobs API page for run %d: %v", runID, err)
+			incomplete = true
 			continue
+		}
+		if response.Jobs == nil || (len(response.Jobs) == 0 && response.TotalCount > 0) {
+			incomplete = true
 		}
 		for _, rawJob := range response.Jobs {
 			var job JobInfo
 			if err := json.Unmarshal(rawJob, &job); err != nil {
 				logsGitHubAPILog.Printf("Skipping malformed job in run %d: %v", runID, err)
+				incomplete = true
 				continue
 			}
 			jobWithDuration := JobInfoWithDuration{JobInfo: job}
@@ -146,6 +161,9 @@ func parseJobsAPIResponses(output []byte, runID int64, verbose bool) ([]JobInfoW
 				}
 			}
 		}
+	}
+	if incomplete && len(jobs) == 0 {
+		return nil, 0, fmt.Errorf("incomplete jobs API response for run %d: cannot establish job presence", runID)
 	}
 	return jobs, failedJobs, nil
 }
@@ -224,6 +242,10 @@ func parseWorkflowRunAPIResponse(data []byte) (WorkflowRun, error) {
 	if err := json.Unmarshal(data, &response); err != nil {
 		return WorkflowRun{}, fmt.Errorf("failed to parse workflow run API response: %w", err)
 	}
+	return response.workflowRun(), nil
+}
+
+func (response workflowRunAPIResponse) workflowRun() WorkflowRun {
 	return WorkflowRun{
 		DatabaseID:   response.ID,
 		Number:       response.RunNumber,
@@ -242,7 +264,7 @@ func parseWorkflowRunAPIResponse(data []byte) (WorkflowRun, error) {
 		Attempt:      response.RunAttempt,
 		Repository:   response.Repository.FullName,
 		Actor:        response.Actor.Login,
-	}, nil
+	}
 }
 
 func applyWorkflowRunMetadata(run *WorkflowRun, metadata WorkflowRun) bool {
@@ -281,7 +303,7 @@ func applyNonZero[T comparable](target *T, value T) bool {
 func fetchAndCacheWorkflowRunMetadata(ctx context.Context, currentRun WorkflowRun, outputDir, owner, repo, hostname string, verbose bool) (WorkflowRun, error) {
 	responsePath := filepath.Join(outputDir, runAPIResponseFileName)
 	if output, err := os.ReadFile(responsePath); err == nil {
-		if run, parseErr := parseWorkflowRunAPIResponse(output); parseErr == nil && cachedWorkflowRunMetadataIsCurrent(run, currentRun, owner, repo) {
+		if run, parseErr := parseWorkflowRunAPIResponse(output); parseErr == nil && cachedWorkflowRunMetadataIsCurrent(run, currentRun, owner, repo, hostname) {
 			return run, nil
 		}
 		logsGitHubAPILog.Printf("Ignoring invalid cached workflow run API response: path=%s", responsePath)
@@ -307,7 +329,7 @@ func fetchAndCacheWorkflowRunMetadata(ctx context.Context, currentRun WorkflowRu
 	return run, nil
 }
 
-func workflowRunMetadataCacheNeedsRefresh(outputDir string, currentRun WorkflowRun, owner, repo string) (bool, error) {
+func workflowRunMetadataCacheNeedsRefresh(outputDir string, currentRun WorkflowRun, owner, repo, hostname string) (bool, error) {
 	output, err := os.ReadFile(filepath.Join(outputDir, runAPIResponseFileName))
 	if errors.Is(err, os.ErrNotExist) {
 		return true, nil
@@ -316,14 +338,20 @@ func workflowRunMetadataCacheNeedsRefresh(outputDir string, currentRun WorkflowR
 		return false, fmt.Errorf("failed to read cached workflow run API response: %w", err)
 	}
 	cached, err := parseWorkflowRunAPIResponse(output)
-	return err != nil || !cachedWorkflowRunMetadataIsCurrent(cached, currentRun, owner, repo), nil
+	return err != nil || !cachedWorkflowRunMetadataIsCurrent(cached, currentRun, owner, repo, hostname), nil
 }
 
-func cachedWorkflowRunMetadataIsCurrent(cached, current WorkflowRun, owner, repo string) bool {
+func cachedWorkflowRunMetadataIsCurrent(cached, current WorkflowRun, owner, repo, hostname string) bool {
 	if cached.DatabaseID != current.DatabaseID {
 		return false
 	}
-	if owner != "" && repo != "" && !strings.EqualFold(cached.Repository, filepath.Join(owner, repo)) {
+	if owner != "" && repo != "" && !strings.EqualFold(cached.Repository, buildRepoFlag(owner, repo, "")) {
+		return false
+	}
+	if hostname == "" {
+		hostname = workflowRunURLHostname(current.URL)
+	}
+	if hostname == "" || !strings.EqualFold(workflowRunURLHostname(cached.URL), hostname) {
 		return false
 	}
 	if current.Attempt > 0 && cached.Attempt != current.Attempt {
@@ -335,11 +363,19 @@ func cachedWorkflowRunMetadataIsCurrent(cached, current WorkflowRun, owner, repo
 	return cached.Status == "completed"
 }
 
+func workflowRunURLHostname(runURL string) string {
+	parsed, err := url.Parse(runURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
+}
+
 // fetchJobDetails gets detailed job information including durations for a workflow run.
 // Errors from the underlying API call are suppressed so that callers can continue
 // processing even when job data is unavailable (e.g. missing permissions).
-func fetchJobDetails(ctx context.Context, runID int64, outputDir string, verbose bool) ([]JobInfoWithDuration, error) {
-	jobs, _, err := fetchJobDetailsWithCounts(ctx, runID, outputDir, verbose)
+func fetchJobDetails(ctx context.Context, runID int64, outputDir string, verbose bool, attempts ...int) ([]JobInfoWithDuration, error) {
+	jobs, _, err := fetchJobDetailsWithCounts(ctx, runID, outputDir, verbose, attempts...)
 	if err != nil {
 		var cacheErr *jobDetailsCacheError
 		if errors.As(err, &cacheErr) {
@@ -349,18 +385,6 @@ func fetchJobDetails(ctx context.Context, runID int64, outputDir string, verbose
 		return nil, nil
 	}
 	return jobs, nil
-}
-
-// fetchJobStatuses gets the count of failed jobs for a workflow run.
-// Errors from the underlying API call are suppressed so that callers can continue
-// processing even when job data is unavailable (e.g. missing permissions).
-func fetchJobStatuses(ctx context.Context, runID int64, verbose bool) (int, error) {
-	_, failedJobs, err := fetchJobDetailsWithCounts(ctx, runID, "", verbose)
-	if err != nil {
-		// Don't fail the entire operation if we can't get job info
-		return 0, nil
-	}
-	return failedJobs, nil
 }
 
 // ListWorkflowRunsOptions holds the options for listWorkflowRunsWithPagination
@@ -524,8 +548,8 @@ func listWorkflowRunsWithPagination(opts ListWorkflowRunsOptions) ([]WorkflowRun
 	totalFetched := len(runs)
 	if opts.OldestFetchedCreatedAt != nil {
 		var oldest time.Time
-		if totalFetched > 0 {
-			oldest = runs[totalFetched-1].CreatedAt
+		for _, run := range runs {
+			oldest = run.CreatedAt
 		}
 		*opts.OldestFetchedCreatedAt = oldest
 	}

@@ -76,11 +76,12 @@ type ToolsConfig struct {
 	WebSearch        *WebSearchToolConfig        `yaml:"web-search,omitempty"`
 	Edit             *EditToolConfig             `yaml:"edit,omitempty"`
 	Playwright       *PlaywrightToolConfig       `yaml:"playwright,omitempty"`
-	AgenticWorkflows *AgenticWorkflowsToolConfig `yaml:"agentic-workflows,omitempty"`
+	AgenticWorkflows *AgenticWorkflowsToolConfig `yaml:"agentic-workflows,omitempty" json:"agentic-workflows,omitempty"`
 	CacheMemory      *CacheMemoryToolConfig      `yaml:"cache-memory,omitempty"`
 	DriveMemory      *DriveMemoryToolConfig      `yaml:"drive-memory,omitempty"`
 	CommentMemory    *CommentMemoryToolConfig    `yaml:"comment-memory,omitempty"`
 	RepoMemory       *RepoMemoryToolConfig       `yaml:"repo-memory,omitempty"`
+	Ledger           *LedgerToolConfig           `yaml:"ledger,omitempty"`
 	Timeout          *TemplatableInt32           `yaml:"timeout,omitempty"`
 	StartupTimeout   *TemplatableInt32           `yaml:"startup-timeout,omitempty"`
 
@@ -96,7 +97,28 @@ type ToolsConfig struct {
 	CLIProxy bool `yaml:"cli-proxy,omitempty"`
 
 	// Raw map for backwards compatibility
-	raw map[string]any
+	raw            map[string]any
+	ledgerParseErr error
+}
+
+// UnmarshalJSON preserves the boolean, null, and object forms of agentic-workflows.
+func (t *ToolsConfig) UnmarshalJSON(data []byte) error {
+	type toolsConfigAlias ToolsConfig
+	decoded := struct {
+		*toolsConfigAlias
+		AgenticWorkflows json.RawMessage `json:"agentic-workflows"`
+	}{toolsConfigAlias: (*toolsConfigAlias)(t)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if len(decoded.AgenticWorkflows) > 0 {
+		var value any
+		if err := json.Unmarshal(decoded.AgenticWorkflows, &value); err != nil {
+			return err
+		}
+		t.AgenticWorkflows = parseAgenticWorkflowsTool(value)
+	}
+	return nil
 }
 
 // Tools is a type alias for ToolsConfig for backward compatibility.
@@ -109,13 +131,28 @@ type Tools = ToolsConfig
 // unknown tools in the Custom map.
 func ParseToolsConfig(toolsMap map[string]any) (*ToolsConfig, error) {
 	toolsTypesLog.Printf("Parsing tools configuration: tool_count=%d", len(toolsMap))
+	if raw, ok := toolsMap["ledger"]; ok {
+		if _, err := parseLedgerToolConfig(raw); err != nil {
+			return nil, err
+		}
+	}
 	config := NewTools(toolsMap)
 	if config.GitHub != nil && config.GitHub.reposParseErr != nil {
 		return nil, config.GitHub.reposParseErr
 	}
+	if config.ledgerParseErr != nil {
+		return nil, config.ledgerParseErr
+	}
 	toolNames := config.GetToolNames()
 	toolsTypesLog.Printf("Parsed tools configuration: result_count=%d, tools=%v", len(toolNames), toolNames)
 	return config, nil
+}
+
+func (t *ToolsConfig) ParseError() error {
+	if t == nil {
+		return nil
+	}
+	return t.ledgerParseErr
 }
 
 // mcpServerConfigToMap converts an MCPServerConfig to map[string]any for backward compatibility
@@ -154,6 +191,9 @@ func mcpServerConfigToMap(config MCPServerConfig) map[string]any {
 	}
 	if config.Auth != nil {
 		result["auth"] = config.Auth
+	}
+	if config.CACertFile != "" {
+		result["ca-cert-file"] = config.CACertFile
 	}
 
 	// Add container-specific fields
@@ -219,6 +259,9 @@ func (t *ToolsConfig) ToMap() map[string]any { //nolint:largefunc // Existing co
 	}
 	if t.AgenticWorkflows != nil {
 		result["agentic-workflows"] = t.AgenticWorkflows.Enabled
+		if t.AgenticWorkflows.Enabled && t.AgenticWorkflows.AllowWriteTools {
+			result["agentic-workflows"] = map[string]any{"allow-write-tools": true}
+		}
 	}
 	if t.CacheMemory != nil {
 		result["cache-memory"] = t.CacheMemory.Raw
@@ -256,9 +299,9 @@ type GitHubAllowedTools []GitHubToolName
 
 // ToStringSlice converts GitHubAllowedTools to []string
 func (g GitHubAllowedTools) ToStringSlice() []string {
-	result := make([]string, len(g))
-	for i, tool := range g {
-		result[i] = string(tool)
+	result := make([]string, 0, len(g))
+	for _, tool := range g {
+		result = append(result, string(tool))
 	}
 	return result
 }
@@ -271,9 +314,9 @@ type GitHubToolsets []GitHubToolset
 
 // ToStringSlice converts GitHubToolsets to []string
 func (g GitHubToolsets) ToStringSlice() []string {
-	result := make([]string, len(g))
-	for i, toolset := range g {
-		result[i] = string(toolset)
+	result := make([]string, 0, len(g))
+	for _, toolset := range g {
+		result = append(result, string(toolset))
 	}
 	return result
 }
@@ -454,6 +497,15 @@ type BashToolConfig struct {
 	AllowedCommands []string `yaml:"-"` // List of allowed bash commands
 }
 
+// UnmarshalJSON accepts the schema's array shorthand for restricted commands.
+func (b *BashToolConfig) UnmarshalJSON(data []byte) error {
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "[") {
+		return json.Unmarshal(data, &b.AllowedCommands)
+	}
+	var config struct{}
+	return json.Unmarshal(data, &config)
+}
+
 // WebFetchToolConfig represents the configuration for the web-fetch tool
 type WebFetchToolConfig struct {
 	// Currently an empty object or nil
@@ -471,8 +523,8 @@ type EditToolConfig struct {
 
 // AgenticWorkflowsToolConfig represents the configuration for the agentic-workflows tool
 type AgenticWorkflowsToolConfig struct {
-	// Can be boolean or nil
-	Enabled bool `yaml:"-"`
+	Enabled         bool `yaml:"-" json:"-"`
+	AllowWriteTools bool `yaml:"allow-write-tools,omitempty" json:"allow-write-tools,omitempty"`
 }
 
 // CacheMemoryToolConfig represents the configuration for cache-memory
@@ -642,6 +694,9 @@ func (t *Tools) GetToolNames() []string {
 	}
 	if t.RepoMemory != nil {
 		names = append(names, "repo-memory")
+	}
+	if t.Ledger != nil {
+		names = append(names, "ledger")
 	}
 	if t.Timeout != nil {
 		names = append(names, "timeout")

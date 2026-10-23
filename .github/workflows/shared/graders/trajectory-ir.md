@@ -1,6 +1,7 @@
 ## Canonical Trajectory IR
 
-Every grader in `shared/graders/` is a projection over one shared,
+Every trajectory grader (built-in in
+`actions/setup/js/trajectory_graders.cjs`) is a projection over one shared,
 canonical intermediate representation (IR) of a completed agent run, built
 **once** per grader run rather than re-parsed per grader. Do not write a
 bespoke parser per grader — build (or reuse) this IR first, then compute the
@@ -12,7 +13,7 @@ grader's formula against it.
 `retries`, `loops`, `trajectory-efficiency`, `execution-step-count`,
 `execution-duration`, `working-set-rebuild-factor`, `context-growth`,
 `artifact-production` — see
-[Graders reference](https://githubnext.github.io/gh-aw/reference/trace-graders/)).
+[Graders reference](https://githubnext.github.io/gh-aw/experimental/trace-graders/)).
 Those cover step count, retries, generic loop counts, duration, tool-success
 rate, and trajectory efficiency. The graders in this directory intentionally
 do **not** duplicate those signals; they exist to answer different questions
@@ -23,14 +24,16 @@ fidelity). Build the IR once and project every new grader from it so adding a
 
 ### Source data
 
-Build the IR from artifacts already produced by a gh-aw run (no new
-telemetry, no network calls):
+Build the IR only from the in-memory unified session event array supplied
+in conclusion. Use `createSessionLookups(session)` from
+`actions/setup/js/grader_session.cjs` to share event indexes, correlated tool
+calls, statistics, and the trajectory projection. Graders must not read
+files, inspect environment variables, execute scripts, or make network calls.
 
-- `agent_output.json` — safe-output payload emitted by the agent
-- MCP gateway / tool-call logs (tool name, arguments, result, success/failure, timestamps)
-- `aw_info.json` / `run_summary.json` — run metadata, per-job/step status
-- token usage / turn records (per-request input/output tokens)
-- the workflow's own frontmatter (`safe-outputs`, declared objectives, `on:` triggers) when a grader needs declared expectations rather than inferred ones
+The collector supplies tool, usage, `workflow.info`, `safe_output.result`,
+and optional `trajectory.ir` events. Explicit objectives, state transitions,
+references, and provenance must already be recorded in those events; never
+invent missing evidence or load it from workflow files.
 
 ### IR schema
 
@@ -48,7 +51,7 @@ telemetry, no network calls):
     { "id": "string", "label": "string", "firstEventIndex": 0 }
   ],
   "actions": [
-    { "id": "string", "eventIndex": 0, "type": "string", "target": "string|null", "validAtIssueTime": true }
+    { "id": "string", "eventIndex": 0, "type": "string", "target": "string|null", "validAtIssueTime": true, "consequential": true }
   ],
   "toolCalls": [
     { "id": "string", "eventIndex": 0, "name": "string", "arguments": {}, "success": true, "durationMs": 0, "outputRef": "observations[].id|null" }
@@ -65,60 +68,64 @@ telemetry, no network calls):
   ],
   "objectives": [
     // declared or inferred completion/evidence conditions
-    { "id": "string", "description": "string", "satisfiedAtEventIndex": null }
+    { "id": "string", "description": "string", "satisfiedAtEventIndex": null, "dependsOn": ["objective-id"] }
   ],
   "reference": null
   // optional: reference trajectory / patch for benchmark-mode graders (#20-#24).
   // Populate only when the workflow importing the grader supplies one; leave
-  // null otherwise and let the grader report "not-applicable".
+  // null otherwise and let the grader report "not-applicable". Shape:
+  // {
+  //   "toolCalls": [{ "name": "string", "arguments": {} }], // tool-wise-score
+  //   "states": ["states[].id"],                            // trajectory-ndtw
+  //   "patch": { "files": [{ "path": "string" }] }          // code-search-recall / code-read-precision / code-edit-precision
+  // }
 }
 ```
 
 ### Build procedure (once per run)
 
-1. Read the trace sources listed above.
-2. Emit `events[]` in strict chronological order; every tool call, tool
-   result, safe-output emission, and detected state transition gets exactly
-   one event.
-3. Canonicalize states: normalize tool name + argument shape (drop volatile
-   fields such as timestamps/request IDs) into a stable state id so that
-   identical behavioral states collapse together across the whole run, not
-   only on adjacent steps.
-4. Link `toolCalls[].outputRef` to the `observations[]` entry it produced,
-   and populate `observations[].consumedByActionIds` by checking whether
-   later actions reference values that only appear in that observation
-   (e.g. a file path, an ID, a computed number). An observation with an
-   empty `consumedByActionIds` was never used.
-5. Populate `provenanceEdges[]` for every consequential action (edits,
-   comments, issue/PR mutations, safe outputs): trace it back to the
-   tool call/observation that informed it, if any. Actions with no
-   incoming edge are provenance gaps.
-6. Populate `objectives[]` from declared expectations when available
-   (workflow `safe-outputs` config, explicit task/issue checklist, README
-   "Definition of Done") and mark `satisfiedAtEventIndex` the first event
-   index at which the objective's evidence appears; leave `null` if never
-   satisfied.
-7. Write the IR to `/tmp/gh-aw/agent/graders/trajectory_ir.json` so a
-   single run can compute more than one grader without rebuilding the IR.
+1. Validate and index the supplied unified session once.
+2. Reuse the latest agent-phase `trajectory.ir` event when present.
+   Otherwise, project the recorded agent events and correlated tool calls.
+3. Preserve explicit states, action effects, observation dependencies,
+   objectives, and reference evidence. Do not infer dependencies from event
+   order, consequential actions from name substrings, or objectives from
+   unavailable repository content.
+4. Reuse this in-memory projection for every configured built-in trajectory
+   grader. Do not persist or reload an intermediate IR file.
+
+Trajectory analyses are opt-in. A grader whose required IR fields are
+missing reports `unavailable` rather than fabricating a score.
+
+For `code-read-precision`, record file content reads as actions with `type: "read"`
+and file inspections as `type: "inspect"`, `target` set to the file path and
+`consequential: false`. Searches and listings use distinct action types and do not
+count as content reads. The grader compares distinct target paths with the
+reference patch files; the IR has no symbol records, so precision is file-level.
+
+For `code-edit-precision`, record file edits as actions with `type: "edit"`,
+`target` set to the edited file path, and `consequential: true`. The grader
+compares distinct edited paths with the reference patch files; the IR has no
+line or hunk records, so precision is file-level.
 
 ### Output contract every grader in this directory follows
 
-Each grader fragment produces one JSON object appended to
-`/tmp/gh-aw/agent/graders/custom_grader_results.json`:
+Each built-in grader returns either a finite number or an object with a finite
+numeric `value`. Return `value: null` when required trace data is unavailable
+or the grader is not applicable:
 
 ```jsonc
 {
-  "id": "policy-near-miss",
   "value": 0.0,
-  "unit": "ratio|count|ms|string",
-  "direction": "lower-is-better|higher-is-better|neutral",
-  "evidence": ["short grounded strings citing IR event indices or ids"],
-  "applicable": true,
-  "notApplicableReason": null
+  "details": "short grounded summary citing IR event indices or ids"
 }
 ```
 
-Set `applicable: false` and explain in `notApplicableReason` rather than
-fabricating a value when the run's trace does not contain the inputs the
-grader needs (e.g. no reference trajectory for the benchmark-mode graders,
-no declared objectives for `objective-coverage`).
+The grader ID, name, unit, and `higher_is_better` or `lower_is_better`
+direction come from built-in metadata and data-only configuration overrides.
+An object result may additionally include `passed`, `severity`, `details`,
+`diagnostics`, or `message`. Use
+`{ value: null, passed: null, message: "not applicable: ..." }`
+rather than fabricating a score when the trace does not contain the inputs the
+grader needs (e.g. no reference trajectory for benchmark-mode graders or no
+declared objectives for `objective-coverage`).

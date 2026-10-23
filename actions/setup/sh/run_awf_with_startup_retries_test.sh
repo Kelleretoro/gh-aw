@@ -70,6 +70,34 @@ set -e
 [ "$STATUS" -eq 7 ] || fail "expected original post-harness failure status, got $STATUS"
 [ "$(cat "$ATTEMPT_FILE")" = "1" ] || fail "expected no retry after harness marker"
 
+run_routing_with_env() {
+  GH_AW_MODEL_ROUTING="1" \
+    GH_AW_AWF_ENGINE_NAME="copilot" \
+    GH_AW_AWF_HARNESS_MARKER="[copilot-harness]" \
+    GH_AW_AWF_LOG_FILE="$WORKDIR/routing-agent.log" \
+    GH_AW_AWF_ATTEMPT_LOG_NAME="copilot-routing" \
+    GH_AW_HARNESS_STARTUP_RETRIES="2" \
+    GH_AW_HARNESS_INITIAL_DELAY_MS="0" \
+    bash "$SCRIPT" -- "$@"
+}
+
+OUTPUT="$WORKDIR/model-routing-failure.log"
+ATTEMPT_FILE="$WORKDIR/model-routing-attempts"
+set +e
+run_routing_with_env bash -c '
+  attempts="$(cat "$1" 2>/dev/null || echo 0)"
+  printf "%s" "$((attempts + 1))" > "$1"
+  echo "Fatal error: task has no routing candidate"
+  exit 78
+' bash "$ATTEMPT_FILE" > "$OUTPUT" 2>&1
+STATUS=$?
+set -e
+
+[ "$STATUS" -eq 78 ] || fail "expected routing failure status 78, got $STATUS"
+[ "$(cat "$ATTEMPT_FILE")" = "1" ] || fail "expected routing failure not to be retried"
+grep -Fq "[ERROR] Fatal error: AWF model routing failed (exit code 78)" "$OUTPUT" || fail "expected routing-specific failure diagnostic"
+grep -Fq "AWF model routing failed (exit code 78)" "$WORKDIR/routing-agent.log" || fail "expected routing diagnostic in agent log"
+
 run_with_evidence_env() {
   GH_AW_AWF_ENGINE_NAME="codex" \
     GH_AW_AWF_HARNESS_MARKER="[codex-harness]" \
@@ -86,6 +114,16 @@ run_with_evidence_env() {
 
 EVIDENCE_FILE="$WORKDIR/evidence/agent_execution.json"
 mkdir -p "$(dirname "$EVIDENCE_FILE")"
+printf '{"version":1,"component":"agent","run_id":12345,"run_attempt":1,"state":"started"}\n' > "$EVIDENCE_FILE"
+SAFE_OUTPUTS_FILE="$WORKDIR/safe-outputs.jsonl"
+printf '{"type":"noop","message":"already done"}\n' > "$SAFE_OUTPUTS_FILE"
+OUTPUT="$WORKDIR/preflight-noop-output.log"
+INVOKED_FILE="$WORKDIR/preflight-noop-invoked"
+GH_AW_SAFE_OUTPUTS="$SAFE_OUTPUTS_FILE" run_with_evidence_env bash -c 'printf invoked > "$1"' bash "$INVOKED_FILE" > "$OUTPUT" 2>&1
+[ ! -f "$INVOKED_FILE" ] || fail "pre-flight noop must not invoke AWF"
+grep -Fq '"state":"not_started"' "$EVIDENCE_FILE" || fail "expected host pre-flight noop evidence"
+grep -Fq "skipped execution for a pre-existing noop" "$OUTPUT" || fail "expected host pre-flight noop diagnostic"
+
 printf '{"version":1,"component":"agent","run_id":12345,"run_attempt":1,"state":"started"}\n' > "$EVIDENCE_FILE"
 OUTPUT="$WORKDIR/evidence-output.log"
 set +e
@@ -105,9 +143,11 @@ grep -Fq "recorded agent execution evidence as not_started" "$OUTPUT" || fail "e
 
 printf '{"version":1,"component":"agent","run_id":12345,"run_attempt":1,"state":"started"}\n' > "$EVIDENCE_FILE"
 OUTPUT="$WORKDIR/evidence-marker-output.log"
+: > "$SAFE_OUTPUTS_FILE"
 set +e
-run_with_evidence_env bash -c '
+GH_AW_SAFE_OUTPUTS="$SAFE_OUTPUTS_FILE" run_with_evidence_env bash -c '
   echo "[codex-harness] started"
+  printf "{\"type\":\"noop\",\"message\":\"written after execution started\"}\n" >> "$GH_AW_SAFE_OUTPUTS"
   echo "Fatal error: post-harness failure"
   exit 3
 ' > "$OUTPUT" 2>&1

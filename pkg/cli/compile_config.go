@@ -1,5 +1,7 @@
 package cli
 
+import "github.com/github/gh-aw/pkg/workflow"
+
 // CompileConfig holds configuration options for compiling workflows
 type CompileConfig struct {
 	MarkdownFiles             []string // Files to compile (empty for all files)
@@ -9,11 +11,17 @@ type CompileConfig struct {
 	Watch                     bool     // Enable watch mode
 	WorkflowDir               string   // Custom workflow directory
 	NoEmit                    bool     // Validate without generating lock files
+	ReadOnly                  bool     // Disable compilation side effects for untrusted MCP callers
+	NoLogo                    bool     // Omit the ASCII logo from generated workflow headers
 	Purge                     bool     // Remove orphaned lock files
 	TrialMode                 bool     // Enable trial mode (suppress safe outputs)
 	TrialLogicalRepoSlug      string   // Target repository for trial mode
 	UseSamples                bool     // Hidden: replace agentic step with a deterministic samples replay driver
 	Strict                    bool     // Enable strict mode validation
+	DryRun                    bool     // Enable fail-closed development testing checks and staged safe outputs
+	AllowExperimental         bool     // Accept experimental-feature notices without waiving other dry-run diagnostics
+	EnvironmentOverride       string   // Override the environment on every generated job
+	RequireSelfHostedRunners  bool     // Require every generated job to select a self-hosted runner
 	Dependabot                bool     // Generate Dependabot manifests for npm dependencies
 	ForceOverwrite            bool     // Force overwrite of existing files (dependabot.yml)
 	RefreshStopTime           bool     // Force regeneration of stop-after times instead of preserving existing ones
@@ -44,18 +52,28 @@ type CompileConfig struct {
 	PriorManifestFile         string   // Path to a JSON file containing pre-cached manifests (map[lockFile]*GHAWManifest) collected at MCP server startup; takes precedence over git HEAD / filesystem reads for safe update enforcement
 	GHESCompat                bool     // Enable GHES-compatible v3 artifact actions (overrides aw.json ghes field)
 	activeModels              *activeModelInventory
+	modelValidationWarnings   []string
+	dryRunReport              *DryRunCompileReport
+	dryRunBaseline            *dryRunScannerBaseline
+	dryRunWorkflowDir         string
+
+	// ExplicitBoolFlags records user-supplied flags, including false, separately from omitted defaults.
+	ExplicitBoolFlags map[string]bool
 }
 
 func (c CompileConfig) shellcheckEnabled() bool {
 	return c.Shellcheck
 }
 
-// ValidationResult represents the validation result for a single workflow
+// ValidationResult represents workflow validation or a batch-scoped compiler/scanner diagnostic.
 type ValidationResult struct {
-	Workflow     string            `json:"workflow"`
-	Valid        bool              `json:"valid"`
-	Errors       []ValidationIssue `json:"errors"`
-	Warnings     []ValidationIssue `json:"warnings"`
-	CompiledFile string            `json:"compiled_file,omitempty"`
-	Labels       []string          `json:"labels,omitempty"` // Labels referenced in safe-outputs configurations
+	Scope                string                         `json:"scope,omitempty"` // "batch" for diagnostics not attributable to a single workflow
+	Workflow             string                         `json:"workflow"`
+	Valid                bool                           `json:"valid"`
+	Errors               []ValidationIssue              `json:"errors"`
+	Warnings             []ValidationIssue              `json:"warnings"`
+	CompiledFile         string                         `json:"compiled_file,omitempty"`
+	Labels               []string                       `json:"labels,omitempty"` // Labels referenced in safe-outputs configurations
+	DryRun               *DryRunCompileReport           `json:"dry_run,omitempty"`
+	WebhookSubscriptions []workflow.WebhookSubscription `json:"webhook_subscriptions,omitempty"`
 }

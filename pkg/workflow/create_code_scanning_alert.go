@@ -7,6 +7,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/typeutil"
 )
 
 var createCodeScanningAlertLog = logger.New("workflow:create_code_scanning_alert")
@@ -15,6 +16,7 @@ var createCodeScanningAlertLog = logger.New("workflow:create_code_scanning_alert
 type CreateCodeScanningAlertsConfig struct {
 	BaseSafeOutputConfig `yaml:",inline"`
 	Driver               string   `yaml:"driver,omitempty"`        // Driver name for SARIF tool.driver.name field (default: "GitHub Agentic Workflows Security Scanner")
+	TargetRef            string   `yaml:"target-ref,omitempty"`    // Trusted queue SARIF reference, independently resolved to the immutable worker revision
 	TargetRepoSlug       string   `yaml:"target-repo,omitempty"`   // Target repository in format "owner/repo" for cross-repository code scanning alert creation
 	AllowedRepos         []string `yaml:"allowed-repos,omitempty"` // List of additional repositories in format "owner/repo" that code scanning alerts can be created in
 }
@@ -40,6 +42,7 @@ func (c *Compiler) parseCodeScanningAlertsConfig(outputMap map[string]any) *Crea
 
 		// Parse target-repo
 		securityReportsConfig.TargetRepoSlug = extractStringFromMap(configMap, "target-repo", createCodeScanningAlertLog)
+		securityReportsConfig.TargetRef = extractStringFromMap(configMap, "target-ref", createCodeScanningAlertLog)
 		if securityReportsConfig.TargetRepoSlug != "" {
 			createCodeScanningAlertLog.Printf("Target repo for code scanning alerts: %s", securityReportsConfig.TargetRepoSlug)
 		}
@@ -107,7 +110,7 @@ func (c *Compiler) buildCodeScanningUploadJob(data *WorkflowData) (*Job, error) 
 	}
 
 	uploadSteps := c.buildCodeScanningUploadSteps(data, restoreToken)
-	steps := make([]string, 0, len(tokenMintSteps)+len(uploadSteps))
+	steps := make([]string, 0, typeutil.SafeAllocationCapacity(len(tokenMintSteps), len(uploadSteps)))
 	steps = append(steps, tokenMintSteps...)
 	steps = append(steps, uploadSteps...)
 

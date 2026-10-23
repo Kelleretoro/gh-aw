@@ -127,12 +127,14 @@ func NewLogsCommand() *cobra.Command {
 		Short:   "Download and analyze agentic workflow logs and artifacts",
 		Long:    buildLogsCommandLongDescription(validArtifactSets),
 		Example: buildLogsCommandExample(),
+		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runLogsCommand(cmd, args)
 		},
 	}
 	addLogsCommandFlags(logsCmd, validArtifactSets)
 	registerLogsCommandCompletions(logsCmd)
+	logsCmd.AddCommand(newLogsEpisodeCommand())
 	return logsCmd
 }
 
@@ -151,6 +153,17 @@ combined operation across all targets.
 By default, only the compact usage artifact is downloaded (token usage, run metadata).
 Use --artifacts all to download all artifacts, or specify individual sets such as
 --artifacts agent,firewall to fetch only what you need.
+
+Use --outcomes to evaluate the current GitHub state of each selected run's safe
+outputs and include per-run and episode outcome summaries. This also downloads
+safe-output manifests, without requiring full agent artifacts or workflow logs.
+Use --outcomes-dir to persist the observations as JSONL for downstream processing.
+
+Use --episodes to include recorded episode membership and hops in text reports.
+Combine --episodes --outcomes to join the selected episodes with live outcome
+observations and downloaded usage in the same invocation; no separate
+command or JSONL export is needed. Membership remains limited
+to the selected runs; this flag does not discover additional episode members.
 
 Use --cached-jsonl to reuse matching run records without downloading and processing their
 artifacts again. New results are appended immediately as JSON Lines. When a date range is specified,
@@ -241,12 +254,18 @@ func loadStdinLogsOptions(cmd *cobra.Command) (StdinLogsOptions, error) {
 		Verbose:           values.Verbose,
 		ToolGraph:         values.ToolGraph,
 		NoStaged:          values.NoStaged,
+		DryRun:            values.DryRun,
+		NoDryRun:          values.NoDryRun,
 		FirewallOnly:      values.FirewallOnly,
 		NoFirewall:        values.NoFirewall,
 		Parse:             values.Parse,
 		JSONOutput:        values.JSONOutput,
+		Episodes:          values.Episodes,
+		Outcomes:          values.Outcomes,
+		OutcomesDir:       values.OutcomesDir,
 		Timeout:           values.TimeoutMinutes,
 		MaxStorageMB:      values.MaxStorageMB,
+		MaxStorageMBSet:   values.MaxStorageMBSet,
 		PruneOlderRuns:    values.PruneOlderRuns,
 		SummaryFile:       values.SummaryFile,
 		SafeOutputType:    values.SafeOutputType,
@@ -417,14 +436,20 @@ func loadCommonLogsOptions(cmd *cobra.Command) (LogsDownloadOptions, error) {
 		Verbose:               getBoolFlag(cmd, "verbose"),
 		ToolGraph:             getBoolFlag(cmd, "tool-graph"),
 		NoStaged:              getBoolFlag(cmd, "exclude-staged"),
+		DryRun:                getBoolFlag(cmd, "dry-run"),
+		NoDryRun:              getBoolFlag(cmd, "no-dry-run"),
 		FirewallOnly:          getBoolFlag(cmd, "firewall"),
 		NoFirewall:            getBoolFlag(cmd, "no-firewall"),
 		Parse:                 getBoolFlag(cmd, "parse"),
 		JSONOutput:            getBoolFlag(cmd, "json"),
+		Episodes:              getBoolFlag(cmd, "episodes"),
+		Outcomes:              getBoolFlag(cmd, "outcomes"),
+		OutcomesDir:           getStringFlag(cmd, "outcomes-dir"),
 		TimeoutMinutes:        getIntFlag(cmd, "timeout"),
 		TimeoutSeconds:        getIntFlag(cmd, "timeout-seconds"),
 		MaxGitHubAPIRateLimit: getIntFlag(cmd, "max-github-api-rate-limit"),
 		MaxStorageMB:          getIntFlag(cmd, "max-storage"),
+		MaxStorageMBSet:       cmd.Flags().Changed("max-storage"),
 		PruneOlderRuns:        getBoolFlag(cmd, "prune-older-runs"),
 		SummaryFile:           getStringFlag(cmd, "summary-file"),
 		SafeOutputType:        getStringFlag(cmd, "safe-output"),
@@ -436,7 +461,7 @@ func loadCommonLogsOptions(cmd *cobra.Command) (LogsDownloadOptions, error) {
 		Drain3Weights:         getStringFlag(cmd, "drain3-weights"),
 		Format:                getStringFlag(cmd, "format"),
 		ReportFile:            getStringFlag(cmd, "report-file"),
-		ArtifactSets:          getStringSliceFlag(cmd, "artifacts"),
+		ArtifactSets:          logsCommandArtifactSets(cmd),
 		CachedJSONL:           getStringFlag(cmd, "cached-jsonl"),
 	}
 	options.IgnoreWorkflowRuns, err = parseIgnoredWorkflowRunIDs(getStringSliceFlag(cmd, "ignore-workflow-runs"))
@@ -446,11 +471,16 @@ func loadCommonLogsOptions(cmd *cobra.Command) (LogsDownloadOptions, error) {
 	if err := validateLogsOptions(options); err != nil {
 		return LogsDownloadOptions{}, err
 	}
-	if len(options.ArtifactSets) > 0 {
-		options.ArtifactSets = applyEvalsArtifact(options.ArtifactSets, options.EvalsOnly)
-		options.ArtifactSets = applyGradersArtifact(options.ArtifactSets, options.GradersOnly)
-	}
 	return options, nil
+}
+
+func logsCommandArtifactSets(cmd *cobra.Command) []string {
+	sets := logsOutcomeArtifactSets(getStringSliceFlag(cmd, "artifacts"), getBoolFlag(cmd, "outcomes"))
+	if len(sets) > 0 {
+		sets = applyEvalsArtifact(sets, getBoolFlag(cmd, "evals"))
+		sets = applyGradersArtifact(sets, getBoolFlag(cmd, "graders"))
+	}
+	return sets
 }
 
 func parseIgnoredWorkflowRunIDs(values []string) ([]int64, error) {
@@ -506,7 +536,13 @@ func validateLogsOptions(options LogsDownloadOptions) error {
 	if err := validateLogsRuntime(options.Runtime); err != nil {
 		return err
 	}
-	return validateReportFileFlags(options.ReportFile, options.Format, options.JSONOutput)
+	if err := validateReportFileFlags(options.ReportFile, options.Format, options.JSONOutput); err != nil {
+		return err
+	}
+	if options.OutcomesDir != "" && !options.Outcomes {
+		return errors.New("--outcomes-dir requires --outcomes")
+	}
+	return nil
 }
 
 func validateLogsRuntime(runtime string) error {
@@ -613,6 +649,8 @@ func resolveLogsWorkflowNameLocally(arg string) (string, error) {
 
 func addLogsCommandFlags(logsCmd *cobra.Command, validArtifactSets string) {
 	logsCmd.Flags().IntP("count", "c", 10, "Maximum matching workflow runs to return across all targets (after applying filters)")
+	addLogsOutcomeFlags(logsCmd)
+	logsCmd.Flags().Bool("episodes", false, "Include recorded episode membership and hops; combine with --outcomes for episode outcome summaries")
 	logsCmd.Flags().String("start-date", "", "Filter runs created after this date (YYYY-MM-DD or delta like -1d, -1w, -1mo)")
 	logsCmd.Flags().String("end-date", "", "Filter runs created before this date (YYYY-MM-DD or delta like -1d, -1w, -1mo)")
 	addOutputFlag(logsCmd, defaultLogsOutputDir)
@@ -625,12 +663,15 @@ func addLogsCommandFlags(logsCmd *cobra.Command, validArtifactSets string) {
 	addRepoFlag(logsCmd)
 	logsCmd.Flags().Bool("tool-graph", false, "Generate Mermaid tool sequence graph from agent logs")
 	logsCmd.Flags().Bool("exclude-staged", false, "Exclude workflow runs that executed in staged mode (safe outputs previewed but not applied)")
+	logsCmd.Flags().Bool("dry-run", false, "Filter to only dry-run workflow runs")
+	logsCmd.Flags().Bool("no-dry-run", false, "Exclude dry-run workflow runs (legacy metadata without dry_run counts as a normal run)")
+	logsCmd.MarkFlagsMutuallyExclusive("dry-run", "no-dry-run")
 	logsCmd.Flags().Bool("firewall", false, "Filter to only runs with firewall enabled")
 	logsCmd.Flags().Bool("no-firewall", false, "Filter to only runs without firewall enabled")
 	logsCmd.Flags().String("safe-output", "", "Filter to runs containing a specific safe output type (e.g., create-issue, missing-tool, missing-data, noop, report-incomplete)")
 	logsCmd.Flags().Bool("filtered-integrity", false, "Filter to runs containing items that were filtered by gateway integrity checks")
 	logsCmd.Flags().Bool("evals", false, "Filter to runs containing evals results (evals.jsonl); automatically includes the usage artifact (which contains evals)")
-	logsCmd.Flags().Bool("graders", false, "Filter to runs containing deterministic grader results; automatically includes grader artifacts")
+	logsCmd.Flags().Bool("graders", false, "Filter to runs containing deterministic grader results; includes conclusion and separate custom-grader artifacts")
 	logsCmd.Flags().Bool("parse", false, "Run JavaScript parsers on agent logs and firewall logs, writing Markdown to log.md and firewall.md")
 	logsCmd.Flags().Bool("audit", false, "Generate audit.json in each workflow run cache directory (comparisons use downloaded runs only)")
 	addJSONFlag(logsCmd)
@@ -638,7 +679,7 @@ func addLogsCommandFlags(logsCmd *cobra.Command, validArtifactSets string) {
 	logsCmd.Flags().Int("timeout-seconds", 0, "Download timeout in seconds (0 = use --timeout)")
 	_ = logsCmd.Flags().MarkHidden("timeout-seconds")
 	logsCmd.Flags().Int("max-github-api-rate-limit", 0, "Maximum used GitHub core API requests before pausing one target or stopping multiple targets (positive = absolute, negative = reserve from API limit; e.g. 12000 or -2000)")
-	logsCmd.Flags().Int("max-storage", 0, "Maximum logs storage in MB after pruning non-essential cache data (0 = unlimited)")
+	logsCmd.Flags().Int("max-storage", defaultLogsMaxStorageMB, "Maximum logs storage in MB after pruning non-essential cache data (default: 1 GB; 0 = unlimited)")
 	logsCmd.Flags().Bool("prune-older-runs", false, "Remove oldest completed runs when non-essential cache pruning cannot satisfy --max-storage")
 	logsCmd.Flags().String("summary-file", "summary.json", "Path to write the summary JSON file relative to output directory (use empty string to disable)")
 	logsCmd.Flags().Bool("train", false, "Analyze log patterns across downloaded runs and save pattern weights to drain3_weights.json in the output directory")

@@ -51,9 +51,12 @@ func (c *Compiler) extractSafeOutputsConfig(frontmatter map[string]any) *SafeOut
 
 	if output, exists := frontmatter["safe-outputs"]; exists {
 		if outputMap, ok := output.(map[string]any); ok {
+			outputMap = normalizeMissingReportKeys(outputMap)
 			safeOutputsConfigLog.Printf("Processing safe-outputs configuration with %d top-level keys", len(outputMap))
 			config = &SafeOutputsConfig{}
-
+			if adapters, supplied := outputMap["claim-adapters"]; supplied {
+				config.ClaimAdapters, config.claimAdaptersParseError = parseWorkQueueClaimAdapters(adapters)
+			}
 			config.CreateWorkItems = c.parseCreateWorkItemConfig(outputMap)
 			config.UpdateWorkItems = c.parseUpdateWorkItemConfig(outputMap)
 			config.CommentOnWorkItems = c.parseCommentOnWorkItemConfig(outputMap)
@@ -65,6 +68,9 @@ func (c *Compiler) extractSafeOutputsConfig(frontmatter map[string]any) *SafeOut
 			config.LinearUpdateIssue = c.parseLinearUpdateIssueConfig(outputMap)
 
 			// Handle create-issue
+			if enabled, ok := outputMap["create-issue"].(bool); ok {
+				config.CreateIssuesDisabled = !enabled
+			}
 			issuesConfig := c.parseCreateIssuesConfig(outputMap)
 			if issuesConfig != nil {
 				safeOutputsConfigLog.Print("Configured create-issue output handler")
@@ -344,7 +350,7 @@ func (c *Compiler) extractSafeOutputsConfig(frontmatter map[string]any) *SafeOut
 				config.MissingTool = missingToolConfig
 			} else {
 				// Enable missing-tool by default if safe-outputs exists and it wasn't explicitly disabled
-				if _, exists := outputMap["missing-tool"]; !exists {
+				if _, exists := outputMap["report-missing-tool"]; !exists {
 					trueVal := "true"
 					config.MissingTool = &MissingToolConfig{
 						CreateIssue: &trueVal,
@@ -360,7 +366,7 @@ func (c *Compiler) extractSafeOutputsConfig(frontmatter map[string]any) *SafeOut
 				config.MissingData = missingDataConfig
 			} else {
 				// Enable missing-data by default if safe-outputs exists and it wasn't explicitly disabled
-				if _, exists := outputMap["missing-data"]; !exists {
+				if _, exists := outputMap["report-missing-data"]; !exists {
 					trueVal := "true"
 					config.MissingData = &MissingDataConfig{
 						CreateIssue: &trueVal,
@@ -379,7 +385,7 @@ func (c *Compiler) extractSafeOutputsConfig(frontmatter map[string]any) *SafeOut
 				// This ensures there's always a fallback for transparency
 				if _, exists := outputMap["noop"]; !exists {
 					config.NoOp = &NoOpConfig{}
-					config.NoOp.Max = defaultIntStr(1) // Default max
+					config.NoOp.Max = defaultIntStr(2) // Default max
 					// Implicit noop is for transparency logging only; it must not create
 					// issues without a maintenance workflow to expire them, so report-as-issue
 					// defaults to false here (users can opt in with an explicit noop: block).

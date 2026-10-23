@@ -1,21 +1,21 @@
 // Package globwalkignorederror implements a Go analysis linter that flags
-// filepath.Glob and os.ReadDir calls where the error return is discarded
-// with _.
+// filepath.Glob and os.ReadDir calls where the error return is discarded.
 package globwalkignorederror
 
 import (
 	"go/ast"
-	"go/types"
+	"path"
 
 	"golang.org/x/tools/go/analysis"
 
 	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
+	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
 )
 
 // Analyzer is the glob-walk-ignored-error analysis pass.
-var Analyzer = analyzerutil.New("globwalkignorederror", "reports filepath.Glob and os.ReadDir calls where the error return is discarded with _", run)
+var Analyzer = analyzerutil.New("globwalkignorederror", "reports filepath.Glob and os.ReadDir calls where the error return is discarded", run)
 
 // checkedFuncs maps package import path to the set of function names within
 // that package whose discarded error return should be flagged.
@@ -30,48 +30,28 @@ func run(pass *analysis.Pass) (any, error) {
 		return nil, err
 	}
 
-	nodeFilter := []ast.Node{(*ast.AssignStmt)(nil)}
+	nodeFilter := []ast.Node{(*ast.AssignStmt)(nil), (*ast.ExprStmt)(nil)}
 	return analyzerutil.Preorder(pass, nodeFilter, func(n ast.Node) {
-		analyzeGlobWalkAssign(pass, n, generatedFiles, nolintIndex)
+		analyzeGlobWalkStmt(pass, n, generatedFiles, nolintIndex)
 	})
 }
 
-// analyzeGlobWalkAssign checks whether an assignment discards the error
-// return from filepath.Glob or os.ReadDir and reports a diagnostic if so.
-func analyzeGlobWalkAssign(pass *analysis.Pass, n ast.Node, generatedFiles filecheck.GeneratedIndex, nolintIndex nolint.DirectiveIndex) {
-	assign, ok := n.(*ast.AssignStmt)
+// analyzeGlobWalkStmt checks whether a statement discards the error return from
+// filepath.Glob or os.ReadDir and reports a diagnostic if so.
+func analyzeGlobWalkStmt(pass *analysis.Pass, n ast.Node, generatedFiles filecheck.GeneratedIndex, nolintIndex nolint.DirectiveIndex) {
+	stmt, ok := n.(ast.Stmt)
 	if !ok {
 		return
 	}
-	if len(assign.Lhs) != 2 || len(assign.Rhs) != 1 {
-		return
-	}
-	blank, ok := assign.Lhs[1].(*ast.Ident)
-	if !ok || blank.Name != "_" {
-		return
-	}
-	call, ok := assign.Rhs[0].(*ast.CallExpr)
+	call, pkgPath, funcName, ok := astutil.MatchDiscardedErrorCall(pass, stmt)
 	if !ok {
 		return
 	}
-	sel, ok := call.Fun.(*ast.SelectorExpr)
+	funcs, ok := checkedFuncs[pkgPath]
 	if !ok {
 		return
 	}
-	ident, ok := sel.X.(*ast.Ident)
-	if !ok {
-		return
-	}
-	obj := pass.TypesInfo.Uses[ident]
-	pkgName, ok := obj.(*types.PkgName)
-	if !ok {
-		return
-	}
-	funcs, ok := checkedFuncs[pkgName.Imported().Path()]
-	if !ok {
-		return
-	}
-	if _, checked := funcs[sel.Sel.Name]; !checked {
+	if _, checked := funcs[funcName]; !checked {
 		return
 	}
 	position := pass.Fset.PositionFor(call.Pos(), false)
@@ -81,5 +61,5 @@ func analyzeGlobWalkAssign(pass *analysis.Pass, n ast.Node, generatedFiles filec
 	if nolint.HasDirectiveForLinter(position, nolintIndex, "globwalkignorederror") {
 		return
 	}
-	pass.ReportRangef(call, "error return from %s.%s is discarded; malformed patterns or unreadable directories silently produce an empty result", pkgName.Imported().Name(), sel.Sel.Name)
+	pass.ReportRangef(call, "error return from %s.%s is discarded; malformed patterns or unreadable directories silently produce an empty result", path.Base(pkgPath), funcName)
 }

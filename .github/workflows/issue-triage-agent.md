@@ -4,7 +4,7 @@ timeout-minutes: 5
 engine:
   id: codex
   model-provider: github
-model: copilot/gpt-5.3-codex
+model: copilot/gpt-6-sol
 strict: true
 on:
   schedule: "daily around 14:00 on weekdays"  # ~2 PM UTC, weekdays only
@@ -27,6 +27,14 @@ safe-outputs:
     reasoning: string
   add-labels:
     allowed: [bug, feature, enhancement, documentation, question, help-wanted, good-first-issue]
+    item-schema:
+      type: object
+      required: [name, rationale, confidence]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        rationale: { type: string }
+        confidence: { type: string, enum: [HIGH, MEDIUM, LOW] }
   add-comment: {}
 imports:
   - shared/github-guard-policy.md

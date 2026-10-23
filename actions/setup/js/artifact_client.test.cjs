@@ -8,6 +8,7 @@ import { createRequire } from "module";
 
 const req = createRequire(import.meta.url);
 const { DefaultArtifactClient } = req("./artifact_client.cjs");
+const { createAPIBudget, getAPIReadFailure } = req("./daily_aic_api_budget.cjs");
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -89,15 +90,52 @@ describe("DefaultArtifactClient.listArtifacts", () => {
   });
 
   it("throws when the REST API returns a non-ok status", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(makeFetchResponse(403, "Forbidden"));
+    const budget = createAPIBudget();
+    const mockFetch = vi.fn().mockResolvedValue(makeFetchResponse(403, "private payload"));
     vi.stubGlobal("fetch", mockFetch);
+    vi.stubGlobal("core", { info: vi.fn() });
 
-    const client = new DefaultArtifactClient();
-    await expect(
-      client.listArtifacts({
+    const client = new DefaultArtifactClient({ request: budget.request });
+    const error = await client
+      .listArtifacts({
         findBy: { token: "tok", repositoryOwner: "owner", repositoryName: "repo", workflowRunId: "42" },
       })
-    ).rejects.toThrow("failed to list artifacts (403)");
+      .catch(error => error);
+    expect(error).toMatchObject({ message: "failed to list artifacts (403)" });
+    expect(getAPIReadFailure(error)).toEqual({ attempts: 1, status: 403, reason: "non_transient", requests: 1, operation: "artifact_list" });
+    expect(error.message).not.toContain("private payload");
+  });
+
+  it("observes quota headers even when the JSON body cannot be parsed", async () => {
+    const response = makeFetchResponse(200, "invalid JSON", { "x-ratelimit-remaining": "100" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    vi.stubGlobal("core", { info: vi.fn() });
+    const budget = createAPIBudget();
+    const client = new DefaultArtifactClient({ request: budget.request });
+    await expect(client.listArtifacts({ findBy: { token: "tok", repositoryOwner: "owner", repositoryName: "repo", workflowRunId: "42" } })).rejects.toMatchObject({ code: "DAILY_AIC_QUOTA_STOP" });
+    expect(budget.snapshot().requests).toBe(1);
+  });
+
+  it("does not retry malformed JSON when the observed response is above the quota reserve", async () => {
+    const fetch = vi.fn().mockResolvedValue(makeFetchResponse(200, "invalid JSON", { "x-ratelimit-remaining": "4000" }));
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("core", { info: vi.fn() });
+    const budget = createAPIBudget();
+    const client = new DefaultArtifactClient({ request: budget.request });
+    await expect(client.listArtifacts({ findBy: { token: "tok", repositoryOwner: "owner", repositoryName: "repo", workflowRunId: "42" } })).rejects.toThrow("failed to parse list artifacts");
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(budget.snapshot().requests).toBe(1);
+  });
+
+  it("attributes artifact-list failures through the budget, not through fetch arguments", async () => {
+    const response = makeFetchResponse(429, "private payload");
+    const fetch = vi.fn().mockResolvedValue(response);
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("core", { info: vi.fn() });
+    const client = new DefaultArtifactClient({ request: createAPIBudget().request });
+    const error = await client.listArtifacts({ findBy: { token: "tok", repositoryOwner: "owner", repositoryName: "repo", workflowRunId: "42" } }).catch(error => error);
+    expect(getAPIReadFailure(error)).toEqual({ attempts: 1, status: 429, reason: "quota_stop", requests: 1, operation: "artifact_list" });
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(expect.any(String), expect.objectContaining({ signal: expect.any(AbortSignal) }));
   });
 });
 
@@ -181,6 +219,33 @@ describe("DefaultArtifactClient.downloadArtifact", () => {
         findBy: { token: "tok", repositoryOwner: "owner", repositoryName: "repo" },
       })
     ).rejects.toThrow("missing redirect location");
+  });
+
+  it.each([
+    ["redirect", 403, "artifact_redirect", 1],
+    ["blob download", 403, "artifact_download", 1],
+  ])("preserves %s failure attribution through the wrapper", async (failure, status, operation, requests) => {
+    const budget = createAPIBudget();
+    const mockFetch =
+      failure === "redirect"
+        ? vi.fn().mockResolvedValue(makeFetchResponse(status, "private payload"))
+        : vi
+            .fn()
+            .mockResolvedValueOnce(makeFetchResponse(302, "", { location: "https://storage.example.com/artifact.zip" }))
+            .mockResolvedValueOnce(makeFetchResponse(status, "private payload"));
+    vi.stubGlobal("fetch", mockFetch);
+    vi.stubGlobal("core", { info: vi.fn() });
+
+    const client = new DefaultArtifactClient({ request: budget.request });
+    const error = await client
+      .downloadArtifact(1, {
+        path: tmpDir,
+        findBy: { token: "tok", repositoryOwner: "owner", repositoryName: "repo" },
+      })
+      .catch(error => error);
+
+    expect(getAPIReadFailure(error)).toEqual({ attempts: 1, status, reason: "non_transient", requests, operation });
+    expect(error.message).not.toContain("private payload");
   });
 });
 

@@ -19,7 +19,7 @@ tools:
     toolsets: [repos, issues, pull_requests, actions]
 ```
 
-**Available**: `context`, `repos`, `issues`, `pull_requests`, `users`, `actions`, `code_security`, `discussions`, `labels`, `notifications`, `orgs`, `projects`, `gists`, `search`, `dependabot`, `experiments`, `secret_protection`, `security_advisories`, `stargazers`
+**Available**: `context`, `repos`, `issues`, `pull_requests`, `users`, `actions`, `code_security`, `discussions`, `labels`, `notifications`, `orgs`, `projects`, `gists`, `dependabot`, `secret_protection`, `security_advisories`, `stargazers`
 
 **Shorthand values**:
 
@@ -35,6 +35,31 @@ Common toolsets include `context` (user and team info), `repos` (repository oper
 :::
 
 Some toolsets require [additional authentication](#additional-authentication-for-github-tools).
+
+### Code Search Rate Limits
+
+The GitHub MCP `search_code` tool uses a separate, much smaller budget than ordinary GitHub API reads. GitHub's [search rate limits](https://docs.github.com/en/rest/search/search#rate-limit) allow 10 authenticated code-search requests per minute, compared with 30 per minute for other search endpoints. An available `core` quota does not imply that code search is available.
+
+Agent start/end rate-limit snapshots log `core`, `code_search`, and `search` with their limit, remaining requests, and reset time. MCP HTTP 429 failures appear in the agent job summary with the server's retry hint, when provided. These snapshots reflect the configured GitHub tools credential; they do not prove that concurrent runs share an identity or explain every secondary limit or MCP-server throttle. A retry hint is not a guarantee that waiting will make the next request succeed.
+
+For inspecting code in another repository, the recommended alternative is [`checkout:` with `sparse-checkout`](/gh-aw/reference/checkout/), then local `grep` or `rg` searches. This checkout configuration is supported in v0.89.17:
+
+```aw wrap
+permissions:
+  contents: read
+checkout:
+  - repository: owner/target-repo
+    ref: main
+    path: target-repo
+    sparse-checkout: |
+      src
+      docs
+    github-token: ${{ secrets.TARGET_REPO_READ_TOKEN }}
+tools:
+  bash: ["grep", "rg"]
+```
+
+Use a token or GitHub App with read access to the target repository; the workflow's `GITHUB_TOKEN` is scoped to its own repository. The checkout credential is separate from `tools.github` authentication. Search the checked-out paths locally rather than fetching missing files during agent execution. For occasional API code searches, keep a small per-run [`max-calls` limit](#restricting-tools-toolsgithuballowed); it does not reserve quota or prevent throttling.
 
 ## Restricting Tools (`tools.github.allowed`)
 
@@ -116,6 +141,12 @@ tools:
     mode: gh-proxy
 ```
 
+### CLI proxy startup diagnostics
+
+The CLI proxy waits up to 30 seconds for readiness. Startup diagnostics are captured in a private temporary directory outside artifact upload roots, with a 1 MiB input limit. Before publishing the last 20 lines, the startup script redacts built-in credential patterns and supplied secret values, including a custom GitHub token passed as `GH_TOKEN`. Unrelated workflow secrets are not automatically forwarded to the startup step.
+
+If capture exceeds the limit or sanitization fails, the step withholds the diagnostics and reports a fixed error instead of printing raw output. Timeout diagnostics retain the readiness failure reason. Raw temporary diagnostics are removed on normal exit; a cleanup failure is reported and fails the step.
+
 ## Additional Authentication for GitHub Tools
 
 In some circumstances you must use a GitHub PAT or GitHub app to give the GitHub tools used by your workflow additional capabilities.
@@ -192,7 +223,7 @@ tools:
 This disables both `forcePublicRepos` and the default `sink-visibility` enforcement for **all** MCP servers. The MCP Gateway emits `"forcePublicRepos": false` in its startup config.
 
 :::caution
-`private-to-public-flows: allow` is **not compatible with strict mode**. Strict mode workflows that require this opt-out must use the list form instead.
+`private-to-public-flows` is **not compatible with strict mode** in either form. In non-strict mode, the compiler warns because GitHub Actions logs are public and agents may expose private data through public destinations.
 :::
 
 ### Selective exemption (list of server IDs)
@@ -209,7 +240,7 @@ mcp-servers:
     url: "http://localhost:9000/mcp"
 ```
 
-This exempts only the listed MCP server IDs from the default `sink-visibility` enforcement. `forcePublicRepos` is **not** disabled; private repo access still requires the allow-only policy to permit it. This form is compatible with strict mode.
+This exempts only the listed MCP server IDs from the default `sink-visibility` enforcement. `forcePublicRepos` is **not** disabled; private repo access still requires the allow-only policy to permit it. This form is rejected in strict mode.
 
 The compiler emits `"sinkVisibilityExemptServers": ["github", "my-custom-server"]` in the gateway config. The built-in GitHub MCP server ID is `github`. Custom server IDs match the key used in `mcp-servers`.
 

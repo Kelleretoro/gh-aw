@@ -61,8 +61,8 @@ describe("safe_output_manifest", () => {
   describe("NOT_LOGGED_TYPES", () => {
     it("should contain only noop and internal meta types", () => {
       expect(NOT_LOGGED_TYPES.has("noop")).toBe(true);
-      expect(NOT_LOGGED_TYPES.has("missing_tool")).toBe(true);
-      expect(NOT_LOGGED_TYPES.has("missing_data")).toBe(true);
+      expect(NOT_LOGGED_TYPES.has("report_missing_tool")).toBe(true);
+      expect(NOT_LOGGED_TYPES.has("report_missing_data")).toBe(true);
       expect(NOT_LOGGED_TYPES.has("report_incomplete")).toBe(true);
     });
 
@@ -282,6 +282,11 @@ describe("safe_output_manifest", () => {
   });
 
   describe("ensureManifestExists", () => {
+    it("preserves executed milestone and pushed commit identities", () => {
+      expect(extractCreatedItemFromResult("assign_milestone", { success: true, issue_number: 1, milestone_number: 2 })?.metadata).toEqual({ milestone_number: 2 });
+      expect(extractCreatedItemFromResult("push_to_pull_request_branch", { success: true, number: 1, commit_sha: "abcdef123", metadata: { note: "kept" } })?.metadata).toEqual({ commit_sha: "abcdef123", note: "kept" });
+    });
+
     it("should create an empty file if the manifest does not exist", () => {
       expect(fs.existsSync(testManifestFile)).toBe(false);
       ensureManifestExists(testManifestFile);
@@ -306,6 +311,14 @@ describe("safe_output_manifest", () => {
   });
 
   describe("extractCreatedItemFromResult", () => {
+    it.each([123456, "123456"])("preserves dispatched run %s for outcome evaluation", runId => {
+      const item = extractCreatedItemFromResult("dispatch_workflow", {
+        success: true,
+        workflow_name: "worker",
+        run_id: runId,
+      });
+      expect(item?.metadata).toEqual({ run_id: runId });
+    });
     it("should extract item from create_issue result", () => {
       const result = { success: true, repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/issues/42", temporaryId: "aw_def456" };
       const item = extractCreatedItemFromResult("create_issue", result);
@@ -405,8 +418,8 @@ describe("safe_output_manifest", () => {
     it("should return null for excluded types (noop and internal meta types)", () => {
       const result = { success: true, url: "https://github.com/owner/repo/issues/1" };
       expect(extractCreatedItemFromResult("noop", result)).toBeNull();
-      expect(extractCreatedItemFromResult("missing_tool", result)).toBeNull();
-      expect(extractCreatedItemFromResult("missing_data", result)).toBeNull();
+      expect(extractCreatedItemFromResult("report_missing_tool", result)).toBeNull();
+      expect(extractCreatedItemFromResult("report_missing_data", result)).toBeNull();
       expect(extractCreatedItemFromResult("report_incomplete", result)).toBeNull();
     });
 

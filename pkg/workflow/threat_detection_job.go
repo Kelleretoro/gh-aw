@@ -16,7 +16,7 @@ import (
 // The job downloads the agent artifact to access output files, then runs all threat detection
 // steps. It outputs detection_success and detection_conclusion for downstream jobs.
 // Returns nil if threat detection is not configured.
-func (c *Compiler) buildDetectionJob(data *WorkflowData) (*Job, error) {
+func (c *Compiler) buildDetectionJob(data *WorkflowData) (*Job, error) { //nolint:largefunc // Keep detection job assembly and its ordered setup steps together.
 	threatLog.Print("Building separate detection job")
 	if data.SafeOutputs == nil || data.SafeOutputs.ThreatDetection == nil {
 		threatLog.Print("Threat detection not configured, skipping detection job")
@@ -42,7 +42,7 @@ func (c *Compiler) buildDetectionJob(data *WorkflowData) (*Job, error) {
 		// Detection job depends on agent job; reuse the agent's trace ID so all jobs share one OTLP trace
 		detectionTraceID := fmt.Sprintf("${{ needs.%s.outputs.setup-trace-id }}", constants.ActivationJobName)
 		detectionParentSpanID := setupParentSpanNeedsExpr(constants.ActivationJobName)
-		steps = append(steps, c.generateSetupStep(data, setupActionRef, SetupActionDestination, false, detectionTraceID, detectionParentSpanID)...)
+		steps = append(steps, c.generateSetupStepForJob("detection", data, setupActionRef, SetupActionDestination, false, detectionTraceID, detectionParentSpanID, "")...)
 	}
 
 	// Download the activation artifact first because it is the durable source of the
@@ -64,7 +64,7 @@ func (c *Compiler) buildDetectionJob(data *WorkflowData) (*Job, error) {
 	steps = append(steps, c.buildWorkspaceCheckoutForDetectionStep(data)...)
 
 	// Add all threat detection steps
-	detectionStepsContent := c.buildDetectionJobSteps(data)
+	detectionStepsContent := c.buildDetectionJobSteps(data, steps...)
 	steps = append(steps, detectionStepsContent...)
 
 	// Build job outputs
@@ -72,6 +72,7 @@ func (c *Compiler) buildDetectionJob(data *WorkflowData) (*Job, error) {
 		"detection_success":    "${{ steps.detection_conclusion.outputs.success }}",
 		"detection_conclusion": "${{ steps.detection_conclusion.outputs.conclusion }}",
 		"detection_reason":     "${{ steps.detection_conclusion.outputs.reason }}",
+		"run_detection":        "${{ steps.detection_guard.outputs.run_detection }}",
 		"aic":                  "${{ steps.parse_detection_token_usage.outputs.aic }}",
 	}
 
@@ -80,14 +81,14 @@ func (c *Compiler) buildDetectionJob(data *WorkflowData) (*Job, error) {
 
 	// Scan the effective detection engine env values for needs.<customJob>.outputs.*
 	// expressions and add the referenced custom jobs as direct dependencies of the
-	// detection job. Use the merged env (main + detection-specific overrides) so
+	// detection job. Use the effective env (same-engine inheritance + detection-specific overrides) so
 	// that expressions from the main engine.env are not missed when a detection
 	// engine config exists.
 	var detectionSpecificEnv map[string]string
 	if data.SafeOutputs != nil && data.SafeOutputs.ThreatDetection != nil && data.SafeOutputs.ThreatDetection.EngineConfig != nil {
 		detectionSpecificEnv = data.SafeOutputs.ThreatDetection.EngineConfig.Env
 	}
-	effectiveDetectionEnv := mergeThreatDetectionEngineEnv(data, detectionSpecificEnv)
+	effectiveDetectionEnv := mergeThreatDetectionEngineEnv(data, c.getThreatDetectionEngineID(data), detectionSpecificEnv)
 	if len(effectiveDetectionEnv) > 0 {
 		var engineEnvBuilder strings.Builder
 		for _, envValue := range effectiveDetectionEnv {

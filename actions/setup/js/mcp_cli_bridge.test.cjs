@@ -78,6 +78,47 @@ describe("mcp_cli_bridge.cjs", () => {
     });
   });
 
+  it.each(["", " \t\n"])("omits blank optional safeoutputs flags before coercion (%j)", blank => {
+    const properties = {
+      stack_position: { type: ["number", "string"] },
+      stack_root: { type: "string" },
+      labels: { type: "array" },
+      draft: { type: "boolean" },
+      body: { type: "string" },
+      line: { type: "number" },
+    };
+    const options = { omitBlankOptionalFields: true, requiredFields: ["line"] };
+    for (const flags of [
+      ["--stack_position", blank, "--stack-root", blank, "--labels", blank, "--draft", blank, "--body", "", "--line", blank],
+      [`--stack_position=${blank}`, `--stack_root=${blank}`, `--labels=${blank}`, `--draft=${blank}`, "--body=", `--line=${blank}`],
+    ]) {
+      expect(parseToolArgs(flags, properties, null, options).args).toEqual({ body: "", line: blank });
+    }
+  });
+
+  it("normalizes blank safeoutputs fields in JSON and per-field stdin modes", () => {
+    const properties = { stack_position: { type: "number" }, body: { type: "string" } };
+    const options = { omitBlankOptionalFields: true };
+    const payload = '{"stack_position":"","body":""}';
+    expect(parseToolArgs([payload], properties, null, options).args).toEqual({ body: "" });
+    expect(parseToolArgs(["."], properties, payload, options).args).toEqual({ body: "" });
+    expect(parseToolArgs(["--stack_position", "."], properties, payload, options).args).toEqual({});
+    expect(parseToolArgs(["--stack_position", "3", "--stack_position", ""], properties, null, options).args).toEqual({ stack_position: 3 });
+  });
+
+  it("preserves blank arbitrary-JSON values in safeoutputs CLI inputs", () => {
+    const properties = { value: { type: ["object", "array", "string", "number", "boolean", "null"], "x-preserve-blank": true } };
+    const options = { omitBlankOptionalFields: true };
+    expect(parseToolArgs(['{"operation":"append","value":""}'], properties, null, options).args).toEqual({ operation: "append", value: "" });
+  });
+
+  it("rejects partially malformed safeoutputs flags instead of silently dropping positional payloads", () => {
+    expect(() => parseToolArgs(["--message", "done", "private payload"], { message: { type: "string" } }, null, { rejectPositionalArguments: true })).toThrow(
+      "Unexpected positional argument. Pass a single quoted JSON object or use --key value flags."
+    );
+    expect(parseToolArgs(["--message", "done"], { message: { type: "string" } }, null, { rejectPositionalArguments: true }).args).toEqual({ message: "done" });
+  });
+
   it("maps dashed arg names to underscored schema keys", () => {
     const schemaProperties = {
       issue_number: { type: "integer" },
@@ -488,7 +529,7 @@ describe("mcp_cli_bridge.cjs", () => {
       );
 
       const files = fs.readdirSync(auditDir);
-      expect(files).toEqual(["server_.._name.jsonl"]);
+      expect(files).toEqual(["server_.._name.audit.jsonl"]);
       const logPath = path.join(auditDir, files[0]);
       const record = JSON.parse(fs.readFileSync(logPath, "utf8"));
       expect(record).toMatchObject({
@@ -510,10 +551,36 @@ describe("mcp_cli_bridge.cjs", () => {
     }
   });
 
+  it("redacts safeoutputs audit logs without interpreting them as executable messages", () => {
+    const { processFile } = require("./redact_secrets.cjs");
+    const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-audit-"));
+    try {
+      ensureAuditDir(auditDir);
+      auditLog("safeoutputs", { event: "call_start", tool: "private-tool", argumentBytes: 42 }, auditDir);
+      const logPath = path.join(auditDir, "safeoutputs.audit.jsonl");
+
+      expect(processFile(logPath, ["private-tool"])).toBe(1);
+
+      expect(JSON.parse(fs.readFileSync(logPath, "utf8"))).toMatchObject({
+        server: "safeoutputs",
+        event: "call_start",
+        tool: "***REDACTED***",
+        argumentBytes: 42,
+      });
+      expect(fs.existsSync(path.join(auditDir, "safeoutputs.jsonl"))).toBe(false);
+      expect(fs.statSync(logPath).mode & 0o777).toBe(0o600);
+      expect(global.core.setFailed).not.toHaveBeenCalled();
+      expect(global.core.warning).not.toHaveBeenCalled();
+      expect(global.core.info).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(auditDir, { recursive: true, force: true });
+    }
+  });
+
   it("removes audit records older than the 24-hour retention window", () => {
     const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-audit-"));
-    const staleLog = path.join(auditDir, "stale.jsonl");
-    const currentLog = path.join(auditDir, "current.jsonl");
+    const staleLog = path.join(auditDir, "stale.audit.jsonl");
+    const currentLog = path.join(auditDir, "current.audit.jsonl");
     try {
       fs.writeFileSync(staleLog, "{}\n");
       fs.writeFileSync(currentLog, "{}\n");
@@ -625,6 +692,21 @@ describe("mcp_cli_bridge.cjs", () => {
 
     expect(stderrChunks.join("")).toContain("Progress: 2/5");
     expect(stdoutChunks.join("")).toBe("ok\n");
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("recovers adjacent SSE records after malformed data without treating framing as JSON", async () => {
+    const body = [
+      "event: message",
+      'data: {"broken":}',
+      'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"message":"working"}}',
+      ' data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"ignored"}]}}',
+      'data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"recovered"}]}}',
+      "data: [DONE]",
+    ].join("\r\n");
+    await formatResponse(body, "agenticworkflows");
+    expect(stderrChunks.join("")).toContain("working");
+    expect(stdoutChunks.join("")).toBe("recovered\n");
     expect(process.exitCode).toBe(0);
   });
 
@@ -783,6 +865,24 @@ describe("mcp_cli_bridge.cjs", () => {
     expect(output).toContain("--field_2*");
   });
 
+  it("documents inline JSON escaping and stdin without helper recommendations", () => {
+    showToolHelp("safeoutputs", "add_comment", [
+      {
+        name: "add_comment",
+        inputSchema: {
+          properties: { item_number: { type: "integer" }, body: { type: "string" } },
+          required: ["item_number", "body"],
+        },
+      },
+    ]);
+    const output = stdoutChunks.join("");
+    expect(output).toContain("Stdin is also supported");
+    expect(output).toContain("reads a JSON object");
+    expect(output).toContain("\\u0027");
+    expect(output).not.toMatch(/\bjq\b|\bnode\b|printf|<<|payload\.json/);
+    expect(output).toMatch(/Recommended:\nsafeoutputs add_comment '\{/);
+  });
+
   it("does not truncate command help when options exactly fit the line budget", () => {
     const properties = {};
     for (let i = 1; i <= 13; i++) {
@@ -903,6 +1003,87 @@ describe("mcp_cli_bridge.cjs", () => {
 
       try {
         expect(() => readStdinSync()).toThrow(/EIO/);
+      } finally {
+        readSyncSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("stdin JSON reads", () => {
+    it("treats an empty implicit pipe as no input", () => {
+      const readSyncSpy = vi.spyOn(fs, "readSync").mockImplementation(() => {
+        throw Object.assign(new Error("resource temporarily unavailable"), { code: "EAGAIN" });
+      });
+      try {
+        expect(readStdinSync()).toBe("");
+      } finally {
+        readSyncSpy.mockRestore();
+      }
+    });
+
+    it("retries an initial interrupted read before receiving implicit JSON stdin", () => {
+      const payload = Buffer.from(JSON.stringify({ body: "input after EINTR" }));
+      let callCount = 0;
+      const readSyncSpy = vi.spyOn(fs, "readSync").mockImplementation((_fd, buf, _offset, length) => {
+        callCount += 1;
+        if (callCount === 1) {
+          throw Object.assign(new Error("interrupted system call"), { code: "EINTR" });
+        }
+        if (callCount === 2) {
+          throw Object.assign(new Error("resource temporarily unavailable"), { code: "EAGAIN" });
+        }
+        if (callCount === 3) {
+          payload.copy(buf, 0, 0, payload.length);
+          return payload.length;
+        }
+        return 0;
+      });
+
+      try {
+        expect(parseToolArgs(["."], { body: { type: "string" } }, readStdinSync()).args.body).toBe("input after EINTR");
+        expect(callCount).toBe(4);
+      } finally {
+        readSyncSpy.mockRestore();
+      }
+    });
+
+    it.each([0, 1, 1543, 4004, 65537, 1024 * 1024, 10 * 1024 * 1024 - 32])("reads a %i-byte body completely", bodySize => {
+      const payload = JSON.stringify({ body: "x".repeat(bodySize) });
+      const bytes = Buffer.from(payload);
+      let offset = 0;
+      const readSyncSpy = vi.spyOn(fs, "readSync").mockImplementation((_fd, buf, _offset, length) => {
+        const count = Math.min(length, bytes.length - offset, offset === 0 ? 997 : 8191);
+        bytes.copy(buf, 0, offset, offset + count);
+        offset += count;
+        return count;
+      });
+
+      try {
+        expect(parseToolArgs(["."], { body: { type: "string" } }, readStdinSync()).args.body).toBe("x".repeat(bodySize));
+        expect(offset).toBe(Buffer.byteLength(payload));
+      } finally {
+        readSyncSpy.mockRestore();
+      }
+    });
+
+    it("waits for the rest of a JSON payload after a transient nonblocking read", () => {
+      const payload = Buffer.from(JSON.stringify({ body: "x".repeat(4004) }));
+      let offset = 0;
+      let paused = false;
+      const readSyncSpy = vi.spyOn(fs, "readSync").mockImplementation((_fd, buf, _offset, length) => {
+        if (offset === 1543 && !paused) {
+          paused = true;
+          throw Object.assign(new Error("resource temporarily unavailable"), { code: "EAGAIN" });
+        }
+        const count = Math.min(length, payload.length - offset, offset === 0 ? 1543 : length);
+        payload.copy(buf, 0, offset, offset + count);
+        offset += count;
+        return count;
+      });
+
+      try {
+        expect(parseToolArgs(["."], { body: { type: "string" } }, readStdinSync()).args.body).toBe("x".repeat(4004));
+        expect(paused).toBe(true);
       } finally {
         readSyncSpy.mockRestore();
       }
@@ -1852,8 +2033,8 @@ describe("mcp_cli_bridge.cjs", () => {
 
       const toolsCallBody = recordedBodies.find(b => b.method === "tools/call");
       expect(toolsCallBody).toBeUndefined();
-      expect(stderrChunks.join("")).toContain("no arguments were recognized for 'create_issue'");
-      expect(global.core.setFailed).toHaveBeenCalledWith(expect.stringContaining("no arguments were recognized"));
+      expect(stderrChunks.join("")).toContain("Unexpected positional argument");
+      expect(global.core.setFailed).toHaveBeenCalledWith(expect.stringContaining("use --key value flags"));
     });
 
     it("fails when --json accompanies an unrecognized positional argument", async () => {
@@ -1863,7 +2044,18 @@ describe("mcp_cli_bridge.cjs", () => {
 
       const toolsCallBody = recordedBodies.find(b => b.method === "tools/call");
       expect(toolsCallBody).toBeUndefined();
-      expect(global.core.setFailed).toHaveBeenCalledWith(expect.stringContaining("no arguments were recognized"));
+      expect(global.core.setFailed).toHaveBeenCalledWith(expect.stringContaining("Unexpected positional argument"));
+    });
+
+    it("rejects stray positional arguments even alongside recognized flags and records the cause", async () => {
+      setupMainCall(requiredInputTools, ["create_issue", "--title", "valid title", "private payload"]);
+      await main();
+      expect(recordedBodies.find(b => b.method === "tools/call")).toBeUndefined();
+      expect(stderrChunks.join("")).toContain("use --key value flags");
+      expect(stderrChunks.join("")).not.toContain("private payload");
+      const audit = fs.readFileSync("/tmp/gh-aw/mcp-cli-audit/safeoutputs.audit.jsonl", "utf8");
+      expect(audit).toContain('"event":"parse_args_error"');
+      expect(audit).not.toContain("private payload");
     });
 
     it("still shows help for no-flag piped stdin when stdin is truly empty", async () => {

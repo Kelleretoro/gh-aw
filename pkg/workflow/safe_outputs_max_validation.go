@@ -258,12 +258,12 @@ func validateSafeOutputsMax(config *SafeOutputsConfig) error {
 		}
 	}
 	if config.MissingData != nil {
-		if err := checkMaxField("missing_data", config.MissingData.Max); err != nil {
+		if err := checkMaxField("report_missing_data", config.MissingData.Max); err != nil {
 			return err
 		}
 	}
 	if config.MissingTool != nil {
-		if err := checkMaxField("missing_tool", config.MissingTool.Max); err != nil {
+		if err := checkMaxField("report_missing_tool", config.MissingTool.Max); err != nil {
 			return err
 		}
 	}
@@ -279,6 +279,11 @@ func validateSafeOutputsMax(config *SafeOutputsConfig) error {
 	}
 	if config.RemoveLabels != nil {
 		if err := checkMaxField("remove_labels", config.RemoveLabels.Max); err != nil {
+			return err
+		}
+	}
+	if config.ReportIncomplete != nil {
+		if err := checkMaxField("report_incomplete", config.ReportIncomplete.Max); err != nil {
 			return err
 		}
 	}

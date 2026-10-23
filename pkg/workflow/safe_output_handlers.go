@@ -632,15 +632,17 @@ var safeOutputHandlers = []safeOutputHandlerDescriptor{
 		NewConfig:   func() any { return &CallWorkflowConfig{} },
 	},
 	{
-		Key:         "missing-tool",
+		Key:         "report-missing-tool",
+		Aliases:     []string{"missing-tool"},
 		StructField: "MissingTool",
-		ToolName:    "missing_tool",
+		ToolName:    "report_missing_tool",
 		Builtin:     true,
 	},
 	{
-		Key:         "missing-data",
+		Key:         "report-missing-data",
+		Aliases:     []string{"missing-data"},
 		StructField: "MissingData",
-		ToolName:    "missing_data",
+		ToolName:    "report_missing_data",
 		Builtin:     true,
 	},
 	{
@@ -676,6 +678,8 @@ var safeOutputHandlers = []safeOutputHandlerDescriptor{
 	{
 		Key:         "report-incomplete",
 		StructField: "ReportIncomplete",
+		ToolName:    "report_incomplete",
+		Builtin:     true,
 		PermissionBuilder: func(safeOutputs *SafeOutputsConfig) *Permissions {
 			if !isSafeOutputHandlerEnabledAndUnstaged(safeOutputs, "ReportIncomplete") || safeOutputs.ReportIncomplete == nil {
 				return nil

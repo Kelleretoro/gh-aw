@@ -26,7 +26,7 @@ func steeringIssueFallbackToken(data *WorkflowData) string {
 	return resolveSafeOutputGitHubToken(data.SafeOutputs.GitHubToken)
 }
 
-func (c *Compiler) buildSteeringIssueTokenSteps(data *WorkflowData, app *GitHubAppConfig, permissions *Permissions, stepName string, stepID string) ([]string, string) {
+func (c *Compiler) buildSteeringIssueTokenSteps(data *WorkflowData, jobName string, app *GitHubAppConfig, permissions *Permissions, stepName string, stepID string) ([]string, string) {
 	token := steeringIssueFallbackToken(data)
 	if app == nil {
 		return nil, token
@@ -34,7 +34,7 @@ func (c *Compiler) buildSteeringIssueTokenSteps(data *WorkflowData, app *GitHubA
 
 	var steps []string
 	if stepName != "" {
-		steps = c.buildGitHubAppTokenMintStepWithMeta(app, permissions, "", "", stepName, stepID)
+		steps = c.buildGitHubAppTokenMintStepForJob(jobName, app, permissions, "", "", stepName, stepID)
 	}
 	appToken := fmt.Sprintf("${{ steps.%s.outputs.token }}", stepID)
 	if app.shouldIgnoreMissingKey() {
@@ -51,6 +51,7 @@ func (c *Compiler) addActivationSteeringIssueStep(ctx *activationJobBuildContext
 	permissions := NewPermissionsFromMap(map[PermissionScope]PermissionLevel{PermissionIssues: PermissionWrite})
 	tokenSteps, token := c.buildSteeringIssueTokenSteps(
 		ctx.data,
+		"activation",
 		steeringIssueApp(ctx.data),
 		permissions,
 		"Generate GitHub App token (create steering issue)",
@@ -63,7 +64,20 @@ func (c *Compiler) addActivationSteeringIssueStep(ctx *activationJobBuildContext
 		"        id: create-steering-issue\n",
 		fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", ctx.data)),
 		"        env:\n",
-		fmt.Sprintf("          GH_AW_WORKFLOW_NAME: %q\n", ctx.data.Name),
+	)
+	ctx.steps = append(ctx.steps, buildWorkflowMetadataEnvVarsWithTrackerID(ctx.data.Name, ctx.data.Source, ctx.data.TrackerID, buildLocalWorkflowSourceURL(c.markdownPath))...)
+	ctx.steps = append(ctx.steps,
+		fmt.Sprintf("          GH_AW_WORKFLOW_ID: %q\n", ctx.data.WorkflowID),
+		"          GH_AW_ENGINE_ID: ${{ steps.generate_aw_info.outputs.engine_id }}\n",
+	)
+	if ctx.data.EngineConfig == nil || ctx.data.EngineConfig.ModelRouting == nil {
+		ctx.steps = append(ctx.steps, "          GH_AW_ENGINE_MODEL: ${{ steps.generate_aw_info.outputs.model }}\n")
+	}
+	if ctx.data.EngineConfig != nil && ctx.data.EngineConfig.Version != "" {
+		ctx.steps = append(ctx.steps, fmt.Sprintf("          GH_AW_ENGINE_VERSION: %q\n", ctx.data.EngineConfig.Version))
+	}
+	addActivationSafeOutputMessagesEnv(ctx)
+	ctx.steps = append(ctx.steps,
 		"        with:\n",
 		fmt.Sprintf("          github-token: %s\n", token),
 		"          script: |\n",
@@ -81,7 +95,7 @@ func (c *Compiler) buildConclusionSteeringIssueTokenSteps(data *WorkflowData) ([
 	app := steeringIssueApp(data)
 	stepID := "safe-outputs-app-token"
 	stepName := ""
-	return c.buildSteeringIssueTokenSteps(data, app, NewPermissionsFromMap(map[PermissionScope]PermissionLevel{PermissionIssues: PermissionWrite}), stepName, stepID)
+	return c.buildSteeringIssueTokenSteps(data, "conclusion", app, NewPermissionsFromMap(map[PermissionScope]PermissionLevel{PermissionIssues: PermissionWrite}), stepName, stepID)
 }
 
 func (c *Compiler) buildConclusionSteeringIssueStep(data *WorkflowData, mainJobName, token string) []string {

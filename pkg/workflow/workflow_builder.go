@@ -13,14 +13,31 @@ import (
 
 var workflowBuilderLog = logger.New("workflow:workflow_builder")
 
+// ParseStaleCheckMode returns whether stale checks are disabled or use full body checking.
+func ParseStaleCheckMode(frontmatter map[string]any) (disabled, full bool) {
+	on, ok := frontmatter["on"].(map[string]any)
+	if !ok {
+		return false, false
+	}
+	switch staleCheck := on["stale-check"].(type) {
+	case bool:
+		return !staleCheck, false
+	case string:
+		return false, staleCheck == "full"
+	default:
+		return false, false
+	}
+}
+
 // buildInitialWorkflowData creates the initial WorkflowData struct with basic fields populated.
 func (c *Compiler) buildInitialWorkflowData(
 	result *parser.FrontmatterResult,
 	toolsResult *toolsProcessingResult,
 	engineSetup *engineSetupResult,
 	importsResult *parser.ImportsResult,
-) *WorkflowData {
+) (*WorkflowData, error) {
 	workflowBuilderLog.Print("Building initial workflow data")
+	_, subAgents, _ := parser.ExtractInlineSubAgents(result.Markdown)
 
 	inlinedImports := resolveInlinedImports(result.Frontmatter)
 
@@ -36,12 +53,15 @@ func (c *Compiler) buildInitialWorkflowData(
 	if docs == "" {
 		docs = importsResult.MergedMetadataDocs
 	}
+	dailyCredits, dailyCreditsExplicit := resolveMaxDailyAICWithSource(result.Frontmatter, importsResult.MergedMaxDailyAICredits)
 
 	workflowData := &WorkflowData{
 		Name:                       toolsResult.workflowName,
+		AdmissionEnabled:           c.isAdmissionEnabled(result.Frontmatter),
 		FrontmatterName:            toolsResult.frontmatterName,
 		FrontmatterEmoji:           toolsResult.frontmatterEmoji,
 		FrontmatterYAML:            strings.Join(result.FrontmatterLines, "\n"),
+		ActionPinSourceVersions:    sourceActionPinVersions(result, importsResult.ActionPinSourceVersions),
 		FrontmatterFieldLines:      result.FieldLines,
 		RawMarkdown:                result.Markdown,
 		Description:                c.extractDescription(result.Frontmatter),
@@ -50,7 +70,8 @@ func (c *Compiler) buildInitialWorkflowData(
 		Source:                     c.extractSource(result.Frontmatter),
 		Redirect:                   c.extractRedirect(result.Frontmatter),
 		TrackerID:                  toolsResult.trackerID,
-		MaxDailyAICredits:          resolveMaxDailyAIC(result.Frontmatter, importsResult.MergedMaxDailyAICredits),
+		MaxDailyAICredits:          dailyCredits,
+		MaxDailyAICreditsExplicit:  dailyCreditsExplicit,
 		MaxDailyAICreditsGitHubApp: extractMaxDailyAICGitHubApp(result.Frontmatter),
 		MaxDailyAICContinueOnError: resolveMaxDailyAICContinueOnError(result.Frontmatter, importsResult.MergedMaxDailyAICredits),
 		ImportedFiles:              importsResult.ImportedFiles,
@@ -65,11 +86,14 @@ func (c *Compiler) buildInitialWorkflowData(
 		IncludedFiles:              toolsResult.allIncludedFiles,
 		ImportInputs:               importsResult.ImportInputs,
 		Tools:                      toolsResult.tools,
+		ExplicitlyDisabledTools:    toolsResult.explicitlyDisabledTools,
 		LSP:                        extractLSPConfig(toolsResult.parsedFrontmatter, result.Frontmatter),
 		ParsedTools:                NewTools(toolsResult.tools),
 		Runtimes:                   toolsResult.runtimes,
 		RunInstallScripts:          toolsResult.runInstallScripts,
 		MarkdownContent:            toolsResult.markdownContent,
+		SubAgentModels:             append(toolsResult.subAgentModels, importsResult.SubAgentModels...),
+		SubAgents:                  append(subAgents, importsResult.SubAgents...),
 		AI:                         engineSetup.engineSetting,
 		Model:                      engineSetup.model,
 		EngineConfig:               engineSetup.engineConfig,
@@ -121,7 +145,11 @@ func (c *Compiler) buildInitialWorkflowData(
 			if checkoutValue, ok := rawCheckout.(bool); ok && !checkoutValue {
 				workflowData.CheckoutDisabled = true
 				workflowData.CheckoutExplicitlyDisabled = true
-			} else if configs, err := ParseCheckoutConfigs(rawCheckout); err == nil {
+			} else {
+				configs, err := ParseCheckoutConfigs(rawCheckout)
+				if err != nil {
+					return nil, fmt.Errorf("invalid checkout configuration: %w", err)
+				}
 				workflowData.CheckoutConfigs = configs
 			}
 		}
@@ -144,13 +172,11 @@ func (c *Compiler) buildInitialWorkflowData(
 			}
 			var raw any
 			if err := json.Unmarshal([]byte(line), &raw); err != nil {
-				workflowBuilderLog.Printf("Failed to unmarshal imported checkout JSON: %v", err)
-				continue
+				return nil, fmt.Errorf("invalid imported checkout JSON: %w", err)
 			}
 			importedConfigs, err := ParseCheckoutConfigs(raw)
 			if err != nil {
-				workflowBuilderLog.Printf("Failed to parse imported checkout configs: %v", err)
-				continue
+				return nil, fmt.Errorf("invalid imported checkout configuration: %w", err)
 			}
 			workflowData.CheckoutConfigs = append(workflowData.CheckoutConfigs, importedConfigs...)
 		}
@@ -200,20 +226,12 @@ func (c *Compiler) buildInitialWorkflowData(
 		}
 	}
 
-	// Populate stale-check flag: disabled when on.stale-check: false is set in frontmatter;
-	// full mode when on.stale-check: full is set.
+	workflowData.StaleCheckDisabled, workflowData.StaleCheckFull = ParseStaleCheckMode(result.Frontmatter)
 	// Populate report-blocked-version flag: disabled when on.report-blocked-version: false is
 	// set in frontmatter (suppresses only the activation-stage notification issue, independent
 	// of check-for-updates and safe-outputs.report-failure-as-issue).
 	if onVal, ok := result.Frontmatter["on"]; ok {
 		if onMap, ok := onVal.(map[string]any); ok {
-			if staleCheck, ok := onMap["stale-check"]; ok {
-				if boolVal, ok := staleCheck.(bool); ok && !boolVal {
-					workflowData.StaleCheckDisabled = true
-				} else if strVal, ok := staleCheck.(string); ok && strVal == "full" {
-					workflowData.StaleCheckFull = true
-				}
-			}
 			if reportBlockedVersion, ok := onMap["report-blocked-version"]; ok {
 				if boolVal, ok := reportBlockedVersion.(bool); ok && !boolVal {
 					workflowData.ReportBlockedVersionDisabled = true
@@ -222,8 +240,8 @@ func (c *Compiler) buildInitialWorkflowData(
 		}
 	}
 
-	// Populate model mappings: merge builtin aliases with any imported-workflow aliases.
-	workflowData.ModelMappings = MergeImportedModelAliases(importsResult.MergedModels, nil)
+	// Populate model mappings: builtin, then imported, then main-workflow aliases (main wins).
+	workflowData.ModelMappings = MergeImportedModelAliases(importsResult.MergedModels, extractMainModelAliases(result.Frontmatter))
 
 	mainModelCosts := extractMainModelCostsOverlay(toolsResult, result.Frontmatter)
 	mergedModelCosts := mergeModelCostOverlays(importsResult.MergedModelCosts, mainModelCosts)
@@ -234,6 +252,7 @@ func (c *Compiler) buildInitialWorkflowData(
 	// from both the frontmatter overlay and the embedded models.json catalog.  The result
 	// is injected into ModelCosts so the runtime receives it via GH_AW_INFO_MODEL_COSTS.
 	workflowData.ModelCosts = c.resolveModelPricingIfMissing(workflowData.ModelCosts, workflowData)
+	workflowData.ModelCosts = c.resolveFallbackModelPricing(workflowData.ModelCosts, workflowData)
 	mainModelPolicy := extractMainModelPolicyOverlay(toolsResult, result.Frontmatter)
 	allowedModels, disallowedModels := mergeModelPolicyOverlays(importsResult.MergedModelPolicies, mainModelPolicy)
 	if len(allowedModels) > 0 {
@@ -257,5 +276,19 @@ func (c *Compiler) buildInitialWorkflowData(
 		workflowData.ExcludedEnv = names
 	}
 
-	return workflowData
+	return workflowData, nil
+}
+
+// sourceActionPinVersions collects inline labels from frontmatter and imported action steps.
+func sourceActionPinVersions(result *parser.FrontmatterResult, imported map[string]string) map[string]string {
+	versions := parser.ActionPinSourceVersions([]byte(strings.Join(result.FrontmatterLines, "\n")))
+	if versions == nil {
+		versions = make(map[string]string)
+	}
+	for reference, label := range imported {
+		if _, exists := versions[reference]; !exists {
+			versions[reference] = label
+		}
+	}
+	return versions
 }

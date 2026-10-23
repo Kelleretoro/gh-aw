@@ -1,111 +1,192 @@
 ---
 title: Graders
-description: Deterministic execution and operational value metrics
+description: Pure deterministic metrics from the unified agent session
 ---
 
-Graders compute deterministic metrics without LLM calls. Built-in and custom inline graders inspect post-agent execution traces. The reserved `operational-value` grader evaluates the current run's operational outcome under a frozen evaluator. Results are persisted in the agent artifact for downstream tools.
-
-For normative requirements, see the [Graders Specification](/gh-aw/specs/graders-specification/).
+Built-in and JavaScript graders compute metrics without model calls, file reads, subprocesses, or
+network access. Built-ins run in the **conclusion job**, after observations from
+agent execution, safe outputs, experiments, and evals have been collected and
+redacted in memory. Custom JavaScript runs only in a separate **graders job**
+after conclusion publishes that session. Repository-owned operational-value Bash
+evaluators also run only in that separate job, using a session-file interface.
 
 :::caution[Experimental]
-Graders are an experimental feature.
+Graders and their result format are experimental.
 :::
 
-## Quick start
+## Default graders
 
-```yaml
-graders: {}
-```
+No configuration is required. Omitting `graders` or setting `graders: {}` enables
+these ten fast, linear-time built-ins:
 
-An empty map enables all built-in graders with default settings. Omitting the `graders` field entirely disables grading (no step is emitted).
+| ID | Measurement |
+|---|---|
+| `tool-success-rate` | Fraction of tool calls that succeeded |
+| `tool-failure-count` | Failed or unfinished tool calls |
+| `retries` | Retry observations in main-agent MCP events |
+| `loops` | Consecutive identical tool names and arguments |
+| `trajectory-efficiency` | Unique tool names / total calls |
+| `execution-step-count` | Observed model request count |
+| `execution-duration` | Observed duration in milliseconds |
+| `working-set-rebuild-factor` | Cumulative input tokens / peak invocation input tokens |
+| `context-growth` | Total tokens / first-request tokens |
+| `artifact-production` | Number of safe-output results |
 
-## Built-in graders
+Detection and eval usage do not count toward main-agent execution statistics.
+Native tool calls take precedence over duplicate gateway records, and proxy
+token telemetry takes precedence over aggregate usage. Missing required
+evidence yields `unavailable` rather than an invented score.
 
-| ID | Description | Value |
-|---|---|---|
-| `tool-success-rate` | Fraction of tool calls that succeeded | 0–1 |
-| `tool-failure-count` | Number of failed tool calls | integer |
-| `retries` | Count of retry events in MCP gateway logs | integer |
-| `loops` | Consecutive identical tool calls (same name + args) | integer |
-| `trajectory-efficiency` | Unique tool names / total tool calls | 0–1 |
-| `execution-step-count` | Total LLM request count | integer |
-| `execution-duration` | Total execution duration (ms) | integer |
-| `working-set-rebuild-factor` | Cumulative input tokens / peak invocation input tokens | ≥1 |
-| `context-growth` | Total tokens / first-request tokens | ≥1 |
-| `artifact-production` | Count of outputs in agent_output.json | integer |
+## Configuration
 
-## Selective configuration
-
-Disable a specific built-in:
+Override thresholds, disable defaults, or enable additional registered built-ins:
 
 ```yaml
 graders:
   loops:
     enabled: false
+  tool-success-rate:
+    threshold: 0.95
+  skill-constraint-coverage:
+    config:
+      constraints:
+        - id: uses-docs-skill
+          pattern: "skill .*documentation"
 ```
 
-## Custom inline graders
+Supported fields are `enabled`, `name`, `description`, `unit`, `direction`,
+`threshold`, `min`, `max`, and `config`. Disabling every default is valid.
+Custom IDs additionally require `script`. Built-in implementations cannot be
+overridden. Only the reserved `operational-value` ID accepts a Bash `run` path
+instead of JavaScript `script`.
 
-Add a trusted inline JavaScript expression that receives the preprocessed `trace` object:
+## Custom JavaScript
+
+Use a distinct ID and a synchronous JavaScript body:
 
 ```yaml
 graders:
-  bash-calls:
-    script: "return trace.toolCalls.filter(t => t.name === 'bash').length"
-```
-
-Custom scripts must return a value and stay within 4096 characters (no `require`, `import`, `fetch`, `eval`, or `process.exit`).
-
-`trace.toolCalls` merges native agent tool calls parsed from the Copilot `events.jsonl` session log with the MCP gateway records. Native entries always expose `name` and `source: "agent"`, plus `arguments`, `toolCallId`, `mcpServerName`, and `mcpToolName` when the underlying event provides them, so built-in tools such as `skill` are visible to graders. A matching `tool.execution_complete` event sets `success` and `completed: true`; calls that never complete keep `completed: false` and no `success` value, and are scored as failures by the built-in `tool-success-rate` and `tool-failure-count` graders. Gateway records that duplicate a native call (same tool name and arguments) are dropped, and `trace.nativeToolCalls` holds the native records on their own.
-
-## Operational value grader
-
-Configure the reserved `operational-value` grader with either inline Bash:
-
-```aw wrap
-graders:
-  operational-value:
-    name: Maintainer Time Saved
-    description: Maintainer effort avoided by the current run's accepted outcome
-    unit: hours
+  documentation-reads:
+    unit: calls
     direction: higher_is_better
+    threshold: 1
     script: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      request=$(cat)
-      printf '%s\n' '[{"id":"maintainer-hours-saved","value":2.5}]'
+      const { toolCalls } = helpers.createSessionLookups(session);
+      return toolCalls.filter(call => call.name === "view").length;
 ```
 
-or a repository-relative Bash evaluator:
+Scripts receive `session`, `config`, and `helpers.createSessionLookups(session)`.
+The helper exposes `stats`, `eventsOfType(type)`, `toolCalls`, scoped
+`toolCallsById`, and a session-derived trajectory projection (`trace`).
+Inputs are immutable snapshots. Return a finite number, `null` for unavailable
+evidence, or an object with `value` and optional `message`, `details`, and
+`diagnostics`. Async results are rejected. Scripts are limited to 256 KiB.
 
-```aw wrap
+The compiler generates a fresh hosted job with read-only repository access,
+no inherited deployment environment, and no inference, App, or OIDC credentials.
+Each script runs in its own restricted Node process with an empty environment,
+bounded memory/output, a five-second VM timeout, and a seven-second process
+timeout. File, network, process, clock, random, module, and timer APIs are not
+exposed. A VM alone is not a security boundary; job and process isolation also
+limit authority. Work-queue participant workflows do not publish this input and
+cannot register custom graders.
+
+Conclusion receives only custom IDs, never executable grader source.
+User-provided conclusion steps and customization of `jobs.graders` are rejected.
+
+## Operational-value Bash
+
+Reuse a repository-owned evaluator after replacing its old stdin request with
+the unified-session JSONL file:
+
+```yaml
 graders:
   operational-value:
-    name: File Diet Decision Conformance
-    description: Whether the run requested the correct refactoring issue or noop
-    unit: ratio
-    direction: higher_is_better
-    run: .github/graders/daily-file-diet-operational-value.sh
+    run: .github/graders/score.sh
 ```
 
-Specify exactly one of `script` or `run`. Give the primary metric a concise `name`, `description`, `unit`, and `direction`; its description is retained in grader artifacts. Document every emitted metric in evaluator comments so its meaning is frozen with the evaluator bytes. The compiler records the evaluator's SHA-256 digest and packages its exact bytes with the run.
+```bash title=".github/graders/score.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+session_file=$1 # Also available as GH_AW_SESSION_FILE.
+jq -s '[{id: "recorded-tool-failures", value:
+  ([.[] | select(.type == "tool.execution_complete" and .data.success == false)] | length)
+}]' "$session_file"
+```
 
-The evaluator runs once with no arguments. It reads a request containing `schemaVersion`, `run`, `event`, `outputs`, and `config` from standard input. `outputs` contains the current run's validated safe-output requests; those requests do not prove that their GitHub mutations were applied. The evaluator writes one non-empty ordered array of `{id,value}` metrics. The first metric is primary; later metrics are diagnostics. Values are finite numbers or `null`. Numeric values retain their native scale; gh-aw does not normalize, clamp, or convert them to pass/fail. Use `unit` and `direction` to describe their meaning.
+This diagnostic example measures recorded failures, not semantic task success.
+Configuration is JSON in `GH_AW_GRADER_CONFIG`. Stdin is empty. Keep existing
+nonempty `[{id,value}, ...]` output: the first metric becomes the primary
+`operational-value` value; subsequent metrics remain diagnostics. Use `null`
+when required evidence is absent.
 
-Evaluators receive `GH_TOKEN` with the agent job's explicitly declared permissions, but no workflow secrets, and enabling the grader does not add evidence permissions to the agent job.
+`run` is a repository-root-relative `.sh` file path, not an inline shell command.
+`./` paths are relative to the declaring workflow. Source must be UTF-8, have a
+Bash shebang, and fit within 64 KiB. The compiler freezes it into the separate
+job, so runtime checkout is unnecessary. `gh aw add` and packages install the
+referenced evaluator resource.
 
-Use the `operational value designer` skill (`/operational-value-designer`) to infer operational value from an agentic workflow and design and verify an operational-value evaluator.
+The runtime starts Bash without profiles or inherited credentials, in a temporary
+working directory, with a 120-second deadline and 1 MiB output limit. Compilation
+and the default `grader-shell-file-write` linter reject detected file writes and
+unchecked dynamic execution. Read the session, compute in memory, and print metrics;
+remove temporary-file writes, checkout/API fetches, and mutation commands.
 
-## Output files
+> [!CAUTION]
+> Shell evaluators are trusted repository code, not a filesystem/network sandbox.
+> Static write detection cannot prove arbitrary shell safety. MicroVM isolation
+> is future work. Never evaluate session text as shell code or claim missing
+> evidence was observed.
+
+## Opt-in trajectory graders
+
+These built-ins are not enabled by default:
+
+| Family | IDs |
+|---|---|
+| Policy and constraints | `policy-near-miss`, `skill-constraint-coverage` |
+| Exploration | `exploration-error`, `exploitation-error` |
+| Recurrence | `state-revisit-probability-rep`, `recurrence-rate`, `recurrence-determinism`, `recurrence-laminarity`, `recurrence-trapping-time` |
+| Sequence complexity | `event-entropy-rate`, `lempel-ziv-trajectory-complexity` |
+| Provenance | `tool-output-consumption-rate`, `end-to-end-lineage-completeness`, `action-provenance-coverage` |
+| Objectives | `premature-termination-gap`, `evidence-saturation-stopping-lag`, `dependency-order-violation-rate`, `objective-coverage`, `grounding-accuracy` |
+| Reference comparison | `tool-wise-score`, `trajectory-ndtw`, `code-search-recall`, `code-read-precision`, `code-edit-precision` |
+| Process model | `process-alignment-fitness` |
+
+All use the same in-memory session interface. Internal projections cannot add
+evidence absent from that session: analyses needing objectives, state,
+references, or lineage report `unavailable` when those observations are missing.
+Trajectory collections are bounded to 5,000 items for expensive analyses.
+Importable fragments under `.github/workflows/shared/graders/` configure these
+built-ins; they do not contain executable custom code.
+
+## Output and replay
+
+The `usage` artifact contains:
 
 | File | Description |
 |---|---|
-| `grader_manifest.json` | Which graders were configured and their enabled state |
-| `grader_results.json` | Validated raw values, status, implementation identity, and ordered operational-value metrics |
-| `operational_value_evaluator.sh` | Exact frozen operational-value evaluator used for this run |
+| `graders/grader_manifest.json` | Effective built-ins, metadata, thresholds, and enabled states |
+| `graders/grader_results.json` | Numeric or unavailable results, status, and implementation identity |
+| `aw_session.jsonl` | Unified session including conclusion-provenance grader manifest and results |
 
-All files are included in the unified `agent` artifact.
+The collector passes the redacted session array directly to `computeGraders`.
+`createSessionLookups` provides shared event-type lookups, correlated tool calls,
+and concrete accounting statistics. Pure graders never reread the persisted session
+or source logs.
 
-## Execution
+When custom graders are registered, the separate `graders` artifact contains a
+combined manifest and results, preserving built-in outcomes. Executable source
+is omitted from this artifact. Audit automatically downloads it when the usage
+manifest registers custom IDs, including for `--artifacts usage` and cached
+reports. If it is not available, audit retains built-in results. Download
+failures are reported rather than hidden.
 
-The graders step runs as an `if: always()` post-agent step in the existing agent job, after log parsing and before the unified artifact upload. It uses a single preprocessing pass over trace files shared by all graders.
+Replay one enabled built-in or custom grader using the same implementation:
+
+```bash
+gh aw graders run weekly-research loops 123456789
+cat aw_session.jsonl | gh aw graders run weekly-research loops
+```
+
+For normative requirements, see the [Graders Specification](/gh-aw/specs/graders-specification/).

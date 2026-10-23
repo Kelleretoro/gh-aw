@@ -3,14 +3,46 @@
 package workflow
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/workflow/compilerenv"
+	"github.com/goccy/go-yaml"
 )
+
+func TestBuildSetupEvalsStepEscapesQuestionData(t *testing.T) {
+	questions := []EvalDefinition{
+		{ID: `id'"\\;$(touch /tmp/pwned)`, Question: "line one\nline two; `echo unsafe`"},
+	}
+	data := &WorkflowData{Evals: &EvalsConfig{Questions: questions}}
+
+	var steps []struct {
+		Env map[string]string `yaml:"env"`
+	}
+	if err := yaml.Unmarshal([]byte(strings.Join(NewCompiler().buildSetupEvalsStep(data), "")), &steps); err != nil {
+		t.Fatalf("generated evals step should be valid YAML: %v", err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("expected one setup step, got %d", len(steps))
+	}
+
+	var decoded []struct {
+		ID       string `json:"id"`
+		Question string `json:"question"`
+	}
+	if err := json.Unmarshal([]byte(steps[0].Env["GH_AW_EVALS_QUESTIONS"]), &decoded); err != nil {
+		t.Fatalf("evals question environment value should be valid JSON: %v", err)
+	}
+	if len(decoded) != 1 || decoded[0].ID != questions[0].ID || decoded[0].Question != questions[0].Question {
+		t.Fatalf("evals question data changed during serialization: got %#v", decoded)
+	}
+}
 
 func TestDailyAICEvalsAccountingTransport(t *testing.T) {
 	compiler := NewCompiler()
@@ -29,7 +61,7 @@ func TestDailyAICEvalsAccountingTransport(t *testing.T) {
 			t.Errorf("evals accounting transport missing %q", expected)
 		}
 	}
-	usage := strings.Join(buildUsageArtifactUploadSteps("", true, func(action string) string { return action }), "")
+	usage := strings.Join(buildUsageArtifactUploadSteps("", true, "", false, func(action string) string { return action }), "")
 	if !strings.Contains(usage, "/tmp/gh-aw/usage/evals/token_usage.jsonl") {
 		t.Fatal("conclusion must publish evals token usage")
 	}
@@ -70,6 +102,55 @@ func TestEvalsExecutionEvidence(t *testing.T) {
 	}
 }
 
+func TestEvalsOTLPEnvExcludedFromSandbox(t *testing.T) {
+	for _, engineID := range []string{"copilot", "claude", "codex", "pi"} {
+		for _, tt := range []struct {
+			name   string
+			env    string
+			dryRun bool
+			want   bool
+		}{
+			{name: "configured endpoint", env: "env:\n  OTEL_EXPORTER_OTLP_ENDPOINT: https://traces.example.com\n", want: true},
+			{name: "multiple endpoints", env: "env:\n  GH_AW_OTLP_ENDPOINTS: '[{\"url\":\"https://traces.example.com\",\"headers\":\"Authorization=synthetic-token\"}]'\n  GH_AW_OTLP_ALL_HEADERS: Authorization=synthetic-token\n", want: true},
+			{name: "no endpoint", env: "env:\n  OTHER: value\n"},
+			{name: "dry run", env: "env:\n  OTEL_EXPORTER_OTLP_ENDPOINT: https://traces.example.com\n", dryRun: true},
+		} {
+			t.Run(engineID+"/"+tt.name, func(t *testing.T) {
+				data := &WorkflowData{
+					AI:           engineID,
+					EngineConfig: &EngineConfig{ID: engineID},
+					Env:          tt.env,
+					DryRun:       tt.dryRun,
+				}
+				steps := strings.Join(NewCompiler().buildEvalsEngineSteps(data), "")
+				if !strings.Contains(steps, "--env-all") {
+					t.Fatal("evals must execute through AWF")
+				}
+				for _, name := range []string{
+					"OTEL_EXPORTER_OTLP_ENDPOINT",
+					"OTEL_EXPORTER_OTLP_HEADERS",
+					"GH_AW_OTLP_ENDPOINTS",
+					"GH_AW_OTLP_ALL_HEADERS",
+				} {
+					wantCount := 0
+					if tt.want {
+						wantCount = 1
+					}
+					if got := strings.Count(steps, "--exclude-env "+name); got != wantCount {
+						t.Errorf("expected %d exclusions for %s, got %d", wantCount, name, got)
+					}
+				}
+				if strings.Contains(steps, "https://traces.example.com") {
+					t.Fatal("evals steps must not copy the host OTLP endpoint")
+				}
+				if data.ExcludedEnv != nil {
+					t.Fatal("evals must not mutate the parent workflow exclusions")
+				}
+			})
+		}
+	}
+}
+
 func TestDailyAICEvalsCollectorTopology(t *testing.T) {
 	for _, topology := range []string{"default", "arc-dind"} {
 		t.Run(topology, func(t *testing.T) {
@@ -105,6 +186,161 @@ func TestDailyAICEvalsCollectorTopology(t *testing.T) {
 					(topology == "arc-dind" && strings.Contains(collector, "/tmp/gh-aw/sandbox/firewall")) {
 					t.Errorf("collector must not fall back to stale agent paths:\n%s", collector)
 				}
+			}
+		})
+	}
+}
+
+func TestDailyAICEvalsCollectorExportedLog(t *testing.T) {
+	for _, topology := range []string{"default", "arc-dind"} {
+		for _, tt := range []struct {
+			name     string
+			exported string
+			files    map[string]string
+			want     string
+			missing  bool
+		}{
+			{
+				name:     "exported log takes precedence",
+				exported: "preserved logs/token-usage.jsonl",
+				files: map[string]string{
+					"preserved logs/token-usage.jsonl":                        `{"ai_credits_this_response":2}`,
+					"sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl": `{"ai_credits_this_response":9}`,
+					"sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl":  `{"ai_credits_this_response":10}`,
+				},
+				want: `{"ai_credits_this_response":2}`,
+			},
+			{
+				name:     "empty exported log does not revive stale usage",
+				exported: "preserved/token-usage.jsonl",
+				files: map[string]string{
+					"preserved/token-usage.jsonl":                            "",
+					"sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl": `{"ai_credits_this_response":10}`,
+				},
+			},
+			{
+				name:  "legacy audit log",
+				files: map[string]string{"sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl": `{"ai_credits_this_response":3}`},
+				want:  `{"ai_credits_this_response":3}`,
+			},
+			{
+				name:  "legacy proxy log",
+				files: map[string]string{"sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl": `{"ai_credits_this_response":4}`},
+				want:  `{"ai_credits_this_response":4}`,
+			},
+			{
+				name:     "missing exported log falls back",
+				exported: "missing/token-usage.jsonl",
+				files:    map[string]string{"sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl": `{"ai_credits_this_response":4}`},
+				want:     `{"ai_credits_this_response":4}`,
+			},
+			{name: "missing accounting stays missing", missing: true},
+			{
+				name:    "empty legacy log stays unresolved",
+				files:   map[string]string{"sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl": ""},
+				missing: true,
+			},
+		} {
+			t.Run(topology+"/"+tt.name, func(t *testing.T) {
+				data := &WorkflowData{}
+				if topology == "arc-dind" {
+					data.RunnerConfig = &RunnerConfig{Topology: RunnerTopologyArcDind}
+				}
+				var steps []struct {
+					Name string `yaml:"name"`
+					Run  string `yaml:"run"`
+				}
+				if err := yaml.Unmarshal([]byte(strings.Join(NewCompiler().buildUploadEvalsArtifactStep(data), "")), &steps); err != nil {
+					t.Fatal(err)
+				}
+				if len(steps) == 0 || steps[0].Name != "Collect evals token usage" || steps[0].Run == "" {
+					t.Fatal("missing evals accounting collector")
+				}
+				directory := t.TempDir()
+				for name, content := range tt.files {
+					file := filepath.Join(directory, name)
+					if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				exported := ""
+				if tt.exported != "" {
+					exported = filepath.Join(directory, tt.exported)
+				}
+				t.Setenv("AWF_TOKEN_USAGE_LOG", exported)
+				t.Setenv("RUNNER_TEMP", directory)
+				script := strings.NewReplacer("${RUNNER_TEMP}/gh-aw", directory, "/tmp/gh-aw", directory).Replace(steps[0].Run)
+				output, err := exec.Command("bash", "-e", "-u", "-c", script).CombinedOutput()
+				if err != nil {
+					t.Fatalf("collector failed: %v\n%s", err, output)
+				}
+				content, err := os.ReadFile(filepath.Join(directory, "evals_token_usage.jsonl"))
+				if tt.missing {
+					if !os.IsNotExist(err) {
+						t.Fatalf("unresolved accounting must not create a placeholder: %q, %v", content, err)
+					}
+				} else if err != nil || string(content) != tt.want {
+					t.Fatalf("unexpected accounting: got %q, %v; want %q", content, err, tt.want)
+				}
+			})
+		}
+	}
+}
+
+// TestBuildEvalsEngineStepsHonorsNodeActionOverride verifies that the evals job's
+// Setup Node.js step honors runtimes.node.action-repo / action-version.
+func TestBuildEvalsEngineStepsHonorsNodeActionOverride(t *testing.T) {
+	compiler := NewCompiler()
+	const customRef = "myorg/myrepo/.github/actions/setup-node@main"
+
+	for _, engineID := range []string{"copilot", "claude"} {
+		t.Run(engineID, func(t *testing.T) {
+			data := &WorkflowData{
+				AI: engineID,
+				Runtimes: map[string]any{
+					"node": map[string]any{
+						"action-repo":    "myorg/myrepo/.github/actions/setup-node",
+						"action-version": "main",
+					},
+				},
+				Evals: &EvalsConfig{
+					Questions: []EvalDefinition{
+						{ID: "test", Question: "Does the code work?"},
+					},
+				},
+			}
+
+			allSteps := strings.Join(compiler.buildEvalsEngineSteps(data), "")
+			if !strings.Contains(allSteps, "uses: "+customRef) {
+				t.Errorf("expected Setup Node.js to use %q;\ngot:\n%s", customRef, allSteps)
+			}
+			if strings.Contains(allSteps, "uses: actions/setup-node@") {
+				t.Errorf("expected no default actions/setup-node reference;\ngot:\n%s", allSteps)
+			}
+		})
+	}
+}
+
+func TestBuildEvalsEngineStepsHonorsNodeVersion(t *testing.T) {
+	compiler := NewCompiler()
+	for _, engineID := range []string{"copilot", "claude", "codex"} {
+		t.Run(engineID, func(t *testing.T) {
+			data := &WorkflowData{
+				AI:       engineID,
+				Runtimes: map[string]any{"node": map[string]any{"version": "24.21.0"}},
+				Evals: &EvalsConfig{
+					Questions: []EvalDefinition{{ID: "test", Question: "Does the code work?"}},
+				},
+			}
+			steps := strings.Join(compiler.buildEvalsEngineSteps(data), "")
+			if count := strings.Count(steps, "- name: Setup Node.js"); count != 1 {
+				t.Fatalf("expected one Setup Node.js step, got %d:\n%s", count, steps)
+			}
+			if !strings.Contains(steps, "node-version: '24.21.0'") {
+				t.Errorf("expected pinned Node version in evals steps:\n%s", steps)
 			}
 		})
 	}

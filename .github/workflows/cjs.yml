@@ -43,7 +43,8 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .
-          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+          # Keep reservations and cleanup isolated from other runs of this commit.
+          key: checkout-cjs-${{ github.run_id }}-${{ github.sha }}
 
   js-typecheck:
     needs: [checkout-cache]
@@ -56,14 +57,21 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: Restore checkout
+        id: restore-checkout
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .
-          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
-          fail-on-cache-miss: true
+          key: checkout-cjs-${{ github.run_id }}-${{ github.sha }}
+      - name: Checkout on cache miss
+        if: steps.restore-checkout.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
       - name: Set up Node.js
         id: setup-node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "24"
           cache: npm
@@ -99,14 +107,21 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: Restore checkout
+        id: restore-checkout
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .
-          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
-          fail-on-cache-miss: true
+          key: checkout-cjs-${{ github.run_id }}-${{ github.sha }}
+      - name: Checkout on cache miss
+        if: steps.restore-checkout.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
       - name: Set up Node.js
         id: setup-node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "24"
           cache: npm
@@ -139,14 +154,21 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: Restore checkout
+        id: restore-checkout
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .
-          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
-          fail-on-cache-miss: true
+          key: checkout-cjs-${{ github.run_id }}-${{ github.sha }}
+      - name: Checkout on cache miss
+        if: steps.restore-checkout.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
       - name: Set up Node.js
         id: setup-node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "24"
           cache: npm
@@ -165,15 +187,22 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: Restore checkout
+        id: restore-checkout
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .
-          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
-          fail-on-cache-miss: true
+          key: checkout-cjs-${{ github.run_id }}-${{ github.sha }}
+      - name: Checkout on cache miss
+        if: steps.restore-checkout.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
 
       - name: Set up Node.js
         id: setup-node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "24"
           cache: npm
@@ -212,14 +241,21 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: Restore checkout
+        id: restore-checkout
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .
-          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
-          fail-on-cache-miss: true
+          key: checkout-cjs-${{ github.run_id }}-${{ github.sha }}
+      - name: Checkout on cache miss
+        if: steps.restore-checkout.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
       - name: Set up Node.js
         id: setup-node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "24"
           cache: npm
@@ -238,6 +274,42 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cd actions/setup/js && npm run test:js-integration-artifact
 
+  nvx-musl-integration:
+    name: NVX musl inference integration
+    needs: [checkout-cache]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    concurrency:
+      group: ci-${{ github.ref }}-nvx-musl-integration
+      cancel-in-progress: true
+    steps:
+      - name: Restore checkout
+        id: restore-checkout
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .
+          key: checkout-cjs-${{ github.run_id }}-${{ github.sha }}
+      - name: Checkout on cache miss
+        if: steps.restore-checkout.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install patchelf
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes patchelf
+      - name: Run the NVX musl inference integration test
+        run: go test -tags=integration ./pkg/workflow -count=1 -run '^TestNVXStagedMuslCopilotInvokesAPIProxy$'
+
   cleanup-cache:
     name: Cleanup checkout cache
     needs:
@@ -247,6 +319,7 @@ jobs:
       - impacted-js-tests
       - lint-js
       - artifact-integration
+      - nvx-musl-integration
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -257,7 +330,7 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          CACHE_KEY: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+          CACHE_KEY: checkout-cjs-${{ github.run_id }}-${{ github.sha }}
         run: |
           cache_id=$(gh cache list --key "$CACHE_KEY" --ref "$GITHUB_REF" --limit 1 --json id,key --jq '.[] | select(.key == env.CACHE_KEY) | .id')
           if [ -n "$cache_id" ]; then

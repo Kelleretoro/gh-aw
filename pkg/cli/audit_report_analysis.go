@@ -29,12 +29,18 @@ func filterActionableDomains(domains []string) []string {
 func generateFindings(processedRun ProcessedRun, metrics MetricsData, errors []ValidationIssue) []AuditFinding {
 	auditReportLog.Printf("Generating findings: errors=%d, conclusion=%s", len(errors), processedRun.Run.Conclusion)
 	findings := appendFailureAndTimeoutFindings(nil, processedRun, metrics, errors)
+	findings = append(findings, generateModelAvailabilityFindings(processedRun.Run)...)
 	findings = append(findings, generateThreatDetectionFindings(processedRun)...)
 	findings = append(findings, generatePerformanceFindings(metrics)...)
 	findings = append(findings, generateErrorVolumeFindings(errors)...)
 	findings = append(findings, generateToolingFindings(processedRun)...)
 	findings = append(findings, generateFirewallFindings(processedRun)...)
+	findings = append(findings, generateSubagentModelFindings(processedRun.TokenUsage)...)
+	findings = append(findings, generateSubagentModelUnavailableFindings(processedRun.Run.LogsPath)...)
 	findings = append(findings, generateSuccessFindings(processedRun.Run, metrics, errors)...)
+	for i := range findings {
+		findings[i].PlaybookURL = auditFindingPlaybookURL(findings[i].Code)
+	}
 	return findings
 }
 
@@ -54,9 +60,18 @@ func generateRecommendations(processedRun ProcessedRun, metrics MetricsData, fin
 	var recommendations []Recommendation
 	hasCriticalFindings, hasHighCostFindings, hasManyTurns := analyzeRecommendationInputs(findings)
 	recommendations = appendFailureRecommendations(recommendations, processedRun.Run, hasCriticalFindings)
+	recommendations = appendModelAvailabilityRecommendations(recommendations, findings)
 	recommendations = appendCostRecommendations(recommendations, hasHighCostFindings)
 	recommendations = appendIterationRecommendations(recommendations, hasManyTurns)
 	recommendations = appendToolingRecommendations(recommendations, processedRun)
+	if metrics.SubagentFailureCount > 0 {
+		recommendations = append(recommendations, Recommendation{
+			Priority: "high",
+			Action:   "Review failed sub-agent invocations and verify recovery",
+			Reason:   "A successful parent conclusion does not establish completion of failed delegated work",
+			Example:  "Inspect subagent_failed findings and session evidence for retries or parent fallback",
+		})
+	}
 	recommendations = appendSuccessRecommendations(recommendations, processedRun.Run)
 	return recommendations
 }
@@ -237,14 +252,28 @@ func generateSuccessFindings(run WorkflowRun, metrics MetricsData, errors []Vali
 	if run.Conclusion != "success" || len(errors) > 0 {
 		return nil
 	}
-	return []AuditFinding{{
+	finding := AuditFinding{
 		Code:        AuditFindingWorkflowSucceeded,
 		Category:    "success",
 		Severity:    "info",
 		Title:       "Workflow Completed Successfully",
-		Description: fmt.Sprintf("Completed in %d turns with no errors", metrics.Turns),
+		Description: fmt.Sprintf("Completed in %d turns with no reported workflow errors", metrics.Turns),
 		Impact:      "No action needed",
-	}}
+	}
+	switch {
+	case metrics.ErrorCount > 0 && metrics.SubagentFailureCount > 0:
+		finding.Title = "Parent Workflow Completed Successfully"
+		finding.Description = fmt.Sprintf("Parent workflow completed in %d turns with %d reported error(s), but %d sub-agent invocation(s) failed", metrics.Turns, metrics.ErrorCount, metrics.SubagentFailureCount)
+		finding.Impact = "Review reported errors despite the successful workflow conclusion; parent success does not establish recovery or completion of failed delegated work; review sub-agent failures"
+	case metrics.ErrorCount > 0:
+		finding.Description = fmt.Sprintf("Workflow completed in %d turns with %d reported error(s)", metrics.Turns, metrics.ErrorCount)
+		finding.Impact = "Review reported errors despite the successful workflow conclusion"
+	case metrics.SubagentFailureCount > 0:
+		finding.Title = "Parent Workflow Completed Successfully"
+		finding.Description = fmt.Sprintf("Parent workflow completed in %d turns, but %d sub-agent invocation(s) failed", metrics.Turns, metrics.SubagentFailureCount)
+		finding.Impact = "Parent success does not establish recovery or completion of failed delegated work; review sub-agent failures"
+	}
+	return []AuditFinding{finding}
 }
 
 func analyzeRecommendationInputs(findings []AuditFinding) (hasCriticalFindings, hasHighCostFindings, hasManyTurns bool) {

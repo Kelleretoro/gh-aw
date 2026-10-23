@@ -23,6 +23,7 @@ import (
 // provided as IDs or URLs, bypassing the GitHub API run-discovery step.
 // This is used when the --stdin flag is passed to the logs command.
 func DownloadWorkflowLogsFromStdin(ctx context.Context, opts StdinLogsOptions) (err error) { //nolint:largefunc // Existing stdin orchestration remains centralized.
+	opts = normalizeStdinLogsOptions(opts)
 	logsOrchestratorLog.Printf("Starting stdin log download: runs=%d, outputDir=%s", len(opts.RunURLs), opts.OutputDir)
 
 	if err := ValidateArtifactSets(opts.ArtifactSets); err != nil {
@@ -69,8 +70,6 @@ func DownloadWorkflowLogsFromStdin(ctx context.Context, opts StdinLogsOptions) (
 	}
 
 	if len(opts.RunURLs) == 0 {
-		logsData := buildLogsData([]ProcessedRun{}, opts.OutputDir, nil)
-		logsData.Message = "No runs found. No run IDs or URLs were provided on stdin."
 		fmt.Fprintln(os.Stderr, console.FormatWarningMessage("No run IDs or URLs provided on stdin"))
 		return nil
 	}
@@ -202,6 +201,8 @@ func DownloadWorkflowLogsFromStdin(ctx context.Context, opts StdinLogsOptions) (
 		engine:            opts.Engine,
 		runtime:           opts.Runtime,
 		noStaged:          opts.NoStaged,
+		dryRun:            opts.DryRun,
+		noDryRun:          opts.NoDryRun,
 		firewallOnly:      opts.FirewallOnly,
 		noFirewall:        opts.NoFirewall,
 		safeOutputType:    opts.SafeOutputType,
@@ -255,7 +256,7 @@ func DownloadWorkflowLogsFromStdin(ctx context.Context, opts StdinLogsOptions) (
 			} else {
 				logMdPath := filepath.Join(result.LogsPath, "log.md")
 				if fileutil.FileExists(logMdPath) {
-					fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("✓ Parsed log for run %d → %s", processedRun.Run.DatabaseID, logMdPath)))
+					fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("Parsed log for run %d → %s", processedRun.Run.DatabaseID, logMdPath)))
 				}
 			}
 			if err := parseFirewallLogs(result.LogsPath, opts.Verbose); err != nil {
@@ -263,7 +264,7 @@ func DownloadWorkflowLogsFromStdin(ctx context.Context, opts StdinLogsOptions) (
 			} else {
 				firewallMdPath := filepath.Join(result.LogsPath, "firewall.md")
 				if fileutil.FileExists(firewallMdPath) {
-					fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("✓ Parsed firewall logs for run %d → %s", processedRun.Run.DatabaseID, firewallMdPath)))
+					fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("Parsed firewall logs for run %d → %s", processedRun.Run.DatabaseID, firewallMdPath)))
 				}
 			}
 		}
@@ -308,6 +309,13 @@ func DownloadWorkflowLogsFromStdin(ctx context.Context, opts StdinLogsOptions) (
 		message = "Storage limit reached. Results are partial because some input runs were not downloaded."
 		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(message))
 	}
+	var outcomeReports []OutcomesData
+	if opts.Outcomes {
+		outcomeReports, err = collectLogsOutcomes(ctx, processedRuns, opts.OutcomesDir, opts.Verbose)
+		if err != nil {
+			return err
+		}
+	}
 	finishGitHubAPIRateLimitReports(ctx, allAPIRateLimits, opts.JSONOutput)
 	cacheGitHubAPIRateLimitReports(cachedJSONLWriter, allAPIRateLimits...)
 	apiRateLimit, apiRateLimits := partitionGitHubAPIRateLimitReports(allAPIRateLimits)
@@ -318,6 +326,7 @@ func DownloadWorkflowLogsFromStdin(ctx context.Context, opts StdinLogsOptions) (
 		format:            opts.Format,
 		reportFile:        opts.ReportFile,
 		jsonOutput:        opts.JSONOutput,
+		episodes:          opts.Episodes,
 		toolGraph:         opts.ToolGraph,
 		train:             opts.Train,
 		drain3Weights:     opts.Drain3Weights,
@@ -325,8 +334,10 @@ func DownloadWorkflowLogsFromStdin(ctx context.Context, opts StdinLogsOptions) (
 		message:           message,
 		verbose:           opts.Verbose,
 		artifactFilter:    artifactFilter,
+		includeWorkQueue:  workQueueEvidenceRequested(opts.ArtifactSets),
 		apiRateLimit:      apiRateLimit,
 		apiRateLimits:     apiRateLimits,
 		cachedJSONLWriter: cachedJSONLWriter,
+		outcomeReports:    outcomeReports,
 	})
 }

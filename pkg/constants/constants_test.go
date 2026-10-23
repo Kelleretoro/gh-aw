@@ -59,7 +59,7 @@ func TestAllowedExpressions(t *testing.T) {
 
 func TestAgenticEngines(t *testing.T) {
 	t.Parallel()
-	expectedEngines := []string{"claude", "codex", "copilot", "gemini", "pi"}
+	expectedEngines := []string{"agy", "claude", "codex", "copilot", "gemini", "pi"}
 	require.NotEmpty(t, AgenticEngines)
 	assert.Equal(t, expectedEngines, AgenticEngines)
 	assert.Equal(t, "claude", string(ClaudeEngine))
@@ -143,6 +143,7 @@ func TestConstantValues(t *testing.T) {
 		{"UploadAssetsJobName", string(UploadAssetsJobName), "upload_assets"},
 		{"UploadCodeScanningJobName", string(UploadCodeScanningJobName), "upload_code_scanning_sarif"},
 		{"ConclusionJobName", string(ConclusionJobName), "conclusion"},
+		{"ConclusionAdmissionJobName", string(ConclusionAdmissionJobName), "conclusion_admission"},
 		{"UnlockJobName", string(UnlockJobName), "unlock"},
 		{"SafeOutputArtifactName", string(SafeOutputArtifactName), "safe-output"},
 		{"AgentOutputArtifactName", string(AgentOutputArtifactName), "agent-output"},
@@ -187,6 +188,7 @@ func TestKnownBuiltInJobNamesContainsAllKnownJobs(t *testing.T) {
 		string(UploadAssetsJobName),
 		string(UploadCodeScanningJobName),
 		string(ConclusionJobName),
+		string(ConclusionAdmissionJobName),
 		string(UnlockJobName),
 	} {
 		require.Contains(t, KnownBuiltInJobNames, jobName)
@@ -272,6 +274,7 @@ func TestFeatureFlagConstants(t *testing.T) {
 		{"DIFCProxyFeatureFlag", DIFCProxyFeatureFlag, "difc-proxy"},
 		{"AwfDiagnosticLogsFeatureFlag", AwfDiagnosticLogsFeatureFlag, "awf-diagnostic-logs"},
 		{"GroupConcurrencyQueueFeatureFlag", GroupConcurrencyQueueFeatureFlag, "group-concurrency-queue"},
+		{"DangerouslyAllowRolesReadAndPullRequestTargetFeatureFlag", DangerouslyAllowRolesReadAndPullRequestTargetFeatureFlag, "dangerously-allow-roles-read-and-pull-request-target"},
 	}
 
 	for _, tt := range tests {
@@ -405,8 +408,8 @@ func TestGetEngineOption_AllBuiltInEngines(t *testing.T) {
 		{string(CopilotEngine), "GitHub Copilot", CopilotGitHubToken, nil},
 		{string(ClaudeEngine), "Claude", AnthropicAPIKey, []string{}},
 		{string(CodexEngine), "Codex", OpenAIAPIKey, []string{CodexAPIKey}},
-		{string(GeminiEngine), "Gemini", GeminiAPIKey, nil},
-		{string(PiEngine), "Pi", CopilotGitHubToken, []string{AnthropicAPIKey, OpenAIAPIKey, CodexAPIKey}},
+		{string(GeminiEngine), "Gemini (Deprecated)", GeminiAPIKey, nil},
+		{string(PiEngine), "Pi", CopilotGitHubToken, []string{AnthropicAPIKey, OpenAIAPIKey, CodexAPIKey, GeminiAPIKey}},
 	}
 
 	for _, tt := range tests {

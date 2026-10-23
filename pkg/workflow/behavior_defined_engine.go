@@ -18,6 +18,7 @@ import (
 
 const (
 	behaviorSecretStrategyUniversalLLMConsumer  = "universal-llm-consumer"
+	behaviorSecretStrategyGeminiAPIKey          = "gemini-api-key"
 	behaviorProviderEnvModeUniversalLLMConsumer = "universal-llm-consumer"
 	behaviorConfigMergeJSON                     = "json-merge"
 )
@@ -60,17 +61,13 @@ func NewBehaviorDefinedEngine(def *EngineDefinition) (*BehaviorDefinedEngine, er
 	}
 
 	engine := &BehaviorDefinedEngine{
-		UniversalLLMConsumerEngine: UniversalLLMConsumerEngine{
-			BaseEngine: BaseEngine{
-				id:               def.ID,
-				displayName:      def.DisplayName,
-				description:      def.Description,
-				experimental:     def.Experimental,
-				ghSkillAgentName: def.GHSkillAgentName,
-				capabilities:     capabilities,
-			},
-		},
-		definition: def,
+		id:               def.ID,
+		displayName:      def.DisplayName,
+		description:      def.Description,
+		experimental:     def.Experimental,
+		ghSkillAgentName: def.GHSkillAgentName,
+		capabilities:     capabilities,
+		definition:       def,
 	}
 	return engine, nil
 }
@@ -228,15 +225,13 @@ func (e *BehaviorDefinedEngine) GetInstallationSteps(workflowData *WorkflowData)
 			CooldownEnabled:   install.Cooldown,
 		},
 	)
-	// Cloud Hypervisor does not mount the runner tool cache,
-	// so a global npm install is invisible inside the sandbox. Stage a second copy of the
-	// CLI under ${RUNNER_TEMP}/gh-aw/engine-cli, which is mounted into the sandbox, exactly
-	// as the Claude and Codex engines do.
+	// MicroVMs cannot rely on the global npm installation. Stage the CLI in
+	// the runtime tree mounted by Cloud Hypervisor or exported through NVX.
 	binaryName := install.BinaryName
 	if binaryName == "" && behavior.Execution != nil {
 		binaryName = behavior.Execution.CommandName
 	}
-	if binaryName != "" && isCloudHypervisorRuntime(workflowData) {
+	if binaryName != "" && (isCloudHypervisorRuntime(workflowData) || isNVXRuntime(workflowData)) {
 		npmSteps = append(npmSteps, GenerateMicroVMNpmCLIInstallStep(
 			install.PackageName,
 			version,
@@ -475,6 +470,11 @@ func (e *BehaviorDefinedEngine) GetLogParserScriptId() string {
 	return e.logParserScriptFilename()
 }
 
+// GetLogParserScriptSource returns the generated parser source for local parsing.
+func (e *BehaviorDefinedEngine) GetLogParserScriptSource() string {
+	return e.buildWrappedLogParserScript()
+}
+
 // buildLogParserWriteStep generates a GitHub Actions step that writes the
 // behavior-defined engine's log-parser script to
 // ${RUNNER_TEMP}/gh-aw/actions/<engine-id>_log_parser.cjs so the post-agent
@@ -608,6 +608,7 @@ func (e *BehaviorDefinedEngine) buildBehaviorDefinedExecutionEnv(exec *EngineExe
 	}
 	applySafeOutputEnvToMap(env, workflowData)
 	applyDefaultMaxAICreditsEnvToMap(env, workflowData)
+	applyAWFRuntimeAgentTimeoutEnvToMap(env, workflowData)
 	applyTraceContextEnvToMap(env)
 	applyOptionalEngineToolTimeouts(env, workflowData)
 	applyEngineMaxTurnsEnv(env, workflowData)
@@ -698,10 +699,12 @@ func (e *BehaviorDefinedEngine) buildFirewallCommand(exec *EngineExecutionDefini
 	}
 
 	excludedSecretNames := e.GetRequiredSecretNames(workflowData)
-	for _, binding := range e.definition.Auth {
-		excludedSecretNames = slices.DeleteFunc(excludedSecretNames, func(secretName string) bool {
-			return secretName == binding.Secret
-		})
+	if e.behavior().SecretStrategy != behaviorSecretStrategyGeminiAPIKey {
+		for _, binding := range e.definition.Auth {
+			excludedSecretNames = slices.DeleteFunc(excludedSecretNames, func(secretName string) bool {
+				return secretName == binding.Secret
+			})
+		}
 	}
 
 	return BuildAWFCommand(AWFCommandConfig{

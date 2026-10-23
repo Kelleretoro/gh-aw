@@ -189,10 +189,10 @@ func (c *AddInteractiveConfig) runAddedWorkflowOnce(ctx context.Context) error {
 	c.updateLocalBranchBeforeWorkflowRun()
 
 	if err := RunSpecificWorkflowInteractively(ctx, RunWorkflowOptions{
-		WorkflowName:       workflowName,
 		Verbose:            c.Verbose,
 		EngineOverride:     c.EngineOverride,
 		RepoOverride:       c.RepoOverride,
+		WorkflowName:       workflowName,
 		requiredInputsOnly: true,
 	}); err != nil {
 		return err
@@ -262,7 +262,7 @@ func findWorkflowsByFilenamePattern(pattern, repoOverride string, verbose bool) 
 			fmt.Fprintf(os.Stderr, "Workflow with filename '%s' found in workflow list\n", pattern)
 		}
 		addInteractiveLog.Printf("Workflow lookup by filename pattern=%q: found", pattern)
-		return []WorkflowStatus{{WorkflowListItem: WorkflowListItem{Workflow: pattern}}}, nil
+		return []WorkflowStatus{{Workflow: pattern}}, nil
 	}
 
 	if verbose {

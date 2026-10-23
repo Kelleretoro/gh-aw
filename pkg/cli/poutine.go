@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,53 +114,16 @@ func runPoutineOnDirectory(workflowDir string, verbose bool, strict bool) error 
 		return fmt.Errorf("failed to ensure poutine config: %w", err)
 	}
 
-	// Build the Docker command with JSON output for easier parsing
-	// docker run --rm -v "$(pwd)":/workdir -w /workdir <PoutineImage> analyze_local . --format json
-	// #nosec G204 -- gitRoot comes from git rev-parse (trusted source) and is validated as absolute path
-	// exec.Command with separate args (not shell execution) prevents command injection
-	volumeMount, err := buildDockerVolumeMount(gitRoot, "/workdir")
+	cmd, displayArgs, err := buildPoutineCommand(gitRoot)
 	if err != nil {
-		return fmt.Errorf("invalid docker mount path: %w", err)
+		return err
 	}
-	poutineImageRef, err := validateDockerImageRef(PoutineImage)
-	if err != nil {
-		return fmt.Errorf("invalid poutine scanner image reference %q: %w", PoutineImage, err)
-	}
-	dockerPath, err := fileutil.ResolveExecutablePath("docker")
-	if err != nil {
-		return fmt.Errorf("docker command not found: %w", err)
-	}
-	cmd := exec.Command(
-		dockerPath,
-		"run",
-		"--rm",
-		"-v", volumeMount,
-		"-w", "/workdir",
-		poutineImageRef,
-		"analyze_local",
-		".",
-		"--format", "json",
-		"--quiet", // Disable progress output
-	)
 
 	// Always show that poutine is running (regular verbosity)
 	fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("Running poutine security scanner"))
 
-	// In verbose mode, also show the command that users can run directly
 	if verbose {
-		dockerCmd := shellJoinArgs([]string{
-			"docker",
-			"run",
-			"--rm",
-			"-v", volumeMount,
-			"-w", "/workdir",
-			poutineImageRef,
-			"analyze_local",
-			".",
-			"--format", "json",
-			"--quiet",
-		})
-		fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("Run poutine directly: "+dockerCmd))
+		fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("Run poutine directly: "+shellJoinArgs(displayArgs)))
 	}
 
 	// Capture output
@@ -181,6 +145,7 @@ func runPoutineOnDirectory(workflowDir string, verbose bool, strict bool) error 
 		if stderr.Len() > 0 {
 			fmt.Fprint(os.Stderr, stderr.String())
 		}
+		return fmt.Errorf("poutine output could not be parsed: %w", parseErr)
 	}
 
 	// Check if the error is due to findings or actual failure
@@ -194,7 +159,7 @@ func runPoutineOnDirectory(workflowDir string, verbose bool, strict bool) error 
 			if exitCode == 1 {
 				// In strict mode, any findings in the scan are treated as errors
 				if strict && totalWarnings > 0 {
-					return fmt.Errorf("strict mode: poutine found %d security warnings/errors - workflows must have no poutine findings in strict mode. Example: rerun after resolving all reported findings", totalWarnings)
+					return withPoutineFindings(fmt.Errorf("strict mode: poutine found %d security warnings/errors - workflows must have no poutine findings in strict mode. Example: rerun after resolving all reported findings", totalWarnings), stdout.String())
 				}
 				// In non-strict mode, findings are logged but not treated as errors
 				return nil
@@ -206,7 +171,55 @@ func runPoutineOnDirectory(workflowDir string, verbose bool, strict bool) error 
 		return fmt.Errorf("poutine failed: %w", err)
 	}
 
+	if strict && totalWarnings > 0 {
+		return withPoutineFindings(fmt.Errorf("strict mode: poutine found %d security warnings/errors", totalWarnings), stdout.String())
+	}
 	return nil
+}
+
+func withPoutineFindings(err error, stdout string) error {
+	var output poutineOutput
+	if parseErr := json.Unmarshal([]byte(stdout), &output); parseErr != nil {
+		return fmt.Errorf("poutine output could not be parsed: %w", parseErr)
+	}
+	return withScannerFindings(err, poutineFindingsToShared(output.Findings, output.Rules, "", nil))
+}
+
+// buildPoutineCommand uses a compatible local binary when available, falling
+// back to the pinned Docker image otherwise.
+func buildPoutineCommand(gitRoot string) (*exec.Cmd, []string, error) {
+	args := []string{"analyze_local", ".", "--format", "json", "--quiet"}
+	if localPath := localScannerPath(context.Background(), "poutine"); localPath != "" {
+		cmd := exec.Command(localPath, args...)
+		cmd.Dir = gitRoot
+		return cmd, append([]string{localPath}, args...), nil
+	}
+
+	volumeMount, err := buildDockerVolumeMount(gitRoot, "/workdir")
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid docker mount path: %w", err)
+	}
+	poutineImageRef, err := validateDockerImageRef(PoutineImage)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid poutine scanner image reference %q: %w", PoutineImage, err)
+	}
+	dockerPath, err := fileutil.ResolveExecutablePath("docker")
+	if err != nil {
+		return nil, nil, fmt.Errorf("docker command not found: %w", err)
+	}
+	dockerArgs := []string{
+		"run",
+		"--rm",
+		"-v", volumeMount,
+		"-w", "/workdir",
+		poutineImageRef,
+	}
+	dockerArgs = append(dockerArgs, args...)
+	// #nosec G204 -- gitRoot comes from git rev-parse, the mount and image
+	// are validated above, and exec.Command does not invoke a shell.
+	cmd := exec.Command(dockerPath, dockerArgs...)
+	cmd.Dir = gitRoot
+	return cmd, append([]string{dockerPath}, dockerArgs...), nil
 }
 
 // runPoutineOnFile runs the poutine security scanner on a single .lock.yml file using Docker
@@ -237,53 +250,17 @@ func runPoutineOnFile(lockFile string, verbose bool, strict bool) error {
 		return fmt.Errorf("failed to get relative path: %w", err)
 	}
 
-	// Build the Docker command with JSON output for easier parsing
-	// docker run --rm -v "$(pwd)":/workdir -w /workdir <PoutineImage> analyze_local . --format json
-	// #nosec G204 -- gitRoot comes from git rev-parse (trusted source) and is validated as absolute path
-	// exec.Command with separate args (not shell execution) prevents command injection
-	volumeMount, err := buildDockerVolumeMount(gitRoot, "/workdir")
+	cmd, displayArgs, err := buildPoutineCommand(gitRoot)
 	if err != nil {
-		return fmt.Errorf("invalid docker mount path: %w", err)
+		return err
 	}
-	poutineImageRef, err := validateDockerImageRef(PoutineImage)
-	if err != nil {
-		return fmt.Errorf("invalid poutine scanner image reference %q: %w", PoutineImage, err)
-	}
-	dockerPath, err := fileutil.ResolveExecutablePath("docker")
-	if err != nil {
-		return fmt.Errorf("docker command not found: %w", err)
-	}
-	cmd := exec.Command(
-		dockerPath,
-		"run",
-		"--rm",
-		"-v", volumeMount,
-		"-w", "/workdir",
-		poutineImageRef,
-		"analyze_local",
-		".",
-		"--format", "json",
-		"--quiet", // Disable progress output
-	)
 
 	// Always show that poutine is running (regular verbosity)
 	fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("Running poutine security scanner"))
 
 	// In verbose mode, also show the command that users can run directly
 	if verbose {
-		dockerCmd := shellJoinArgs([]string{
-			"docker",
-			"run",
-			"--rm",
-			"-v", volumeMount,
-			"-w", "/workdir",
-			poutineImageRef,
-			"analyze_local",
-			".",
-			"--format", "json",
-			"--quiet",
-		})
-		fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("Run poutine directly: "+dockerCmd))
+		fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("Run poutine directly: "+shellJoinArgs(displayArgs)))
 	}
 
 	// Capture output
@@ -498,15 +475,11 @@ func poutineFindingsToShared(findings []poutineFinding, rules poutineRules, file
 			message = fmt.Sprintf("%s - %s", message, finding.Meta.Details)
 		}
 
-		shared = append(shared, scanfindings.Finding{
-			RuleID:   finding.RuleID,
-			Severity: scanfindings.ParseSeverity(severityLabel),
-			Message:  message,
-			File:     firstNonEmpty(finding.Meta.Path, filePath),
-			Line:     lineNum,
-			Column:   1, // poutine doesn't provide column info
-			Context:  scanfindings.ContextLines(fileLines, lineNum),
-		})
+		shared = append(shared, scanfindings.NewFinding(scanfindings.NewFindingParams{
+			RuleID: finding.RuleID, SeverityLabel: severityLabel, Message: message,
+			File: firstNonEmpty(finding.Meta.Path, filePath), Line: lineNum,
+			FileLines: fileLines,
+		}))
 	}
 	return shared
 }

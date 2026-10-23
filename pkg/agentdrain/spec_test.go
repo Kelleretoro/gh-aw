@@ -3,6 +3,8 @@
 package agentdrain_test
 
 import (
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -527,4 +529,101 @@ func TestSpec_Types_Snapshot(t *testing.T) {
 	err = restored.LoadJSON(data)
 	require.NoError(t, err, "LoadJSON should restore miner from snapshot bytes")
 	assert.Len(t, restored.Clusters(), 1, "restored miner should have the same cluster count as the original")
+}
+
+// TestSpec_Constants_AnomalyWeights validates the documented anomaly scoring constants.
+func TestSpec_Constants_AnomalyWeights(t *testing.T) {
+	t.Parallel()
+	assert.InDelta(t, 1.0, agentdrain.AnomalyWeightNew, 0, "new-template anomaly weight should match the specification")
+	assert.InDelta(t, 0.7, agentdrain.AnomalyWeightLow, 0, "low-similarity anomaly weight should match the specification")
+	assert.InDelta(t, 0.3, agentdrain.AnomalyWeightRare, 0, "rare-cluster anomaly weight should match the specification")
+	assert.InDelta(t, 2.0, agentdrain.AnomalyMaxScore, 0, "maximum anomaly score should match the specification")
+}
+
+// TestSpec_PublicAPI_FlattenEvent_Ordering validates the documented stage-first,
+// alphabetically sorted key=value representation.
+func TestSpec_PublicAPI_FlattenEvent_Ordering(t *testing.T) {
+	t.Parallel()
+	event := agentdrain.AgentEvent{
+		Stage: "tool_call",
+		Fields: map[string]string{
+			"zeta":       "last",
+			"action":     "start",
+			"session_id": "excluded",
+		},
+	}
+	assert.Equal(t, "stage=tool_call action=start zeta=last", agentdrain.FlattenEvent(event, []string{"session_id"}),
+		"FlattenEvent should emit a non-empty stage first, sort keys, and omit excluded fields")
+}
+
+// TestSpec_ThreadSafety_Miner validates the documented guarantee that training
+// and read-only snapshot operations are safe to use concurrently.
+func TestSpec_ThreadSafety_Miner(t *testing.T) {
+	t.Parallel()
+	miner, err := agentdrain.NewMiner(agentdrain.DefaultConfig())
+	require.NoError(t, err, "NewMiner should construct a miner for the concurrency test")
+
+	const workers = 12
+	errCh := make(chan error, workers*2)
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(2)
+		go func(index int) {
+			defer wg.Done()
+			_, trainErr := miner.TrainEvent(agentdrain.AgentEvent{
+				Stage:  "plan",
+				Fields: map[string]string{"worker": strconv.Itoa(index)},
+			})
+			errCh <- trainErr
+		}(i)
+		go func() {
+			defer wg.Done()
+			_ = miner.Clusters()
+			_, saveErr := miner.SaveJSON()
+			errCh <- saveErr
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for operationErr := range errCh {
+		require.NoError(t, operationErr, "documented concurrent Miner operations should succeed")
+	}
+}
+
+// TestSpec_ThreadSafety_Coordinator validates the documented guarantee that
+// stage routing and stage-map snapshot operations are safe to use concurrently.
+func TestSpec_ThreadSafety_Coordinator(t *testing.T) {
+	t.Parallel()
+	coordinator, err := agentdrain.NewCoordinator(agentdrain.DefaultConfig(), []string{"plan", "tool_call"})
+	require.NoError(t, err, "NewCoordinator should construct a coordinator for the concurrency test")
+
+	const workers = 12
+	errCh := make(chan error, workers*2)
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(2)
+		go func(index int) {
+			defer wg.Done()
+			stage := "plan"
+			if index%2 == 1 {
+				stage = "tool_call"
+			}
+			_, trainErr := coordinator.TrainEvent(agentdrain.AgentEvent{
+				Stage:  stage,
+				Fields: map[string]string{"worker": strconv.Itoa(index)},
+			})
+			errCh <- trainErr
+		}(i)
+		go func() {
+			defer wg.Done()
+			_ = coordinator.AllClusters()
+			_, saveErr := coordinator.SaveSnapshots()
+			errCh <- saveErr
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for operationErr := range errCh {
+		require.NoError(t, operationErr, "documented concurrent Coordinator operations should succeed")
+	}
 }

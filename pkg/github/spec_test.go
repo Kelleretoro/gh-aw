@@ -4,6 +4,8 @@ package github_test
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -109,14 +111,18 @@ func TestSpec_PublicAPI_ComputeObjectiveValue(t *testing.T) {
 
 	t.Run("first logic uses the first prioritized match", func(t *testing.T) {
 		t.Parallel()
-		// SPEC_AMBIGUITY: The README describes "first" as "use the first match in
-		// priority order", but does not specify whether ordering is driven by the
-		// issue-label order or the PriorityLabels order when the two disagree. To
-		// keep this test unambiguous, the issue-label order and PriorityLabels
-		// order are aligned so both interpretations yield the same result.
 		got := mapping(github.MultiLabelLogicFirst, "high-priority", "bug").
+			ComputeObjectiveValue([]string{"bug", "high-priority"})
+		assert.Equal(t, 60, got,
+			"first logic should use issue-label order when a label is present in PriorityLabels")
+	})
+
+	t.Run("first logic falls back to first mapped label", func(t *testing.T) {
+		t.Parallel()
+		got := mapping(github.MultiLabelLogicFirst, "not-present").
 			ComputeObjectiveValue([]string{"high-priority", "bug"})
-		assert.Equal(t, 35, got, "first logic should resolve to the leading prioritized label")
+		assert.Equal(t, 35, got,
+			"first logic should fall back to the first mapped issue label when no priority matches")
 	})
 
 	t.Run("nil receiver returns 0", func(t *testing.T) {
@@ -189,8 +195,38 @@ func TestSpec_PublicAPI_HasObjectiveLabel(t *testing.T) {
 
 	assert.True(t, om.HasObjectiveLabel("bug"),
 		"a defined label should report as existing")
+	assert.True(t, om.HasObjectiveLabel("  BUG  "),
+		"label lookup should be case-insensitive and trim surrounding space")
 	assert.False(t, om.HasObjectiveLabel("unknown"),
 		"an undefined label should report as not existing")
+}
+
+// TestSpec_ConfigPrecedence_EnvironmentJSON validates that the documented
+// environment source takes precedence and accepts raw JSON.
+func TestSpec_ConfigPrecedence_EnvironmentJSON(t *testing.T) {
+	t.Setenv("OBJECTIVE_MAPPING_JSON", `{"label_to_value":{"from-env":42},"multi_label_logic":"sum","priority_labels":[]}`)
+
+	om := github.LoadObjectiveMapping()
+	require.NotNil(t, om, "a valid environment mapping should load")
+	assert.Equal(t, 42, om.ComputeObjectiveValue([]string{"from-env"}),
+		"LoadObjectiveMapping should use the raw environment JSON mapping")
+	assert.Equal(t, github.MultiLabelLogicSum, om.MultiLabelLogic,
+		"LoadObjectiveMapping should preserve environment-provided logic")
+}
+
+// TestSpec_ConfigPrecedence_EnvironmentFile validates the documented fallback
+// that treats OBJECTIVE_MAPPING_JSON as a file path when it is not raw JSON.
+func TestSpec_ConfigPrecedence_EnvironmentFile(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "objective-mapping.json")
+	require.NoError(t, os.WriteFile(configPath,
+		[]byte(`{"label_to_value":{"from-file":73},"multi_label_logic":"max","priority_labels":[]}`),
+		0o600), "environment-referenced mapping file should be created")
+	t.Setenv("OBJECTIVE_MAPPING_JSON", configPath)
+
+	om := github.LoadObjectiveMapping()
+	require.NotNil(t, om, "a valid environment-referenced mapping file should load")
+	assert.Equal(t, 73, om.ComputeObjectiveValue([]string{"from-file"}),
+		"LoadObjectiveMapping should treat non-JSON environment content as a file path")
 }
 
 // TestSpec_PublicAPI_GetAllLabels validates that GetAllLabels returns all

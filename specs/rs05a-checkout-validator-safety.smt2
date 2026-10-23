@@ -4,6 +4,7 @@
 ; actions/setup/js/checkout_pr_branch.cjs:
 ; - workflow_dispatch aw_context parsing and repository scoping
 ; - assertTrustedCheckoutRuntime fork and actor trust checks
+; - allow-listed same-repository App comment and review authorization
 ; - refs/pull/N/head isolation for workflow_dispatch PR replay
 ;
 ; Every safety query is phrased as "does there exist an unsafe checkout?"
@@ -50,6 +51,9 @@
 (declare-const actor_present Bool)
 (declare-const actor_is_centralized_router Bool)
 (declare-const sender_type_bot Bool)
+(declare-const sender_matches_actor Bool)
+(declare-const pr_action_proves_branch_access Bool)
+(declare-const verified_same_repository_pr Bool)
 (declare-const centralized_marker_present Bool)
 (declare-const propagated_actor_present Bool)
 (declare-const propagated_actor_is_router Bool)
@@ -57,6 +61,10 @@
 (declare-const effective_actor_permission Permission)
 (declare-const pull_request_same_repo Bool)
 (declare-const api_pr_details_available Bool)
+(declare-const allowlisted_bot Bool)
+(declare-const comment_author_matches_sender Bool)
+(declare-const review_author_matches_sender Bool)
+(declare-const comment_actor_canonical_match Bool)
 
 ; GitHub event-shape invariants. These keep counterexample searches scoped to
 ; payload combinations that can actually reach checkout_pr_branch.cjs.
@@ -98,8 +106,21 @@
 (define-fun direct_actor_trusted () Bool
   (and actor_present
        (not actor_is_centralized_router)
-       actor_permission_verifiable
-       trusted_permission))
+       (or (and actor_permission_verifiable trusted_permission)
+           (and (or (= event pull_request) (= event pull_request_target))
+                pr_action_proves_branch_access
+                sender_type_bot
+                sender_matches_actor
+                verified_same_repository_pr)
+           (and (or (and (or (= event issue_comment)
+                            (= event pull_request_review_comment))
+                        comment_author_matches_sender)
+                    (and (= event pull_request_review)
+                         review_author_matches_sender))
+                sender_type_bot
+                allowlisted_bot
+                comment_actor_canonical_match
+                verified_same_repository_pr))))
 
 (define-fun actor_trusted () Bool
   (or centralized_dispatch_actor_trusted direct_actor_trusted))
@@ -136,11 +157,81 @@
 (check-sat)
 (pop)
 
-; EXPECT: checkout_requires_write_or_higher_permission unsat
+; EXPECT: checkout_requires_write_or_same_repo_bot_pr unsat
 (push)
 (assert checkout_executes)
 (assert (not (and actor_permission_verifiable trusted_permission)))
-(echo "checkout_requires_write_or_higher_permission")
+(assert (not (and (or (and (or (= event pull_request) (= event pull_request_target))
+                          pr_action_proves_branch_access sender_type_bot sender_matches_actor)
+                     (and (or (and (or (= event issue_comment)
+                                       (= event pull_request_review_comment))
+                                   comment_author_matches_sender)
+                              (and (= event pull_request_review) review_author_matches_sender))
+                          sender_type_bot allowlisted_bot comment_actor_canonical_match))
+                  verified_same_repository_pr)))
+(echo "checkout_requires_write_or_same_repo_bot_pr")
+(check-sat)
+(pop)
+
+; EXPECT: unlisted_same_repo_bot_comment_requires_write_permission unsat
+(push)
+(assert checkout_executes)
+(assert (or (= event issue_comment) (= event pull_request_review_comment)))
+(assert (not (and actor_permission_verifiable trusted_permission)))
+(assert (not actor_is_centralized_router))
+(assert sender_type_bot)
+(assert (not allowlisted_bot))
+(assert comment_author_matches_sender)
+(assert comment_actor_canonical_match)
+(assert verified_same_repository_pr)
+(echo "unlisted_same_repo_bot_comment_requires_write_permission")
+(check-sat)
+(pop)
+
+; EXPECT: allowlisted_same_repo_bot_comment_can_checkout sat
+(push)
+(assert checkout_executes)
+(assert (or (= event issue_comment) (= event pull_request_review_comment)))
+(assert (not (and actor_permission_verifiable trusted_permission)))
+(assert (not actor_is_centralized_router))
+(assert sender_type_bot)
+(assert allowlisted_bot)
+(assert comment_author_matches_sender)
+(assert comment_actor_canonical_match)
+(assert verified_same_repository_pr)
+(assert api_pr_details_available)
+(echo "allowlisted_same_repo_bot_comment_can_checkout")
+(check-sat)
+(pop)
+
+; EXPECT: review_with_mismatched_author_requires_write_permission unsat
+(push)
+(assert checkout_executes)
+(assert (= event pull_request_review))
+(assert (not (and actor_permission_verifiable trusted_permission)))
+(assert (not actor_is_centralized_router))
+(assert sender_type_bot)
+(assert allowlisted_bot)
+(assert (not review_author_matches_sender))
+(assert comment_actor_canonical_match)
+(assert verified_same_repository_pr)
+(echo "review_with_mismatched_author_requires_write_permission")
+(check-sat)
+(pop)
+
+; EXPECT: allowlisted_same_repo_bot_review_can_checkout sat
+(push)
+(assert checkout_executes)
+(assert (= event pull_request_review))
+(assert (not (and actor_permission_verifiable trusted_permission)))
+(assert (not actor_is_centralized_router))
+(assert sender_type_bot)
+(assert allowlisted_bot)
+(assert review_author_matches_sender)
+(assert comment_actor_canonical_match)
+(assert verified_same_repository_pr)
+(assert api_pr_details_available)
+(echo "allowlisted_same_repo_bot_review_can_checkout")
 (check-sat)
 (pop)
 

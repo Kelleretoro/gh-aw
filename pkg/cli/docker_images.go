@@ -4,16 +4,32 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/ctxutil"
 	"github.com/github/gh-aw/pkg/logger"
 )
 
 var dockerImagesLog = logger.New("cli:docker_images")
+var dockerMissingNotice sync.Once
+
+const dockerUnavailableMessage = "Docker is unavailable; Docker-based static analysis will be skipped."
+
+func isDockerCLIAvailable() bool {
+	if _, err := exec.LookPath("docker"); err != nil {
+		dockerImagesLog.Printf("Docker executable unavailable: %v", err)
+		dockerMissingNotice.Do(func() {
+			fmt.Fprintln(os.Stderr, console.FormatInfoMessageStderr("Docker is not installed; Docker-based features are unavailable."))
+		})
+		return false
+	}
+	return true
+}
 
 // DockerUnavailableError is returned when the Docker daemon is not accessible.
 // This is distinct from transient errors (e.g., images being downloaded) and signals
@@ -30,14 +46,14 @@ func (e *DockerUnavailableError) Error() string {
 
 // DockerImages defines the Docker images used by the compile tool's static analysis scanners
 const (
-	ZizmorImage      = "ghcr.io/zizmorcore/zizmor:1.30.1@sha256:a2eb396d886c053073405c7a980f2139ba2248ec172243cfa3841e57196e8101"
+	ZizmorImage      = "ghcr.io/zizmorcore/zizmor:1.31.1@sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9"
 	PoutineImage     = "ghcr.io/boostsecurityio/poutine:1.1.6@sha256:722a8e0999b583c1540fe2974e691032b2d9d21b9256a17965132b6bfd0081b0"
 	ActionlintImage  = "rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667"
 	RunnerGuardImage = "ghcr.io/vigilant-llc/runner-guard:3.1.5@sha256:2df426ef96d21f1622e05b21329f26bd263fc46110609cefb6afe43457613ac0"
-	SyftImage        = "anchore/syft:v1.51.1@sha256:95fe0835e5bebc6f8b1f8acef68d47d63d594ef4c0f25c097ff853b23cbac74c"
-	GrypeImage       = "anchore/grype:v0.118.0@sha256:8a93fc48da96bd6ec5981279d099b69de11541dc68fdf222fb9161f8ff284af7"
+	SyftImage        = "anchore/syft:v1.54.1@sha256:3eb5379ba7b409c3f4069b686110527af0c47df993fa5c10d13e7cf34f49b1aa"
+	GrypeImage       = "anchore/grype:v0.120.1@sha256:e4a44ef45d285b829ce6efe2642980329661bd2d18eab5fc539138d4adaebbbe"
 	GrantImage       = "anchore/grant:v0.6.8@sha256:172463611795f43b77302cdfbd7b3f81295492a7330e0820cfe41c3674920237"
-	YamllintImage    = "pipelinecomponents/yamllint:latest@sha256:5ab5eb7da0ed5e606b07c1723fc8b275e925189f70ac259b26b7329cb5f8f44d"
+	YamllintImage    = "pipelinecomponents/yamllint:latest@sha256:f7f7b4f8824839e33690a880dbe20944128b0dc9c55522a0b92a29b3a905cecf"
 	// ShellcheckImage is the Docker fallback for shellcheck when the binary is not installed.
 	// Used automatically when the shellcheck binary is not found in PATH (e.g. on Windows).
 	ShellcheckImage = "koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d"
@@ -78,6 +94,9 @@ func isDockerImageAvailableUnlocked(ctx context.Context, image string) bool {
 		available := pullState.mockAvailable[image]
 		dockerImagesLog.Printf("Mock: Checking if image %s is available: %v", image, available)
 		return available
+	}
+	if !isDockerCLIAvailable() {
+		return false
 	}
 
 	// For non-mock mode, we need to execute docker command
@@ -124,6 +143,9 @@ func IsDockerAvailable(ctx context.Context) bool {
 		dockerImagesLog.Printf("Mock: Docker available: %v", mockAvailable)
 		return mockAvailable
 	}
+	if !isDockerCLIAvailable() {
+		return false
+	}
 
 	cmd := exec.CommandContext(ctx, "docker", "info")
 	cmd.Stdout = nil
@@ -135,7 +157,8 @@ func IsDockerAvailable(ctx context.Context) bool {
 }
 
 // StartDockerImageDownload starts downloading a Docker image in the background.
-// Returns true if the download was started, false if already downloading or available.
+// Returns true if the download was started, false if already downloading, available,
+// or Docker is not installed.
 // The download can be cancelled by cancelling the provided context.
 // The returned join function blocks until the download goroutine exits and returns
 // any error that occurred (nil on success or context cancellation).
@@ -156,6 +179,12 @@ func StartDockerImageDownload(ctx context.Context, image string) (bool, func() e
 				return dl.err
 			}
 			return nil
+		}
+	}
+
+	if !pullState.mockAvailableInUse && !isDockerCLIAvailable() {
+		return false, func() error {
+			return &DockerUnavailableError{Message: "Docker is not installed; image downloads are unavailable."}
 		}
 	}
 
@@ -266,57 +295,23 @@ func CheckAndPrepareDockerImages(ctx context.Context, opts DockerImagesOptions) 
 		return nil
 	}
 
+	// Compatible native scanners do not require Docker or image downloads.
+	if opts.Zizmor && localScannerPath(ctxutil.OrBackground(ctx), "zizmor") != "" {
+		opts.Zizmor = false
+	}
+	if opts.Poutine && localScannerPath(ctxutil.OrBackground(ctx), "poutine") != "" {
+		opts.Poutine = false
+	}
+	if opts.Actionlint && localScannerPath(ctxutil.OrBackground(ctx), "actionlint") != "" {
+		opts.Actionlint = false
+	}
+	if !opts.Zizmor && !opts.Poutine && !opts.Actionlint && !opts.RunnerGuard && !opts.Syft && !opts.Grype && !opts.Grant && !opts.Yamllint {
+		return nil
+	}
+
 	// Check if Docker daemon is available before attempting any image operations
 	if !IsDockerAvailable(ctx) {
-		var requestedTools []string
-		var paramsList []string
-		if opts.Zizmor {
-			tool := "zizmor"
-			requestedTools = append(requestedTools, tool)
-			paramsList = append(paramsList, tool+": false")
-		}
-		if opts.Poutine {
-			tool := "poutine"
-			requestedTools = append(requestedTools, tool)
-			paramsList = append(paramsList, tool+": false")
-		}
-		if opts.Actionlint {
-			tool := "actionlint"
-			requestedTools = append(requestedTools, tool)
-			paramsList = append(paramsList, tool+": false")
-		}
-		if opts.RunnerGuard {
-			tool := "runner-guard"
-			requestedTools = append(requestedTools, tool)
-			paramsList = append(paramsList, tool+": false")
-		}
-		if opts.Syft {
-			tool := "syft"
-			requestedTools = append(requestedTools, tool)
-			paramsList = append(paramsList, tool+": false")
-		}
-		if opts.Grype {
-			tool := "grype"
-			requestedTools = append(requestedTools, tool)
-			paramsList = append(paramsList, tool+": false")
-		}
-		if opts.Grant {
-			tool := "grant"
-			requestedTools = append(requestedTools, tool)
-			paramsList = append(paramsList, tool+": false")
-		}
-		if opts.Yamllint {
-			tool := "yamllint"
-			requestedTools = append(requestedTools, tool)
-			paramsList = append(paramsList, tool+": false")
-		}
-		verb := "requires"
-		if len(requestedTools) > 1 {
-			verb = "require"
-		}
-		return &DockerUnavailableError{
-			Message: fmt.Sprintf("docker is not available (cannot connect to Docker daemon). %s %s Docker. Please install and start Docker, or set %s to skip static analysis", strings.Join(requestedTools, " and "), verb, strings.Join(paramsList, " and ")),
-		}
+		return &DockerUnavailableError{Message: dockerUnavailableMessage}
 	}
 
 	var missingImages []string
@@ -351,8 +346,14 @@ func CheckAndPrepareDockerImages(ctx context.Context, opts DockerImagesOptions) 
 			downloadingImages = append(downloadingImages, img.name)
 		} else {
 			// Start download
-			_, _ = StartDockerImageDownload(ctx, img.image)
-			missingImages = append(missingImages, img.name)
+			started, join := StartDockerImageDownload(ctx, img.image)
+			if started {
+				missingImages = append(missingImages, img.name)
+			} else if IsDockerImageDownloading(img.image) {
+				downloadingImages = append(downloadingImages, img.name)
+			} else if err := join(); err != nil {
+				return err
+			}
 		}
 	}
 

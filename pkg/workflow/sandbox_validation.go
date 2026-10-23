@@ -101,14 +101,22 @@ func validateSandboxConfig(workflowData *WorkflowData) error { //nolint:largefun
 		}
 		sandboxValidationLog.Printf("sandbox.agent: false permitted by features.%s: true", flag)
 
-		if workflowData.EngineConfig != nil &&
-			workflowData.EngineConfig.ID == string(constants.CodexEngine) &&
+		if ResolveEngineID(workflowData) == string(constants.CodexEngine) &&
 			NewCodexEngine().ResolveLLMProvider(workflowData) == LLMProviderGitHub {
 			return NewValidationError(
 				"sandbox.agent",
 				"false",
 				"Codex with a copilot/* model requires the agent sandbox for BYOK inference routing",
 				"Enable the agent sandbox or select a non-Copilot model.",
+			)
+		}
+		if ResolveEngineID(workflowData) == string(constants.ClaudeEngine) &&
+			NewClaudeEngine().ResolveLLMProvider(workflowData) == LLMProviderGitHub {
+			return NewValidationError(
+				"sandbox.agent",
+				"false",
+				"Claude with GitHub Copilot inference requires the agent sandbox for credential-isolated routing",
+				"Enable the agent sandbox or select an Anthropic-hosted model.",
 			)
 		}
 	}
@@ -141,6 +149,9 @@ func validateSandboxConfig(workflowData *WorkflowData) error { //nolint:largefun
 
 	// Validate the runtime profile and the properties that depend on it.
 	if err := validateSandboxRuntimeProfile(workflowData, agentConfig); err != nil {
+		return err
+	}
+	if err := validateNVXRuntimeConfig(workflowData, agentConfig); err != nil {
 		return err
 	}
 
@@ -185,17 +196,6 @@ func validateSandboxConfig(workflowData *WorkflowData) error { //nolint:largefun
 				"cloud-hypervisor does not attach the CLI proxy sidecar, and the AWF runtime rejects "+
 					"--difc-proxy-host for this runtime. Remove tools.github.mode: gh-proxy and the "+
 					"integrity-reactions feature, or change sandbox.agent.runtime.",
-			)
-		}
-
-		// cloud-hypervisor rejects enclaves configuration outright.
-		if len(workflowData.Enclaves) > 0 {
-			return NewValidationError(
-				"sandbox.agent.runtime",
-				string(AgentRuntimeCloudHypervisor),
-				"cloud-hypervisor is incompatible with enclaves",
-				"cloud-hypervisor does not support the enclaves subsystem. Remove the enclaves "+
-					"configuration, or change sandbox.agent.runtime.",
 			)
 		}
 

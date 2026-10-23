@@ -138,9 +138,9 @@ These settings apply to the built-in Copilot, Claude, and Codex harnesses.
 
 ### Shared post-result watchdog
 
-`GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS` configures the post-result stdio inactivity watchdog used by the built-in Copilot and Codex harnesses. It is measured in **milliseconds**. The default is `120000` ms (2 minutes), the minimum is `50` ms, and the maximum is `600000` ms (10 minutes). Unset, non-numeric, zero, and negative values use the default; positive values outside the supported range are clamped.
+`GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS` configures the post-result stdio inactivity watchdog used by the built-in Copilot, Claude, and Codex harnesses. It is measured in **milliseconds**. The default is `120000` ms (2 minutes), the minimum is `50` ms, and the maximum is `600000` ms (10 minutes). Unset, non-numeric, zero, and negative values use the default; positive values outside the supported range are clamped.
 
-The watchdog is dormant until the agent emits a terminal safe output. `noop` and ordinary task outputs such as comments, labels, pushes, and pull request creation are terminal. Diagnostic safe outputs such as `missing_tool`, `missing_data`, and `report_incomplete` are not terminal and do not arm the watchdog by themselves.
+The watchdog is dormant until the agent emits a terminal safe output. `noop` and ordinary task outputs such as comments, labels, pushes, and pull request creation are terminal. Diagnostic safe outputs such as `report_missing_tool`, `report_missing_data`, and `report_incomplete` are not terminal and do not arm the watchdog by themselves.
 
 After the watchdog arms, any stdout or stderr activity resets the inactivity clock. A quiet child process can therefore be terminated even while it is doing useful CPU or I/O work, such as a monorepo scan, build, or test command that produces no logs. If the watchdog fires after a terminal safe output already exists, the harness may still treat the run as successful because the requested safe output was already produced.
 
@@ -183,12 +183,16 @@ The warning repeats on each interval while the silence continues, and a `stall w
 | --- | --- | --- | --- | --- |
 | `GH_AW_HARNESS_LONG_RUN_TOKEN_THRESHOLD` | Copilot | `10000` | tokens; minimum `0` | Token threshold used to classify long-running partial executions as `long_run_exit` instead of a generic partial execution. Invalid or negative values use the default. |
 | `GH_AW_HARNESS_STARTUP_RETRIES` | All engine harnesses | `1` | retry attempts; range `0`-`2` | Additional fresh-run retry budget for startup failures before the harness records session progress. Invalid values use the default; out-of-range integers are clamped. `GH_AW_CLAUDE_STARTUP_RETRIES` is still accepted as a Claude-compatible fallback when the shared variable is unset. |
+| `GH_AW_CLAUDE_ALLOW_FRESH_RESTART` | Claude harness | `false` | exact string `true` enables | Opts replay-safe workflows into restarting from the original prompt after partial execution cannot be resumed. Filesystem changes and staged outputs are retained, so work may be repeated. |
+| `CLAUDE_CODE_MAX_RETRIES` | Claude CLI | `0` for primary/evals execution | retry attempts | Native CLI transient-error retries. gh-aw disables these by default because its harness owns the retry loop. Explicit `engine.env` values override this setting; external detection retains the CLI default. |
 
-Copilot SDK driver settings such as `COPILOT_SDK_SEND_TIMEOUT_MS` are documented in [Copilot SDK Support](/gh-aw/reference/engines/#copilot-sdk-support) and the [Copilot SDK Driver Specification](/gh-aw/specs/copilot-sdk-driver-specification/).
+Copilot SDK driver settings such as `COPILOT_SDK_SEND_TIMEOUT_MS` are documented in [Copilot SDK Support](/gh-aw/reference/engines/copilot/#copilot-sdk-support) and the [Copilot SDK Driver Specification](/gh-aw/specs/copilot-sdk-driver-specification/).
 
 ### Internal runtime variables
 
 `GH_AW_TIMEOUT_MINUTES` is compiler-managed. gh-aw derives it from the workflow `timeout-minutes` frontmatter value and passes it to harness and driver code so soft timeouts and SDK send timeouts stay below the GitHub Actions job timeout. Do not set `GH_AW_TIMEOUT_MINUTES` directly; set `timeout-minutes` in frontmatter instead.
+
+`GH_AW_CLAUDE_DISABLE_REPO_EDITS` is compiler-managed. The compiler sets it to the exact string `true` when `tools.edit: false`, overriding `engine.env` values. The built-in Claude harness denies `Edit` within `GITHUB_WORKSPACE` and removes `Write`, `MultiEdit`, and `NotebookEdit` globally, including when a permission-mode override is selected. Separately scoped memory edits remain available through `Edit`. Do not set this variable directly; configure `tools.edit` instead. Custom harnesses must implement their own edit policy.
 
 ### Setup helper process timeouts
 
@@ -217,7 +221,7 @@ The MCP gateway startup step polls the gateway `/health` endpoint with exponenti
 
 | Variable | Default | Applies to |
 | --- | --- | --- |
-| `GH_AW_MCP_GATEWAY_HEALTH_MAX_ATTEMPTS` | `150` | Total health-check attempts, including the first one. |
+| `GH_AW_MCP_GATEWAY_HEALTH_MAX_ATTEMPTS` | At least `150`, automatically sized up to `10000` | Total health-check attempts, including the first one. |
 | `GH_AW_MCP_GATEWAY_HEALTH_INITIAL_DELAY_MS` | `250` | Delay the backoff starts from. |
 | `GH_AW_MCP_GATEWAY_HEALTH_MAX_DELAY_MS` | `1000` | Cap applied to every retry delay. |
 | `GH_AW_MCP_GATEWAY_HEALTH_BACKOFF_MULTIPLIER` | `2` | Multiplier applied to the delay before every retry. |
@@ -227,7 +231,7 @@ These values are cross-validated at startup:
 
 - A backoff multiplier below `1` is raised to `1` (constant delay).
 - A delay cap below the initial delay is raised to the initial delay.
-- The cumulative retry delay must cover the backend startup timeout plus 25 seconds for backend cleanup and final server registration; otherwise a warning is emitted that the health check may give up before the gateway is ready.
+- Unless a valid attempt count is explicitly configured, the attempt count increases so the cumulative retry delay covers the backend startup timeout (including `tools.startup-timeout`) plus 25 seconds for backend cleanup and final server registration. Explicit and automatically sized attempt counts are capped at `10000`; an insufficient retry budget emits a warning. Health and readiness probes share the startup deadline, so increasing attempts does not extend that deadline.
 
 ## CLI Configuration Variables
 
@@ -235,7 +239,7 @@ These variables configure the `gh aw` CLI tool. Set them in your local shell env
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DEBUG` | disabled | npm-style namespace debug logging. `DEBUG=*` enables all output; `DEBUG=cli:*,workflow:*` selects specific namespaces. Exclusions are supported: `DEBUG=*,-workflow:test`. Also activated when `ACTIONS_RUNNER_DEBUG=true`. |
+| `DEBUG` | disabled | npm-style namespace debug logging. `DEBUG=*` enables all output; `DEBUG=cli:*,workflow:*` selects specific namespaces. Exclusions are supported: `DEBUG=*,-workflow:test`. Also activated when `ACTIONS_RUNNER_DEBUG=true` or `RUNNER_DEBUG=1`. |
 | `DEBUG_COLORS` | `1` (enabled) | Set to `0` to disable ANSI colors in debug output. Colors are automatically disabled when output is not a TTY. |
 | `ACCESSIBLE` | empty | Any non-empty value enables accessibility mode, which disables spinners and animations. Also enabled when `TERM=dumb` or `NO_COLOR` is set. |
 | `NO_COLOR` | empty | Any non-empty value disables colored output and enables accessibility mode. Follows the [no-color.org](https://no-color.org/) standard. |
@@ -245,6 +249,10 @@ These variables configure the `gh aw` CLI tool. Set them in your local shell env
 | `GH_AW_MCP_SERVER` | unset | When set, disables the automatic update check. Set automatically when `gh aw` runs as an MCP server subprocess — no manual configuration needed. |
 
 **Enabling debug logging:**
+
+Compiled workflows leave MCP debug logging disabled for normal runs. GitHub Actions debug mode (`runner.debug == '1'`, including **Re-run jobs** with **Enable debug logging**) automatically enables verbose MCP logs. An explicit workflow or job `DEBUG` value takes precedence and is forwarded to the gateway and built-in MCP servers.
+
+The built-in JavaScript MCP loggers use their server names as namespaces, including `safeoutputs` and `mcpscripts`. Patterns are comma- or whitespace-separated, support `*` wildcards, and give `-` exclusions precedence regardless of order. For example, `DEBUG=safeoutputs,mcpscripts` selects those servers, while `DEBUG=*,-safeoutputs` excludes safe-outputs diagnostics from both stderr and `server.log`. Error summaries, required audit records, and structured safe-output files are not disabled by these filters; error stack traces require a matching debug namespace.
 
 ```bash
 # All namespaces
@@ -306,7 +314,10 @@ these `GH_AW_DEFAULT_*` variables at repo, org, or enterprise scope with
 | `GH_AW_MODEL_DETECTION_COPILOT` | GitHub Copilot |
 | `GH_AW_MODEL_DETECTION_CLAUDE` | Anthropic Claude |
 | `GH_AW_MODEL_DETECTION_CODEX` | OpenAI Codex |
-| `GH_AW_MODEL_DETECTION_GEMINI` | Google Gemini |
+
+For both inline and external detection, an explicit `safe-outputs.threat-detection.engine.model` takes precedence over the inherited workflow model. If neither is configured, a compile-time `GH_AW_DEFAULT_DETECTION_MODEL` override takes precedence; otherwise detection uses `vars.GH_AW_MODEL_DETECTION_<ENGINE>`, then `vars.GH_AW_DEFAULT_MODEL_<ENGINE>`, then the engine's built-in detection default. These variables use the resolved detection engine, which can differ from the main workflow engine.
+
+Claude and Codex have no engine-specific detection default, so their fallback is the firewall's `detection` alias. Copilot's built-in detection fallback is cost-optimized (currently a mini model). The `detection` alias is resolved by the firewall at runtime and is not a pinned model. Use an explicit detection model or a model override variable to select a specific model. This does not change the [threat detection failure policy](/gh-aw/reference/threat-detection/).
 
 Set a model override as an organization variable:
 

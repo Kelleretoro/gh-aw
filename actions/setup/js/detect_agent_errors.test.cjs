@@ -3,6 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
+import { agentErrorDiagnosticText } from "./agent_execution.cjs";
 
 // Minimal mock for @actions/core used by github-script CJS modules (renderLogFromFile).
 const mockCore = {
@@ -15,6 +16,7 @@ global.core = mockCore;
 const {
   detectErrors,
   isCAPIQuotaExceededError,
+  isCAPIServerError,
   isInvocationCapExceededError,
   isMaxCacheMissesExceededError,
   isAgenticEngineTimeout,
@@ -35,11 +37,173 @@ const {
   isShellExpansionGuardRejectedError,
   extractMissingModelPricingModelName,
   buildOutputLines,
+  main,
+  persistAgentExecution,
   findMostRecentLogFile,
   renderInternalEngineLogOnFailure,
 } = require("./detect_agent_errors.cjs");
 
 describe("detect_agent_errors.cjs", () => {
+  it.each([
+    { log: "", outcome: "success", linked: false },
+    { log: "Assistant: Access denied by policy settings", outcome: "success", linked: false },
+    { log: "", outcome: "failure", linked: true },
+    { log: '{"type":"session.error","data":{"message":"The requested model is not supported"}}', outcome: "failure", linked: true },
+  ])("prints a playbook link only for actual errors or a failed execution: %j", async ({ log, outcome, linked }) => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-playbook-link-"));
+    const previousOutcome = process.env.GH_AW_AGENTIC_EXECUTION_OUTCOME;
+    const previousInternalLogs = process.env.GH_AW_ENGINE_INTERNAL_LOGS_DIR;
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      fs.writeFileSync(path.join(rootDir, "agent-stdio.log"), log);
+      process.env.GH_AW_AGENTIC_EXECUTION_OUTCOME = outcome;
+      delete process.env.GH_AW_ENGINE_INTERNAL_LOGS_DIR;
+      await main({ rootDir });
+      expect(stderr.mock.calls.flat().join("\n").includes("debug-playbook.md#agent-model-and-proxy-classifications")).toBe(linked);
+    } finally {
+      stderr.mockRestore();
+      if (previousOutcome === undefined) delete process.env.GH_AW_AGENTIC_EXECUTION_OUTCOME;
+      else process.env.GH_AW_AGENTIC_EXECUTION_OUTCOME = previousOutcome;
+      if (previousInternalLogs === undefined) delete process.env.GH_AW_ENGINE_INTERNAL_LOGS_DIR;
+      else process.env.GH_AW_ENGINE_INTERNAL_LOGS_DIR = previousInternalLogs;
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  describe("model endpoint mismatch", () => {
+    it.each([
+      "400 Cannot translate Copilot request feature: tool_search",
+      "400 Unsupported Responses custom tool: web_search",
+      '{"type":"model_endpoint_incompatible","model":"gpt-5","endpoint":"/responses"}',
+      "Model 'gpt-5' is not accessible via the /responses endpoint.",
+    ])("detects and emits the dedicated category for %s", message => {
+      const results = detectErrors(message);
+      expect(results.modelEndpointMismatchError).toBe(true);
+      expect(results.modelNotSupportedError).toBe(false);
+      expect(results.inferenceAccessError).toBe(false);
+      expect(buildOutputLines(results)).toContain("model_endpoint_mismatch_error=true");
+    });
+
+    it("does not classify an unrelated HTTP 400 as endpoint mismatch", () => {
+      const results = detectErrors("Response status code does not indicate success: 400 (Bad Request)");
+      expect(results.http400ResponseError).toBe(true);
+      expect(results.modelEndpointMismatchError).toBe(false);
+      expect(buildOutputLines(results)).toContain("model_endpoint_mismatch_error=false");
+    });
+
+    it("does not classify empty logs as endpoint mismatch", () => {
+      expect(detectErrors("").modelEndpointMismatchError).toBe(false);
+    });
+
+    it("prints actionable mismatch diagnostics and writes the category", async () => {
+      const previousOutput = process.env.GITHUB_OUTPUT;
+      const previousInternalLogs = process.env.GH_AW_ENGINE_INTERNAL_LOGS_DIR;
+      const exists = vi.spyOn(fs, "existsSync").mockImplementation(file => String(file).endsWith("/agent-stdio.log"));
+      const read = vi.spyOn(fs, "readFileSync").mockReturnValue('{"type":"session.error","data":{"message":"Unsupported Responses custom tool: web_search"}}');
+      const append = vi.spyOn(fs, "appendFileSync").mockImplementation(() => {});
+      const mkdir = vi.spyOn(fs, "mkdirSync").mockImplementation(() => undefined);
+      const write = vi.spyOn(fs, "writeFileSync").mockImplementation(() => {});
+      const rename = vi.spyOn(fs, "renameSync").mockImplementation(() => {});
+      const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+      try {
+        process.env.GITHUB_OUTPUT = "mock-output";
+        delete process.env.GH_AW_ENGINE_INTERNAL_LOGS_DIR;
+        await main();
+        expect(append.mock.calls[0][1]).toContain("model_endpoint_mismatch_error=true");
+        expect(stderr.mock.calls.map(([message]) => message).join("")).toContain("select a model compatible with the configured endpoint and tool protocol");
+        expect(stderr.mock.calls.map(([message]) => message).join("")).toContain("debug-playbook.md#agent-model-and-proxy-classifications");
+      } finally {
+        for (const spy of [exists, read, append, mkdir, write, rename, stderr]) spy.mockRestore();
+        if (previousOutput === undefined) delete process.env.GITHUB_OUTPUT;
+        else process.env.GITHUB_OUTPUT = previousOutput;
+        if (previousInternalLogs === undefined) delete process.env.GH_AW_ENGINE_INTERNAL_LOGS_DIR;
+        else process.env.GH_AW_ENGINE_INTERNAL_LOGS_DIR = previousInternalLogs;
+      }
+    });
+
+    it("persists startup mismatch evidence when the harness never starts a session", async () => {
+      const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-startup-model-mismatch-"));
+      const outputFile = path.join(rootDir, "github-output");
+      const record = {
+        category: "model_endpoint_mismatch",
+        phase: "startup",
+        configured_model: "gpt-5.6-luna",
+        resolved_model: "gpt-5.6-luna",
+        wire_api: "completions",
+        wire_api_source: "override",
+        supported_endpoints: ["/responses"],
+        detail: "Configured model does not support the selected endpoint",
+        fix: "Select a compatible model",
+      };
+      const previousOutput = process.env.GITHUB_OUTPUT;
+      try {
+        fs.mkdirSync(path.join(rootDir, "agent"), { recursive: true });
+        fs.writeFileSync(path.join(rootDir, "agent", "model-endpoint-mismatch.json"), JSON.stringify(record));
+        process.env.GITHUB_OUTPUT = outputFile;
+
+        await main({ rootDir });
+
+        expect(fs.readFileSync(outputFile, "utf8")).toContain("model_endpoint_mismatch_error=true");
+        expect(fs.existsSync(path.join(rootDir, "agent-session.jsonl"))).toBe(false);
+        expect(fs.readFileSync(path.join(rootDir, "agent-errors.jsonl"), "utf8")).toContain('"model_endpoint_mismatch_error"');
+        const { writeUnifiedSession } = require("./unified_session.cjs");
+        expect(writeUnifiedSession({ rootDir, engine: "copilot" }).some(event => event.type === "model_endpoint.mismatch")).toBe(true);
+      } finally {
+        if (previousOutput === undefined) delete process.env.GITHUB_OUTPUT;
+        else process.env.GITHUB_OUTPUT = previousOutput;
+        fs.rmSync(rootDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("does not persist rejected Aider JSON errors through live detection", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-aider-errors-"));
+    const previousEngine = process.env.GH_AW_ENGINE_ID;
+    try {
+      process.env.GH_AW_ENGINE_ID = "aider";
+      const rejected = JSON.stringify({ type: "session.error", data: { code: 429, errorType: "InjectedError", message: "CAPIError: 429 Too Many Requests" } });
+      const results = detectErrors(agentErrorDiagnosticText(rejected, "aider"));
+      expect(results.capiQuotaExceededError).toBe(false);
+      persistAgentExecution(rejected, results, root);
+      expect(fs.readFileSync(path.join(root, "agent-errors.jsonl"), "utf8")).toBe("");
+      fs.writeFileSync(path.join(root, "agent_execution_exit_code.txt"), "0\n");
+      const native = JSON.stringify({ type: "session.error", data: { sourceEngine: "aider", code: 400, errorType: "NativeError", message: "The requested model is not supported" } });
+      persistAgentExecution(native, detectErrors(agentErrorDiagnosticText(native, "aider")), root);
+      const event = JSON.parse(fs.readFileSync(path.join(root, "agent-errors.jsonl"), "utf8").trim());
+      expect(event.data).toEqual({ categories: ["model_not_supported_error"], errorCodes: [400], errorTypes: ["NativeError"], exitCode: 0 });
+    } finally {
+      if (previousEngine === undefined) delete process.env.GH_AW_ENGINE_ID;
+      else process.env.GH_AW_ENGINE_ID = previousEngine;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("persists live-only classifications and the recorded final exit for conclusion", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-agent-errors-"));
+    try {
+      fs.writeFileSync(path.join(root, "agent_execution_exit_code.txt"), "0\n");
+      persistAgentExecution("", { ...detectErrors(""), agenticEngineTimeout: true, missingModelPricingError: true }, root);
+      const records = fs.readFileSync(path.join(root, "agent-errors.jsonl"), "utf8").trimEnd().split("\n").map(JSON.parse);
+      expect(records).toEqual([{ type: "agent.execution", data: { categories: ["agentic_engine_timeout", "missing_model_pricing_error"], errorCodes: [], errorTypes: [], exitCode: 0 } }]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not persist detector classifications from quoted plaintext or tool output", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-agent-errors-"));
+    try {
+      const content = "Assistant: The log text says Access denied by policy settings\nTool output: CAPIError: 429 Too Many Requests\n";
+      const results = detectErrors(agentErrorDiagnosticText(content));
+      persistAgentExecution(content, results, root);
+      expect(fs.readFileSync(path.join(root, "agent-errors.jsonl"), "utf8")).toBe("");
+      expect(results.inferenceAccessError).toBe(false);
+      expect(results.capiQuotaExceededError).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   describe("INFERENCE_ACCESS_ERROR_PATTERN", () => {
     it("matches 'Access denied by policy settings'", () => {
       expect(INFERENCE_ACCESS_ERROR_PATTERN.test("Access denied by policy settings")).toBe(true);
@@ -161,10 +325,39 @@ describe("detect_agent_errors.cjs", () => {
       expect(MODEL_NOT_SUPPORTED_PATTERN.test(errorOutput)).toBe(true);
     });
 
+    it("reports model_unavailable from the pi harness", () => {
+      const { validatePiModelAvailability } = require("./pi_models_json.cjs");
+      const reflectData = { models_fetch_complete: true, endpoints: [{ provider: "copilot", configured: true, models: ["claude-opus-5.5"] }] };
+      let error;
+      try {
+        validatePiModelAvailability({ provider: "copilot", modelId: "claude-opus-5", configuredModel: "copilot/claude-opus-5", reflectData });
+      } catch (err) {
+        error = err;
+      }
+      expect(error).toMatchObject({ name: "ModelAliasResolutionError", reason: "model_unavailable" });
+      // The same line `gh aw audit` classifies as model_unavailable (pkg/cli/audit_model_availability.go).
+      expect(error.message).toMatch(/^Pi model "claude-opus-5" is not advertised by the configured copilot proxy endpoint; /);
+      const errorOutput = `[gh-aw/pi-models-json] model resolution: engine=pi role=main configured=copilot/claude-opus-5 failed cause=model_unavailable\n[gh-aw/pi-models-json] fatal: ${error.message}\n`;
+      expect(MODEL_NOT_SUPPORTED_PATTERN.test(errorOutput)).toBe(true);
+      expect(detectErrors(errorOutput).modelNotSupportedError).toBe(true);
+    });
+
     it("classifies the raw Codex custom-tools rejection from unsupported models", () => {
       const errorOutput = String.raw`{"type":"turn.failed","error":{"message":"{\n  \"error\": {\n    \"message\": \"Invalid value: 'custom'\",\n    \"type\": \"invalid_request_error\",\n    \"param\": \"tools\",\n    \"code\": \"unknown_parameter\"\n  }\n}"}}`;
       expect(isUnsupportedModelToolsError(errorOutput)).toBe(true);
       expect(detectErrors(errorOutput).modelNotSupportedError).toBe(true);
+    });
+
+    it("skips corrupt records and stops decoding after the first custom-tools rejection", () => {
+      const first = JSON.stringify({ type: "turn.failed", error: { message: "Invalid value: 'custom'", param: "tools" } });
+      const output = `[INFO] startup\r\n{"broken"\nnull\r\n${first}\r\n{"later":true}`;
+      const parse = vi.spyOn(JSON, "parse");
+      try {
+        expect(isUnsupportedModelToolsError(output)).toBe(true);
+        expect(parse.mock.calls.map(([text]) => text)).toEqual(['{"broken"', "null", first]);
+      } finally {
+        parse.mockRestore();
+      }
     });
 
     it("classifies the raw Codex rejection when the error fields are reordered", () => {
@@ -260,9 +453,14 @@ describe("detect_agent_errors.cjs", () => {
       expect(isCAPIQuotaExceededError(message)).toBe(true);
     });
 
-    it("matches the Copilot CLI's own retry-exhaustion message for 5xx statuses (503)", () => {
-      const message = "Failed to get response from the AI model; retried 5 times (total retry wait time: 300 seconds) Last error: 503 Service Unavailable";
-      expect(isCAPIQuotaExceededError(message)).toBe(true);
+    it("does not classify retry-exhausted 502/503/504 as quota", () => {
+      for (const status of [502, 503, 504]) {
+        const message = `Failed to get response from the AI model; retried 5 times (total retry wait time: 14.90 seconds) Last error: ${status} Service Unavailable`;
+        expect(isCAPIQuotaExceededError(message)).toBe(false);
+        expect(isCAPIServerError(message)).toBe(true);
+      }
+      expect(isCAPIServerError("")).toBe(false);
+      expect(isCAPIServerError("Failed to get response from the AI model; retried 5 times. Last error: 429 Too Many Requests")).toBe(false);
     });
 
     it("does not match a 'Failed to get response' message without retry-exhaustion context", () => {

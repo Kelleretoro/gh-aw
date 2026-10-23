@@ -173,6 +173,47 @@ func TestBuildSafeJobsDefaultsEmptyRunsOn(t *testing.T) {
 	}
 }
 
+func TestBuildSafeJobsAttributionMetadata(t *testing.T) {
+	c := NewCompiler()
+	c.markdownPath = ".github/workflows/custom-finding.md"
+	data := &WorkflowData{
+		Name:      "Custom Finding",
+		TrackerID: "tracking-123",
+		Model:     "test-model",
+		EngineConfig: &EngineConfig{
+			ID:      "copilot",
+			Version: "1.0.0",
+		},
+		SafeOutputs: &SafeOutputsConfig{
+			Jobs: map[string]*SafeJobConfig{
+				"publish-finding": {
+					Env: map[string]string{"CUSTOM_VALUE": "preserved"},
+					Steps: []any{map[string]any{
+						"run": "echo finding",
+						"env": map[string]any{"GH_AW_WORKFLOW_NAME": "Step override"},
+					}},
+				},
+			},
+			Staged: templatableBoolPtr("true"),
+		},
+	}
+
+	_, err := c.buildSafeJobs(data, false)
+	require.NoError(t, err)
+	job, exists := c.jobManager.GetJob("publish_finding")
+	require.True(t, exists)
+	require.Equal(t, `"custom-finding"`, job.Env["GH_AW_WORKFLOW_ID"])
+	require.Equal(t, `"Custom Finding"`, job.Env["GH_AW_WORKFLOW_NAME"])
+	require.Equal(t, `"${{ github.repository }}/custom-finding"`, job.Env["GH_AW_CALLER_WORKFLOW_ID"])
+	require.Equal(t, `"tracking-123"`, job.Env["GH_AW_TRACKER_ID"])
+	require.Equal(t, `"copilot"`, job.Env["GH_AW_ENGINE_ID"])
+	require.Equal(t, `"test-model"`, job.Env["GH_AW_ENGINE_MODEL"])
+	require.Equal(t, `"true"`, job.Env["GH_AW_SAFE_OUTPUTS_STAGED"])
+	steps := strings.Join(job.Steps, "")
+	require.Contains(t, steps, "CUSTOM_VALUE: preserved")
+	require.Contains(t, steps, "GH_AW_WORKFLOW_NAME: Step override")
+}
+
 func TestParseSafeJobsConfigMax(t *testing.T) {
 	c := NewCompiler()
 
@@ -443,7 +484,7 @@ func TestParseAndBuildSafeJobsRunsOnObject(t *testing.T) {
 				"group":  "safe-job-runners",
 				"labels": []any{"linux", "x64"},
 			},
-			expected: "runs-on:\n      group: safe-job-runners\n      labels:\n      - linux\n      - x64",
+			expected: "runs-on:\n      group: safe-job-runners\n      labels:\n        - linux\n        - x64",
 		},
 	}
 
@@ -519,7 +560,7 @@ safe-outputs:
 	compiled, err := os.ReadFile(filepath.Join(tmpDir, "safe-job-runs-on-object.lock.yml"))
 	require.NoError(t, err)
 	notifyJob := extractJobSection(string(compiled), "notify")
-	require.Contains(t, notifyJob, "    runs-on:\n      group: safe-job-runners\n      labels:\n      - linux")
+	require.Contains(t, notifyJob, "    runs-on:\n      group: safe-job-runners\n      labels:\n        - linux")
 }
 
 func TestParseAndBuildSafeJobsSingleRunsOnList(t *testing.T) {
@@ -1291,6 +1332,7 @@ func TestCollectSafeJobArtifactPaths(t *testing.T) {
 		"/tmp/gh-aw/agent/alpha/**/*.yml",
 		"/tmp/gh-aw/agent/alpha/**/*.jsonl",
 		"/tmp/gh-aw/agent/alpha/**/*.patch",
+		"/tmp/gh-aw/agent/alpha/**/*.html",
 		"/tmp/gh-aw/agent/alpha/extra.json",
 		"/tmp/gh-aw/agent/zeta/**/*.txt",
 		"/tmp/gh-aw/agent/zeta/**/*.json",
@@ -1300,7 +1342,22 @@ func TestCollectSafeJobArtifactPaths(t *testing.T) {
 		"/tmp/gh-aw/agent/zeta/**/*.yml",
 		"/tmp/gh-aw/agent/zeta/**/*.jsonl",
 		"/tmp/gh-aw/agent/zeta/**/*.patch",
+		"/tmp/gh-aw/agent/zeta/**/*.html",
 	}, paths)
+}
+
+func TestMCPLogArtifactPathsRemainIncluded(t *testing.T) {
+	c := NewCompiler()
+	jobs := c.parseSafeJobsConfig(map[string]any{
+		"direct": map[string]any{"artifacts": []any{"/tmp/gh-aw/aw-mcp/logs/runs.json"}},
+		"broad":  map[string]any{"artifacts": []any{"/tmp/gh-aw/"}},
+	})
+
+	require.NoError(t, jobs["direct"].artifactsError)
+	require.NoError(t, jobs["broad"].artifactsError)
+	paths := collectSafeJobArtifactPaths(jobs)
+	require.Contains(t, paths, "/tmp/gh-aw/aw-mcp/logs/runs.json")
+	require.Contains(t, paths, "/tmp/gh-aw/**/*.json")
 }
 
 func TestCompileSafeJobArtifactsIncludedInAgentUpload(t *testing.T) {

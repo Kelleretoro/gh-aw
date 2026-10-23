@@ -21,7 +21,7 @@ func TestHandlerRegistryDomainComposition(t *testing.T) {
 		{name: "commentHandlerRegistry", registry: commentHandlerRegistry, wantKeys: []string{"add_comment", "hide_comment"}},
 		{name: "jiraHandlerRegistry", registry: jiraHandlerRegistry, wantKeys: []string{"jira_create_issue", "jira_update_issue", "jira_add_comment", "jira_add_label"}},
 		{name: "releaseHandlerRegistry", registry: releaseHandlerRegistry, wantKeys: []string{"update_release"}},
-		{name: "diagnosticHandlerRegistry", registry: diagnosticHandlerRegistry, wantKeys: []string{"missing_tool", "missing_data", "noop", "report_incomplete", "create_report_incomplete_issue"}},
+		{name: "diagnosticHandlerRegistry", registry: diagnosticHandlerRegistry, wantKeys: []string{"report_missing_tool", "report_missing_data", "noop", "report_incomplete", "create_report_incomplete_issue"}},
 		{name: "azureDevOpsWorkItemHandlerRegistry", registry: azureDevOpsWorkItemHandlerRegistry, wantKeys: []string{"ado_create_work_item", "ado_update_work_item", "ado_comment_on_work_item", "ado_assign_work_item", "ado_link_work_items", "ado_upload_workitem_attachment"}},
 		{name: "linearHandlerRegistry", registry: linearHandlerRegistry, wantKeys: []string{"linear_create_issue", "linear_add_comment", "linear_update_issue"}},
 	}
@@ -114,8 +114,8 @@ func TestHandlerRegistryBuilders(t *testing.T) {
 		{name: "jira_add_label", cfg: &SafeOutputsConfig{JiraAddLabel: &JiraSafeOutputConfig{}}},
 		{name: "hide_comment", cfg: &SafeOutputsConfig{HideComment: &HideCommentConfig{}}},
 		{name: "update_release", cfg: &SafeOutputsConfig{UpdateRelease: &UpdateReleaseConfig{}}},
-		{name: "missing_tool", cfg: &SafeOutputsConfig{MissingTool: &MissingToolConfig{}}},
-		{name: "missing_data", cfg: &SafeOutputsConfig{MissingData: &MissingDataConfig{}}},
+		{name: "report_missing_tool", cfg: &SafeOutputsConfig{MissingTool: &MissingToolConfig{}}},
+		{name: "report_missing_data", cfg: &SafeOutputsConfig{MissingData: &MissingDataConfig{}}},
 		{name: "noop", cfg: &SafeOutputsConfig{NoOp: &NoOpConfig{}}},
 		{name: "report_incomplete", cfg: &SafeOutputsConfig{ReportIncomplete: &ReportIncompleteConfig{}}},
 		{name: "create_report_incomplete_issue", cfg: &SafeOutputsConfig{ReportIncomplete: &ReportIncompleteConfig{CreateIssue: strPtr("true")}}},
@@ -140,6 +140,21 @@ func TestHandlerRegistryBuilders(t *testing.T) {
 	}
 }
 
+func TestAssignToAgentHandlerIncludesRequiredLabels(t *testing.T) {
+	builder := handlerRegistry["assign_to_agent"]
+	config := &SafeOutputsConfig{
+		AssignToAgent: &AssignToAgentConfig{
+			RequiredLabels: []string{"copilot-ready"},
+		},
+	}
+
+	got := builder(config)
+
+	if !reflect.DeepEqual(got["required_labels"], []string{"copilot-ready"}) {
+		t.Fatalf("required_labels = %v, want [copilot-ready]", got["required_labels"])
+	}
+}
+
 func TestMergeHandlerMapsKeepsFirstDuplicateKey(t *testing.T) {
 	first := func(*SafeOutputsConfig) map[string]any { return map[string]any{"source": "first"} }
 	second := func(*SafeOutputsConfig) map[string]any { return map[string]any{"source": "second"} }
@@ -154,6 +169,21 @@ func TestMergeHandlerMapsKeepsFirstDuplicateKey(t *testing.T) {
 	}
 	if got["duplicate"](&SafeOutputsConfig{})["source"] != "first" {
 		t.Fatal("mergeHandlerMaps did not keep the first duplicate builder")
+	}
+}
+
+func TestHideCommentHasNoFilterConfig(t *testing.T) {
+	configType := reflect.TypeFor[HideCommentConfig]()
+	for _, field := range []string{"RequiredLabels", "RequiredTitlePrefix"} {
+		if _, exists := configType.FieldByName(field); exists {
+			t.Fatalf("hide-comment advertises unsupported filter %s", field)
+		}
+	}
+	config := handlerRegistry["hide_comment"](&SafeOutputsConfig{HideComment: &HideCommentConfig{}})
+	for _, key := range []string{"required_labels", "required_title_prefix"} {
+		if _, exists := config[key]; exists {
+			t.Fatalf("hide-comment serializes unsupported filter %s", key)
+		}
 	}
 }
 

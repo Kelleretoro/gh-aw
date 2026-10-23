@@ -14,8 +14,11 @@ permissions:
   pull-requests: read
 
 
-engine: pi
-model: copilot/auto
+engine:
+  id: pi
+  model-routing:
+    goal: cost
+    mode: auto
 network:
   allowed:
     - defaults

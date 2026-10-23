@@ -46,11 +46,13 @@ func toEngineEnvValueString(value any) (string, bool) {
 type EngineConfig struct {
 	ID                 string
 	Version            string
+	ChecksumsSHA256    string      // Trusted release checksum-manifest digest (Copilot CLI only)
 	LLMProvider        LLMProvider // Inference provider override for this engine (engine.provider / engine.model-provider)
 	ContextWindow      int         // Model context window metadata for engines that need explicit model catalog entries
 	PermissionMode     string
 	MaxTurns           string
 	MaxToolDenials     string // Maximum repeated tool denials before stopping inference (copilot SDK mode only)
+	MaxToolCalls       string // Maximum dispatched tool calls (Copilot SDK mode only)
 	MaxRuns            int    // Maximum number of LLM invocations per run (AWF apiProxy.maxRuns)
 	MaxTurnCacheMisses int    // Maximum number of consecutive cache misses per run (AWF apiProxy.maxCacheMisses)
 	MaxContinuations   int    // Maximum number of continuations for autopilot mode (copilot engine only; > 1 enables --autopilot)
@@ -68,6 +70,7 @@ type EngineConfig struct {
 	Agent              string // Agent identifier for copilot --agent flag (copilot engine only)
 	APITarget          string // Custom API endpoint hostname (e.g., "api.acme.ghe.com" or "api.enterprise.githubcopilot.com")
 	Bare               bool   // When true, disables automatic loading of context/instructions (copilot: --no-custom-instructions, claude: --bare, codex: --no-system-prompt, gemini: GEMINI_SYSTEM_MD=/dev/null)
+	DynamicWorkflows   *bool  // When false, disables dynamic workflows for engines that support them
 	// Inline definition fields (populated when engine.runtime is specified in frontmatter)
 	IsInlineDefinition bool   // true when the engine is defined inline via engine.runtime + optional engine.provider
 	InlineProviderID   string // engine.provider.id  (e.g. "openai", "anthropic")
@@ -85,6 +88,9 @@ type EngineConfig struct {
 	// Extensions is a list of engine-specific plugin names to install before launching the engine.
 	// Currently used by the Pi engine: each entry is passed to `pi install <extension>`.
 	Extensions []string
+
+	ModelRouting   *CopilotModelRoutingConfig
+	FallbackModels []string
 
 	// CopilotSDK enables the GitHub Copilot SDK integration.
 	// When true the compiler enables a harness-managed Copilot CLI headless sidecar
@@ -268,10 +274,17 @@ type EngineNetworkConfig struct {
 type engineTopLevelConfig struct {
 	maxTurns           string
 	maxToolDenials     string
+	maxToolCalls       string
 	maxAICredits       int64
 	maxTurnCacheMisses int
 	maxRuns            int
 	model              string
+}
+
+// DynamicWorkflowsEnabled reports whether dynamic workflows are enabled in the engine configuration.
+// The feature requires explicit opt-in for every engine.
+func (e *EngineConfig) DynamicWorkflowsEnabled() bool {
+	return e != nil && e.DynamicWorkflows != nil && *e.DynamicWorkflows
 }
 
 // GetMaxAICredits returns the configured engine AI credits budget, falling back to the default.
@@ -321,6 +334,7 @@ func parseTopLevelEngineConfig(frontmatter map[string]any) engineTopLevelConfig 
 	topLevel := engineTopLevelConfig{
 		maxTurns:           parseMaxTurnsValue(frontmatter["max-turns"]),
 		maxToolDenials:     parseMaxToolDenialsValue(frontmatter["max-tool-denials"]),
+		maxToolCalls:       parseMaxToolCallsValue(frontmatter["max-tool-calls"]),
 		maxAICredits:       parseMaxAICreditsValue(frontmatter["max-ai-credits"]),
 		maxTurnCacheMisses: parseMaxTurnCacheMissesValue(frontmatter["max-turn-cache-misses"]),
 		maxRuns:            parseMaxRunsValue(frontmatter["max-turns"]),
@@ -340,6 +354,7 @@ func extractStringEngineConfig(engineStr string, topLevel engineTopLevelConfig) 
 		ID:                 engineStr,
 		MaxTurns:           topLevel.maxTurns,
 		MaxToolDenials:     topLevel.maxToolDenials,
+		MaxToolCalls:       topLevel.maxToolCalls,
 		MaxRuns:            topLevel.maxRuns,
 		MaxTurnCacheMisses: topLevel.maxTurnCacheMisses,
 		MaxAICredits:       topLevel.maxAICredits,
@@ -414,6 +429,7 @@ func applyInlineEngineFields(config *EngineConfig, engineObj map[string]any, top
 	applyEngineContextWindowField(config, engineObj)
 	config.MaxTurns = topLevel.maxTurns
 	config.MaxToolDenials = topLevel.maxToolDenials
+	config.MaxToolCalls = topLevel.maxToolCalls
 	config.MaxRuns = topLevel.maxRuns
 	config.MaxTurnCacheMisses = topLevel.maxTurnCacheMisses
 	config.MaxAICredits = topLevel.maxAICredits
@@ -427,6 +443,9 @@ func extractReferencedEngineConfig(engineObj map[string]any, topLevel engineTopL
 	if version, hasVersion := engineObj["version"]; hasVersion {
 		config.Version = stringutil.ParseVersionValue(version)
 	}
+	if digest, ok := engineObj["checksums-sha256"].(string); ok {
+		config.ChecksumsSHA256 = digest
+	}
 	resolvedModel := resolveEngineModel(engineObj, topLevel, "")
 	applyReferencedEngineFields(config, engineObj, topLevel)
 	engineLog.Printf("Extracted engine configuration: ID=%s", config.ID)
@@ -437,6 +456,14 @@ func applyReferencedEngineFields(config *EngineConfig, engineObj map[string]any,
 	applyEngineProviderFields(config, engineObj)
 	applyEnginePermissionMode(config, engineObj)
 	applyEngineContextWindowField(config, engineObj)
+	applyEngineModelRoutingField(config, engineObj)
+	if models, ok := engineObj["fallback-models"].([]any); ok {
+		for _, model := range models {
+			if name, ok := model.(string); ok {
+				config.FallbackModels = append(config.FallbackModels, name)
+			}
+		}
+	}
 	applyEngineTurnFields(config, engineObj, topLevel)
 	applyEngineConcurrencyField(config, engineObj)
 	applyEngineStringFields(config, engineObj)
@@ -448,6 +475,29 @@ func applyReferencedEngineFields(config *EngineConfig, engineObj map[string]any,
 	applyEngineExtensionsField(config, engineObj)
 	applyEngineBooleanFields(config, engineObj)
 	applyEngineTopLevelOverrides(config, topLevel)
+}
+
+func applyEngineModelRoutingField(config *EngineConfig, engineObj map[string]any) {
+	routing, ok := engineObj["model-routing"].(map[string]any)
+	if !ok {
+		return
+	}
+	modelRouting := &CopilotModelRoutingConfig{}
+	if goal, ok := routing["goal"].(string); ok {
+		modelRouting.Goal = goal
+	}
+	if mode, ok := routing["mode"].(string); ok {
+		modelRouting.Mode = mode
+	}
+	if models, ok := routing["allowed-models"].([]any); ok {
+		modelRouting.AllowedModels = make([]string, 0, len(models))
+		for _, model := range models {
+			if modelName, ok := model.(string); ok {
+				modelRouting.AllowedModels = append(modelRouting.AllowedModels, modelName)
+			}
+		}
+	}
+	config.ModelRouting = modelRouting
 }
 
 func resolveEngineModel(engineObj map[string]any, topLevel engineTopLevelConfig, fallback string) string {
@@ -496,6 +546,7 @@ func applyEngineTurnFields(config *EngineConfig, engineObj map[string]any, topLe
 		config.MaxTurns = topLevel.maxTurns
 	}
 	config.MaxToolDenials = topLevel.maxToolDenials
+	config.MaxToolCalls = topLevel.maxToolCalls
 	if maxCont, hasMaxCont := engineObj["max-continuations"]; hasMaxCont {
 		if val, ok := typeutil.ParseIntValue(maxCont); ok {
 			config.MaxContinuations = val
@@ -711,6 +762,7 @@ func applyEngineExtensionsField(config *EngineConfig, engineObj map[string]any) 
 
 func applyEngineBooleanFields(config *EngineConfig, engineObj map[string]any) {
 	applyEngineBareField(config, engineObj)
+	applyEngineDynamicWorkflowsField(config, engineObj)
 	if sdkVal, ok := engineObj["copilot-sdk"].(bool); ok {
 		config.CopilotSDK = sdkVal
 		engineLog.Printf("Extracted copilot-sdk: %v", config.CopilotSDK)
@@ -718,6 +770,13 @@ func applyEngineBooleanFields(config *EngineConfig, engineObj map[string]any) {
 	if config.Driver != "" && config.ID == "copilot" && !config.CopilotSDK {
 		config.CopilotSDK = true
 		engineLog.Print("Enabled copilot-sdk because driver is configured for copilot engine")
+	}
+}
+
+func applyEngineDynamicWorkflowsField(config *EngineConfig, engineObj map[string]any) {
+	if enabled, ok := engineObj["dynamic-workflows"].(bool); ok {
+		config.DynamicWorkflows = &enabled
+		engineLog.Printf("Extracted dynamic-workflows: %v", enabled)
 	}
 }
 
@@ -732,17 +791,21 @@ func applyEngineTopLevelOverrides(config *EngineConfig, topLevel engineTopLevelC
 	if topLevel.maxTurns != "" {
 		config.MaxTurns = topLevel.maxTurns
 	}
+	if topLevel.maxToolCalls != "" {
+		config.MaxToolCalls = topLevel.maxToolCalls
+	}
 	config.MaxRuns = topLevel.maxRuns
 	config.MaxTurnCacheMisses = topLevel.maxTurnCacheMisses
 	config.MaxAICredits = topLevel.maxAICredits
 }
 
 func buildTopLevelOnlyEngineConfig(topLevel engineTopLevelConfig) (string, *EngineConfig, string) {
-	if topLevel.maxTurns != "" || topLevel.maxToolDenials != "" || topLevel.maxAICredits != 0 ||
+	if topLevel.maxTurns != "" || topLevel.maxToolDenials != "" || topLevel.maxToolCalls != "" || topLevel.maxAICredits != 0 ||
 		topLevel.maxRuns > 0 || topLevel.maxTurnCacheMisses > 0 || topLevel.model != "" {
 		return "", &EngineConfig{
 			MaxTurns:           topLevel.maxTurns,
 			MaxToolDenials:     topLevel.maxToolDenials,
+			MaxToolCalls:       topLevel.maxToolCalls,
 			MaxRuns:            topLevel.maxRuns,
 			MaxTurnCacheMisses: topLevel.maxTurnCacheMisses,
 			MaxAICredits:       topLevel.maxAICredits,

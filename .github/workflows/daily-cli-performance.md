@@ -40,8 +40,8 @@ permissions:
 tracker-id: daily-cli-performance
 engine:
   id: codex
-  model-provider: openai
-model: openai/gpt-5.3-codex
+  model-provider: github
+model: copilot/gpt-6-luna
 tools:
   cli-proxy: true
   repo-memory:
@@ -107,8 +107,8 @@ Run daily performance benchmarks for workflow compilation, store results in cach
 ## Available Safe-Input Tools
 
 This workflow imports `shared/go-make.md` which provides:
-- **mcpscripts-go** - Execute Go commands (e.g., args: "test ./...", "build ./cmd/gh-aw")
-- **mcpscripts-make** - Execute Make targets (e.g., args: "build", "test-unit", "bench")
+- **mcpscripts-go** - Execute Go commands (e.g., args: ["test", "./..."], ["build", "./cmd/gh-aw"])
+- **mcpscripts-make** - Execute Make targets (e.g., args: ["build"], ["test-unit"], ["bench"])
 
 **IMPORTANT**: Use **bash** for all benchmark and validation commands in this workflow. MCP connections time out after ~5 minutes of inactivity; the analysis phases in this workflow may exceed that threshold, causing end-of-phase MCP calls to fail with `MCP error -32003: context canceled`. Always prefer `make <target>` or `go <args>` in bash over `mcpscripts-*` tools in this workflow.
 

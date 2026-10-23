@@ -28,7 +28,7 @@ concurrency:
   group: "gh-aw-${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number }}"
   cancel-in-progress: false
 engine: pi
-model: copilot/auto
+model: copilot/claude-haiku-4.5
 network:
   allowed:
     - defaults
@@ -53,10 +53,19 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 safe-outputs:
   add-labels:
     allowed: [spam, ai-generated, link-spam, ai-inspected]
     target: "*"
+    item-schema:
+      type: object
+      required: [name, rationale, confidence]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        rationale: { type: string }
+        confidence: { type: string, enum: [HIGH] }
   hide-comment:
     max: 5
     allowed-reasons: [spam]
@@ -240,7 +249,7 @@ Use the cache memory at `/tmp/gh-aw/cache-memory/` to track spam activity across
 
 ### Reading the Spam Log
 
-At the start of your analysis, read the spam log file at `/tmp/gh-aw/cache-memory/spam-log.json` in the **same turn** as the pre-fetched context files. **This file is optional.** A missing file is completely normal — it will be absent on the first run, after the 24-hour cache expires, or after a cache miss. A missing file is **not** a missing-data error. If the file does not exist, start immediately with an empty array and continue your analysis. **Never call `missing_data` for a missing spam log** — doing so will cause the workflow to fail unnecessarily. The file contains an array of spam events:
+At the start of your analysis, read the spam log file at `/tmp/gh-aw/cache-memory/spam-log.json` in the **same turn** as the pre-fetched context files. **This file is optional.** A missing file is completely normal — it will be absent on the first run, after the 24-hour cache expires, or after a cache miss. A missing file is **not** a missing-data error. If the file does not exist, start immediately with an empty array and continue your analysis. **Never call `report_missing_data` for a missing spam log** — doing so will cause the workflow to fail unnecessarily. The file contains an array of spam events:
 
 ```json
 [

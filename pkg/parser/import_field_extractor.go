@@ -25,6 +25,7 @@ type importAccumulator struct {
 	promptImports            []PromptImportEntry
 	stepsBuilder             strings.Builder
 	copilotSetupStepsBuilder strings.Builder // Steps from copilot-setup-steps.yml (inserted at start)
+	actionPinSourceVersions  map[string]string
 	preStepsBuilder          strings.Builder
 	preAgentStepsBuilder     strings.Builder
 	runtimesBuilder          strings.Builder
@@ -42,6 +43,7 @@ type importAccumulator struct {
 	pluginObjects            []map[string]any
 	safeOutputs              []string
 	gradersBuilder           strings.Builder
+	graderRunSources         map[string]string
 	mcpScripts               []string
 	bots                     []string
 	botsSet                  map[string]bool
@@ -88,6 +90,7 @@ type importAccumulator struct {
 	// round-trip consistently through import processing.
 	mergedMaxTurns           string
 	mergedMaxToolDenials     string
+	mergedMaxToolCalls       string
 	mergedMaxRuns            string
 	mergedMaxTurnCacheMisses string
 	mergedMaxAICredits       string
@@ -98,7 +101,9 @@ type importAccumulator struct {
 	excludedEnv    []string
 	excludedEnvSet map[string]bool
 	// Best-effort sub-agent frontmatter warnings collected during BFS traversal.
-	warnings []string
+	warnings       []string
+	subAgentModels []SubAgentModel
+	subAgents      []InlineSubAgent
 }
 
 const (
@@ -111,15 +116,17 @@ const (
 // during deduplication. Slices are left as nil, which is valid for append operations.
 func newImportAccumulator() *importAccumulator {
 	return &importAccumulator{
-		botsSet:               make(map[string]bool),
-		labelsSet:             make(map[string]bool),
-		skipRolesSet:          make(map[string]bool),
-		skipBotsSet:           make(map[string]bool),
-		ambientFoldersSet:     make(map[string]bool),
-		importInputs:          make(map[string]any),
-		envSources:            make(map[string]string),
-		sandboxAgentMountsSet: make(map[string]bool),
-		excludedEnvSet:        make(map[string]bool),
+		botsSet:                 make(map[string]bool),
+		labelsSet:               make(map[string]bool),
+		skipRolesSet:            make(map[string]bool),
+		skipBotsSet:             make(map[string]bool),
+		ambientFoldersSet:       make(map[string]bool),
+		importInputs:            make(map[string]any),
+		envSources:              make(map[string]string),
+		sandboxAgentMountsSet:   make(map[string]bool),
+		excludedEnvSet:          make(map[string]bool),
+		actionPinSourceVersions: make(map[string]string),
+		graderRunSources:        make(map[string]string),
 	}
 }
 
@@ -180,13 +187,22 @@ func (acc *importAccumulator) extractImportFields(content []byte, item importQue
 func (acc *importAccumulator) prepareFrontmatter(content []byte, item importQueueItem, visited map[string]struct{}) (origFm, fm map[string]any, err error) {
 	origContent := string(content)
 	origParsed, origParseErr := parseOriginalFrontmatter(content, item.fullPath, origContent)
+	if origParseErr == nil {
+		acc.collectActionPinSourceVersions([]byte(strings.Join(origParsed.FrontmatterLines, "\n")))
+	}
 	origFm = frontmatterMapOrEmpty(origParsed, origParseErr)
 	rawContent, wasSubstituted := acc.applyImportDefaultsToContent(origContent, origFm, item.inputs)
-	acc.collectInlineSubAgentWarnings(item.importPath, rawContent, wasSubstituted, origParsed, origParseErr)
+	if parsed, err := ExtractFrontmatterFromContent(rawContent); err == nil {
+		acc.collectActionPinSourceVersions([]byte(strings.Join(parsed.FrontmatterLines, "\n")))
+	}
+	if err := acc.collectInlineSubAgentWarnings(item.importPath, item.sectionName, rawContent, wasSubstituted, origParsed, origParseErr); err != nil {
+		return nil, nil, err
+	}
 	toolsContent, err := acc.extractToolsContent(rawContent, item, visited, wasSubstituted)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	acc.toolsBuilder.WriteString(toolsContent + "\n")
 	importRelPath := computeImportRelPath(item.fullPath, item.importPath)
 	if err := acc.trackRuntimeOrInlineImport(item.fullPath, importRelPath, rawContent, wasSubstituted); err != nil {
@@ -195,6 +211,18 @@ func (acc *importAccumulator) prepareFrontmatter(content []byte, item importQueu
 
 	fm = parseFrontmatterForExtraction(rawContent, wasSubstituted, origFm)
 	return origFm, fm, nil
+}
+
+func (acc *importAccumulator) collectActionPinSourceVersions(content []byte) {
+	acc.addActionPinSourceVersions(ActionPinSourceVersions(content))
+}
+
+func (acc *importAccumulator) addActionPinSourceVersions(sourceVersions map[string]string) {
+	for reference, label := range sourceVersions {
+		if _, exists := acc.actionPinSourceVersions[reference]; !exists {
+			acc.actionPinSourceVersions[reference] = label
+		}
+	}
 }
 
 func parseOriginalFrontmatter(content []byte, fullPath, origContent string) (*FrontmatterResult, error) {
@@ -218,24 +246,46 @@ func (acc *importAccumulator) applyImportDefaultsToContent(origContent string, o
 	return rawContent, rawContent != origContent
 }
 
-func (acc *importAccumulator) collectInlineSubAgentWarnings(importPath, rawContent string, wasSubstituted bool, origParsed *FrontmatterResult, origParseErr error) {
-	var bodyForValidation string
+func (acc *importAccumulator) collectInlineSubAgentWarnings(importPath, sectionName, rawContent string, wasSubstituted bool, origParsed *FrontmatterResult, origParseErr error) error {
+	var parsed *FrontmatterResult
+	var parseErr error
 	if !wasSubstituted && origParseErr == nil {
-		bodyForValidation = origParsed.Markdown
+		parsed = origParsed
+	} else {
+		parsed, parseErr = ExtractFrontmatterFromContent(rawContent)
 	}
-	agentWarnings := validateSubAgentFrontmatterWarnings(bodyForValidation, rawContent)
+	if parseErr != nil {
+		for _, w := range ValidateInlineSubAgentsFrontmatter(rawContent) {
+			msg := fmt.Sprintf("import '%s': %s", importPath, w)
+			acc.warnings = append(acc.warnings, msg)
+			parserLog.Printf("%s", msg)
+		}
+		return nil
+	}
+	bodyForValidation := parsed.Markdown
+	if sectionName != "" {
+		var err error
+		bodyForValidation, err = ExtractMarkdownSection(bodyForValidation, sectionName)
+		if err != nil {
+			return fmt.Errorf("failed to extract section '%s' from imported file '%s': %w", sectionName, importPath, err)
+		}
+	}
+	var agentWarnings []string
+	if bodyForValidation == "" && sectionName == "" {
+		agentWarnings = ValidateInlineSubAgentsFrontmatter(rawContent)
+	} else {
+		agentWarnings = ValidateInlineSubAgentsInBody(bodyForValidation)
+	}
+	acc.subAgentModels = append(acc.subAgentModels, ExtractSubAgentModels(bodyForValidation)...)
+	if _, agents, err := ExtractInlineSubAgents(bodyForValidation); err == nil {
+		acc.subAgents = append(acc.subAgents, agents...)
+	}
 	for _, w := range agentWarnings {
 		msg := fmt.Sprintf("import '%s': %s", importPath, w)
 		acc.warnings = append(acc.warnings, msg)
 		parserLog.Printf("%s", msg)
 	}
-}
-
-func validateSubAgentFrontmatterWarnings(bodyForValidation, rawContent string) []string {
-	if bodyForValidation != "" {
-		return ValidateInlineSubAgentsInBody(bodyForValidation)
-	}
-	return ValidateInlineSubAgentsFrontmatter(rawContent)
+	return nil
 }
 
 func (acc *importAccumulator) extractToolsContent(rawContent string, item importQueueItem, visited map[string]struct{}, wasSubstituted bool) (string, error) {
@@ -382,7 +432,7 @@ func (acc *importAccumulator) extractEngineMCPSettings(mcpVal any, fullPath stri
 // extractConfigFields extracts scalar and builder-based configuration fields from the
 // frontmatter map and writes them into the appropriate accumulator builders and slices.
 //
-// Side effects: acc.mergedMaxTurns, acc.mergedMaxToolDenials, acc.mergedMaxRuns, acc.mergedMaxAICredits,
+// Side effects: acc.mergedMaxTurns, acc.mergedMaxToolDenials, acc.mergedMaxToolCalls, acc.mergedMaxRuns, acc.mergedMaxAICredits,
 // acc.mergedMaxDailyAICredits, acc.mcpServersBuilder,
 // acc.safeOutputs, acc.mcpScripts, acc.stepsBuilder, acc.runtimesBuilder,
 // acc.servicesBuilder, acc.networkBuilder, acc.permissionsBuilder,
@@ -390,6 +440,7 @@ func (acc *importAccumulator) extractEngineMCPSettings(mcpVal any, fullPath stri
 func (acc *importAccumulator) extractConfigFields(fm map[string]any, fullPath string) {
 	acc.extractFirstWinsJSONField(fm, fullPath, "max-turns", &acc.mergedMaxTurns)
 	acc.extractFirstWinsJSONField(fm, fullPath, "max-tool-denials", &acc.mergedMaxToolDenials)
+	acc.extractFirstWinsJSONField(fm, fullPath, "max-tool-calls", &acc.mergedMaxToolCalls)
 	acc.extractFirstWinsJSONField(fm, fullPath, "max-runs", &acc.mergedMaxRuns)
 	acc.extractFirstWinsJSONField(fm, fullPath, "max-turn-cache-misses", &acc.mergedMaxTurnCacheMisses)
 	acc.extractFirstWinsJSONField(fm, fullPath, "max-ai-credits", &acc.mergedMaxAICredits)
@@ -408,6 +459,15 @@ func (acc *importAccumulator) extractConfigFields(fm map[string]any, fullPath st
 	acc.extractPlugins(fm)
 	acc.appendJSONSliceField(fm, "safe-outputs", "{}", &acc.safeOutputs)
 	acc.appendJSONBuilderField(fm, "graders", "{}", &acc.gradersBuilder)
+	if graders, ok := fm["graders"].(map[string]any); ok {
+		for id, value := range graders {
+			if definition, ok := value.(map[string]any); ok {
+				if _, hasRun := definition["run"]; hasRun {
+					acc.graderRunSources[id] = fullPath
+				}
+			}
+		}
+	}
 	acc.appendJSONSliceField(fm, "mcp-scripts", "{}", &acc.mcpScripts)
 	acc.appendJSONBuilderField(fm, "runtimes", "{}", &acc.runtimesBuilder)
 	acc.appendYAMLBuilderField(fm, "services", &acc.servicesBuilder)
@@ -1008,12 +1068,14 @@ func (acc *importAccumulator) buildImportsResult() *ImportsResult {
 		MergedPluginObjects:           acc.pluginObjects,
 		MergedSafeOutputs:             acc.safeOutputs,
 		MergedGraders:                 acc.gradersBuilder.String(),
+		GraderRunSources:              acc.graderRunSources,
 		MergedMCPScripts:              acc.mcpScripts,
 		MergedMarkdown:                acc.markdownBuilder.String(),
 		ImportPaths:                   acc.importPaths,
 		PromptImports:                 acc.promptImports,
 		MergedSteps:                   acc.stepsBuilder.String(),
 		CopilotSetupSteps:             acc.copilotSetupStepsBuilder.String(),
+		ActionPinSourceVersions:       acc.actionPinSourceVersions,
 		MergedPreSteps:                acc.preStepsBuilder.String(),
 		MergedPreAgentSteps:           acc.preAgentStepsBuilder.String(),
 		MergedRuntimes:                acc.runtimesBuilder.String(),
@@ -1043,6 +1105,8 @@ func (acc *importAccumulator) buildImportsResult() *ImportsResult {
 		MergedDefaultAiCreditsPricing: acc.defaultAiCreditsPricing,
 		MergedObservability:           mergeObservabilityConfigs(acc.observabilityConfigs),
 		AgentFile:                     acc.agentFile,
+		SubAgentModels:                acc.subAgentModels,
+		SubAgents:                     acc.subAgents,
 		AgentImportSpec:               acc.agentImportSpec,
 		RepositoryImports:             acc.repositoryImports,
 		ImportInputs:                  acc.importInputs,
@@ -1062,6 +1126,7 @@ func (acc *importAccumulator) populateImportsResultScalars(result *ImportsResult
 	result.MergedEngineModel = acc.mergedEngineModel
 	result.MergedMaxTurns = acc.mergedMaxTurns
 	result.MergedMaxToolDenials = acc.mergedMaxToolDenials
+	result.MergedMaxToolCalls = acc.mergedMaxToolCalls
 	result.MergedMaxRuns = acc.mergedMaxRuns
 	result.MergedMaxTurnCacheMisses = acc.mergedMaxTurnCacheMisses
 	result.MergedMaxAICredits = acc.mergedMaxAICredits

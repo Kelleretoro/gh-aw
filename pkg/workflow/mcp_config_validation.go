@@ -38,6 +38,8 @@ var builtInToolNames = map[string]bool{
 	"drive-memory":      true,
 	"comment-memory":    true,
 	"repo-memory":       true,
+	"ledger":            true,
+	"work-queue":        true,
 	"bash":              true,
 	"edit":              true,
 	"web-fetch":         true,
@@ -157,6 +159,7 @@ func getRawMCPConfig(toolConfig map[string]any) (map[string]any, error) {
 		"env":             {},
 		"headers":         {},
 		"auth":            {}, // upstream OIDC authentication (HTTP servers only)
+		"ca-cert-file":    {},
 		"version":         {},
 		"args":            {},
 		"entrypoint":      {},

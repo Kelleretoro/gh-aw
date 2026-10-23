@@ -21,10 +21,15 @@ type LogsDownloadOptions struct {
 	Verbose            bool
 	ToolGraph          bool
 	NoStaged           bool
+	DryRun             bool
+	NoDryRun           bool
 	FirewallOnly       bool
 	NoFirewall         bool
 	Parse              bool
 	JSONOutput         bool
+	Episodes           bool
+	Outcomes           bool
+	OutcomesDir        string
 	TimeoutMinutes     int
 	TimeoutSeconds     int
 	// MaxGitHubAPIRateLimit is the maximum number of core API requests that may
@@ -33,8 +38,12 @@ type LogsDownloadOptions struct {
 	// API-reported limit.
 	MaxGitHubAPIRateLimit int
 	// MaxStorageMB prunes non-essential cache data and stops new artifact
-	// downloads when OutputDir cannot be reduced below this size.
+	// downloads when OutputDir cannot be reduced below this size. Omitted zero
+	// defaults to 1024 MB; set MaxStorageMBSet to request unlimited storage.
 	MaxStorageMB int
+	// MaxStorageMBSet distinguishes explicit zero (unlimited) from an omitted
+	// budget. Nonzero MaxStorageMB values are honored regardless of this flag.
+	MaxStorageMBSet bool
 	// PruneOlderRuns allows the storage limiter to remove complete older run
 	// directories after non-essential cache pruning cannot free enough space.
 	PruneOlderRuns    bool
@@ -99,10 +108,15 @@ type StdinLogsOptions struct {
 	Verbose           bool
 	ToolGraph         bool
 	NoStaged          bool
+	DryRun            bool
+	NoDryRun          bool
 	FirewallOnly      bool
 	NoFirewall        bool
 	Parse             bool
 	JSONOutput        bool
+	Episodes          bool
+	Outcomes          bool
+	OutcomesDir       string
 	Timeout           int
 	MaxStorageMB      int
 	PruneOlderRuns    bool
@@ -117,6 +131,9 @@ type StdinLogsOptions struct {
 	Format            string
 	ReportFile        string
 	CachedJSONL       string
+	// MaxStorageMBSet requests unlimited storage when MaxStorageMB is zero;
+	// otherwise an omitted zero defaults to 1024 MB.
+	MaxStorageMBSet bool
 	// ArtifactSets defaults to nil (download all artifacts) when this API is used
 	// programmatically. The CLI passes ["usage"] to match the logs command default.
 	ArtifactSets []string
@@ -129,6 +146,8 @@ type continuationOptions struct {
 	startDate             string
 	endDate               string
 	engine                string
+	dryRun                bool
+	noDryRun              bool
 	branch                string
 	afterRunID            int64
 	ignoreWorkflowRuns    []int64
@@ -153,21 +172,23 @@ type continuationOptions struct {
 
 // renderLogsOutputOptions holds configuration for renderLogsOutput.
 type renderLogsOutputOptions struct {
-	outputDir      string
-	summaryFile    string
-	format         string
-	reportFile     string
-	jsonOutput     bool
-	toolGraph      bool
-	train          bool
-	drain3Weights  string
-	audit          bool
-	continuation   *ContinuationData
-	message        string
-	verbose        bool
-	artifactFilter []string
-	startDate      string
-	endDate        string
+	outputDir        string
+	summaryFile      string
+	format           string
+	reportFile       string
+	jsonOutput       bool
+	episodes         bool
+	toolGraph        bool
+	train            bool
+	drain3Weights    string
+	audit            bool
+	continuation     *ContinuationData
+	message          string
+	verbose          bool
+	artifactFilter   []string
+	includeWorkQueue bool
+	startDate        string
+	endDate          string
 	// checkStaleness enables the stale-data warning check. It is only meaningful
 	// for discovery-mode rendering (pagination walking backwards through time
 	// looking for runs); the stdin path processes explicit run IDs with no
@@ -179,10 +200,14 @@ type renderLogsOutputOptions struct {
 	// than firing for timeout-driven continuations too.
 	countLimitReached bool
 	continuations     []WorkflowContinuation
+	// countLimitTargets preserves per-target count bounds even when no
+	// resumable continuation was produced for that target.
+	countLimitTargets []logsWorkflowTarget
 	// suppressRender skips all report rendering after the summary file has been
 	// written, for callers that only want the downloaded artifacts.
 	suppressRender    bool
 	apiRateLimit      *GitHubAPIRateLimitReport
 	apiRateLimits     []*GitHubAPIRateLimitReport
 	cachedJSONLWriter *cachedLogsJSONLWriter
+	outcomeReports    []OutcomesData
 }

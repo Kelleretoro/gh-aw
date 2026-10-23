@@ -149,7 +149,7 @@ When a core team member implements your plan, the coding agent they use will:
 - **Follow code organization patterns** (see [scratchpad/code-organization.md](scratchpad/code-organization.md))
 - **Implement validation** following the architecture in [scratchpad/validation-architecture.md](scratchpad/validation-architecture.md)
 - **Use console formatting** from `pkg/console` for CLI output
-- **Write error messages** following the [Error Message Style Guide](.github/skills/error-messages/SKILL.md) and [docs guide](docs/src/content/docs/contributing/error-messages.md)
+- **Write error messages** following the [Error Message Style Guide](.github/skills/error-messages/SKILL.md) and [docs guide](docs/src/content/docs/troubleshooting/error-messages.md)
 - **Run all quality checks**: `make agent-finish` (build, test, recompile, format, lint)
 - **Update documentation** for new features
 - **Create tests** for new functionality
@@ -172,7 +172,7 @@ For workflow failures, use this prompt with your agent:
 Please debug this workflow failure:
 https://github.com/owner/repo/actions/runs/RUN_ID
 
-Load [https://github.com/github/gh-aw/.github/skills/agentic-workflows/SKILL.md](https://github.com/github/gh-aw/blob/main/.github/skills/agentic-workflows/SKILL.md) and investigate:
+Follow https://raw.githubusercontent.com/github/gh-aw/main/debug.md and investigate:
 - Why the workflow failed
 - What tools were missing
 - How to fix the configuration
@@ -597,6 +597,21 @@ The team follows a **weekly or bi-weekly minor release cadence**, similar to VS 
 
 > **Note:** The release workflow publishes the new version as a **prerelease** on GitHub with `latest=false`. Prereleases are floated for a few days. On Monday, maintainers promote the last known good prerelease to stable so `latest` resolves to that release. Immediately after promotion, a new minor pre-release is kicked off to start the next cycle.
 
+### Release credential changes
+
+Changes to release credential minting, token selection, permissions, or checkout credential persistence require an explicit human security sign-off before merge, including any attempt to reintroduce GitHub App authentication. Record the approving maintainer/security reviewer's identity and link to their approval in the PR description. Automated review, compilation, and the release environment approval are not substitutes for this sign-off.
+
+The PR must document:
+
+- **Scope:** The credential's target repositories and minimum permissions, with a justification for each write permission. A tag-only push does not require `workflows: write`.
+- **Availability and exposure:** For an App token, evidence that the App is installed on the target repository with the required permissions; which steps receive the token; whether checkout persists it for later build steps; and how it is revoked or removed. Do not include token or private-key values.
+- **Validation:** Review both the workflow source and regenerated lock file, including failure handling and downstream-trigger behavior. App-token tag pushes can trigger workflows that `GITHUB_TOKEN` pushes do not.
+- **Rollback:** The known-good credential path, rollback steps, and any previous revert's cause and unresolved review findings.
+
+#### Previous App-token revert
+
+[PR #60214](https://github.com/github/gh-aw/pull/60214) added an App token to the release tag checkout. [PR #60218](https://github.com/github/gh-aw/pull/60218) records the revert reason: the configured `APP_ID` was not installed on `github/gh-aw`, so token minting failed with HTTP 404 before tag creation. The revert restored the `GITHUB_TOKEN`-backed checkout and tag push; it was not a security sign-off for a future attempt. The original [automated review](https://github.com/github/gh-aw/pull/60214#discussion_r3986689467) also flagged unnecessary workflow-write permission and credential exposure to later build steps. Address both the installation failure and these review concerns before reintroducing App-token minting.
+
 ### Steps
 
 1. **Launch the release action**
@@ -611,7 +626,7 @@ The team follows a **weekly or bi-weekly minor release cadence**, similar to VS 
 
    a. **Run the sync-actions workflow** — go to [Actions → sync-actions](https://github.com/github/gh-aw-actions/actions/workflows/sync-actions.yml) and trigger it with the new release tag (e.g. `v1.2.3`).
 
-   b. **Merge the PR** — the sync-actions workflow will open a pull request in `github/gh-aw-actions`. Review and merge it to bring the tag into that repository.
+   b. **Merge the PR** — the sync-actions workflow will open a pull request in `github/gh-aw-actions`. Review and merge it to bring the tag into that repository. The downstream release is created as a **draft**; leave it unpublished while the `gh-aw` prerelease is being evaluated.
 
 3. **Approve the environment gate**
 
@@ -621,9 +636,11 @@ The team follows a **weekly or bi-weekly minor release cadence**, similar to VS 
 
    After floating prereleases for a few days and confirming stability, on Monday:
 
-   a. **Edit the GitHub release** — go to the [Releases page](https://github.com/github/gh-aw/releases), open the new prerelease, uncheck **This is a pre-release**, and save. This promotes the release to a stable full release.
+   a. **Publish `gh-aw-actions` first** — open the matching tag's draft on the [`github/gh-aw-actions` Releases page](https://github.com/github/gh-aw-actions/releases). Ensure **This is a pre-release** is unchecked, select **Set as the latest release**, and publish it. If it is already published, edit it to make it stable and latest. This manual step is mandatory: no cross-repository write token is maintained to publish or promote it automatically.
 
-   b. **Move `latest` to the promoted release** — GitHub resolves `latest` to the most recent non-prerelease release. Promoting the selected prerelease in step (a) updates `latest` automatically.
+   b. **Promote the same tag in `gh-aw`** — run [Actions → Promote Release to Latest](https://github.com/github/gh-aw/actions/workflows/promote-release.yml) with that exact version. The workflow refuses promotion unless `github/gh-aw-actions` already reports that tag as its published, stable latest release, then clears the `gh-aw` prerelease flag and explicitly sets it as latest.
+
+   c. **Verify alignment** — confirm that both repositories' latest releases use the same tag. The **Validate latest release alignment** CI check also verifies this on every CI run, including hourly scheduled runs without recent commits.
 
    Users who install with `version: latest` (the default) will now receive the new release.
 
@@ -649,16 +666,22 @@ Run sync-actions in github/gh-aw-actions (with new tag)
 Merge the sync-actions PR
         │
         ▼
+gh-aw-actions release remains a draft
+        │
+        ▼
 Approve the gh-aw-actions-release environment gate
         │
         ▼
 Release published as prerelease 🎉
         │
         ▼  (Monday — manual)
-Promote prerelease → full release on GitHub Releases page
+Manually publish gh-aw-actions draft as stable & latest FIRST
         │
         ▼
-'latest' now resolves to the new version ✅
+Run Promote Release to Latest in gh-aw with the same tag
+        │
+        ▼
+Both repositories' latest releases now match ✅
         │
         ▼  (same day — start next cycle)
 Launch next minor release action → new prerelease published

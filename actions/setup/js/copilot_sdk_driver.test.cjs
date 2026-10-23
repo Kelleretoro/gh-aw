@@ -1,27 +1,170 @@
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest";
 import { createRequire } from "module";
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 
 const require = createRequire(import.meta.url);
 const { runWithCopilotSDK, parsePermissionConfigFromServerArgs } = require("./copilot_sdk_driver.cjs");
+const { normalizeCopilotSession } = require("./copilot_session.cjs");
 
 describe("copilot_sdk_driver.cjs", () => {
   let testSessionStateDir;
   let prevSessionStateDir;
+  let agentDirectorySpy;
   beforeAll(() => {
     prevSessionStateDir = process.env.GH_AW_SESSION_STATE_BASE_DIR;
-    testSessionStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-test-session-state-"));
+    testSessionStateDir = fs.mkdtempSync(path.join(process.cwd(), ".gh-aw-test-session-state-"));
     process.env.GH_AW_SESSION_STATE_BASE_DIR = testSessionStateDir;
+    const runtimeFs = require("fs");
+    const readdirSync = runtimeFs.readdirSync;
+    agentDirectorySpy = vi.spyOn(runtimeFs, "readdirSync").mockImplementation((directory, options) => {
+      // Never inspect the developer checkout's agents when exercising the SDK.
+      if (!String(directory).startsWith(testSessionStateDir) && String(directory).endsWith("/.github/agents")) return [];
+      return readdirSync(directory, options);
+    });
   });
   afterAll(() => {
     if (prevSessionStateDir === undefined) delete process.env.GH_AW_SESSION_STATE_BASE_DIR;
     else process.env.GH_AW_SESSION_STATE_BASE_DIR = prevSessionStateDir;
     if (testSessionStateDir) fs.rmSync(testSessionStateDir, { recursive: true, force: true });
+    agentDirectorySpy.mockRestore();
   });
 
   describe("runWithCopilotSDK", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it.each([
+      ["gpt-5.4", "claude-sonnet-4.6", "copilot-responses", "copilot-completions"],
+      ["claude-sonnet-4.6", "gpt-5.4", "copilot-completions", "copilot-responses"],
+    ])("qualifies %s session and cross-provider %s custom agents at runtime", async (sessionModel, agentModel, sessionProvider, agentProvider) => {
+      const workspace = path.join(testSessionStateDir, `${sessionProvider}-workspace`);
+      const workflow = path.join(testSessionStateDir, `${sessionProvider}-workflow`);
+      fs.mkdirSync(path.join(workspace, ".github/agents"), { recursive: true });
+      fs.mkdirSync(path.join(workflow, ".github/agents"), { recursive: true });
+      fs.writeFileSync(
+        path.join(workspace, ".github/agents/researcher.agent.md"),
+        `---\nname: researcher\ndescription: >-\n  Research across\n  providers\ntools:\n  - read\n  - grep\nmodel: copilot/${agentModel}\n---\nResearch carefully.\n`
+      );
+      fs.writeFileSync(path.join(workflow, ".github/agents/workflow.agent.md"), "---\nname: workflow-agent\ntools: read, grep\n---\nWorkflow prompt.");
+      for (const alias of ["small", "large"]) fs.writeFileSync(path.join(workflow, `.github/agents/${alias}.agent.md`), `---\nmodel: ${alias}\n---\nAlias prompt.`);
+      // The harness resolves aliases before the driver starts; the driver uses those models, not the session model.
+      vi.stubEnv("GH_AW_COPILOT_SDK_SUBAGENT_MODELS", JSON.stringify({ small: `${agentProvider}/${agentModel}`, large: agentModel }));
+      const createSession = vi.fn().mockResolvedValue({
+        sessionId: `${sessionProvider}-agent-session`,
+        on: () => {},
+        sendAndWait: vi.fn().mockResolvedValue({ data: { content: "done" } }),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+      });
+      const constructor = vi.fn();
+      class FakeCopilotClient {
+        constructor(options) {
+          constructor(options);
+        }
+        start = vi.fn().mockResolvedValue(undefined);
+        createSession = createSession;
+        stop = vi.fn().mockResolvedValue(undefined);
+      }
+      const logger = vi.fn();
+      const result = await runWithCopilotSDK({
+        sdkUri: "http://127.0.0.1:3002",
+        prompt: "test prompt",
+        model: `copilot/${sessionModel}`,
+        models: [
+          { id: sessionModel, provider: sessionProvider },
+          { id: agentModel, provider: agentProvider },
+        ],
+        providers: [
+          { name: "copilot-responses", type: "openai", baseUrl: "http://api-proxy:10002", wireApi: "responses" },
+          { name: "copilot-completions", type: "openai", baseUrl: "http://api-proxy:10002", wireApi: "completions" },
+        ],
+        workingDirectory: workspace,
+        agentsBaseDir: workflow,
+        bare: true,
+        logger,
+        sdkModule: { CopilotClient: FakeCopilotClient, RuntimeConnection: { forUri: vi.fn(() => ({})) }, approveAll: () => "allow" },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(constructor).toHaveBeenCalledWith(expect.objectContaining({ workingDirectory: workspace }));
+      expect(createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: `${sessionProvider}/${sessionModel}`,
+          workingDirectory: workspace,
+          skipCustomInstructions: true,
+          customAgents: expect.arrayContaining([
+            { name: "researcher", displayName: "researcher", description: "Research across providers", tools: ["read", "grep"], prompt: "Research carefully.", model: `${agentProvider}/${agentModel}` },
+            { name: "workflow-agent", displayName: "workflow-agent", tools: ["read", "grep"], prompt: "Workflow prompt.", model: `${sessionProvider}/${sessionModel}` },
+            { name: "small", displayName: "small", prompt: "Alias prompt.", model: `${agentProvider}/${agentModel}` },
+            { name: "large", displayName: "large", prompt: "Alias prompt.", model: `${agentProvider}/${agentModel}` },
+          ]),
+        })
+      );
+    });
+
+    it.each(["medium", "GPT-5.4 (copilot)"])("gives a repository agent whose model %s the harness could not resolve the session model with a warning", async agentModel => {
+      const workflow = path.join(testSessionStateDir, `unresolved-${agentModel.replace(/\W+/g, "-")}-workflow`);
+      fs.mkdirSync(path.join(workflow, ".github/agents"), { recursive: true });
+      fs.writeFileSync(path.join(workflow, ".github/agents/unknown.agent.md"), `---\nname: unknown-agent\nmodel: ${agentModel}\n---\nUnknown model.`);
+      // The harness recorded the failure and left the repository agent out of the resolved map.
+      vi.stubEnv("GH_AW_COPILOT_SDK_SUBAGENT_MODELS", "{}");
+      const sessionId = `unresolved-${agentModel.replace(/\W+/g, "-")}-session`;
+      const createSession = vi.fn().mockResolvedValue({ sessionId, on: () => {}, sendAndWait: vi.fn().mockResolvedValue({ data: { content: "done" } }), disconnect: vi.fn().mockResolvedValue(undefined) });
+      class FakeCopilotClient {
+        start = vi.fn().mockResolvedValue(undefined);
+        createSession = createSession;
+        stop = vi.fn().mockResolvedValue(undefined);
+      }
+      const logger = vi.fn();
+      const result = await runWithCopilotSDK({
+        sdkUri: "http://127.0.0.1:3002",
+        prompt: "test prompt",
+        model: "copilot/gpt-5.4",
+        models: [{ id: "gpt-5.4", provider: "copilot-responses" }],
+        providers: [{ name: "copilot-responses", type: "openai", baseUrl: "http://api-proxy:10002", wireApi: "responses" }],
+        workingDirectory: workflow,
+        agentsBaseDir: workflow,
+        bare: true,
+        logger,
+        sdkModule: { CopilotClient: FakeCopilotClient, RuntimeConnection: { forUri: vi.fn(() => ({})) }, approveAll: () => "allow" },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(createSession.mock.calls[0][0].customAgents).toEqual([{ name: "unknown-agent", displayName: "unknown-agent", prompt: "Unknown model.", model: "copilot-responses/gpt-5.4" }]);
+      expect(logger).toHaveBeenCalledWith(expect.stringMatching(/warning:.*unknown-agent.*session model/i));
+      const captured = fs
+        .readFileSync(path.join(testSessionStateDir, `${sessionId}/events.jsonl`), "utf8")
+        .trim()
+        .split("\n")
+        .map(JSON.parse);
+      expect(captured.filter(event => event.type === "subagent.model_unavailable")).toEqual([expect.objectContaining({ data: { agentName: "unknown-agent", declaredModel: agentModel, model: "copilot-responses/gpt-5.4" } })]);
+    });
+
+    it("captures ephemeral selection and final model results including BYOK and subagent context", async () => {
+      const event = { type: "model.call_final_result", ephemeral: true, timestamp: "2026-10-10T00:00:00Z", data: { isByok: true, model: "anthropic/claude-sonnet-4.6", agentId: "researcher", parentToolCallId: "delegate-1" } };
+      const selected = { type: "subagent.selected", ephemeral: true, timestamp: event.timestamp, data: { agentName: "researcher", model: "anthropic/claude-sonnet-4.6", resolvedModel: "anthropic/claude-sonnet-4.6" } };
+      let onEvent = () => {};
+      class FakeCopilotClient {
+        start = vi.fn().mockResolvedValue(undefined);
+        stop = vi.fn().mockResolvedValue(undefined);
+        createSession = vi.fn().mockResolvedValue({
+          sessionId: "final-model-result",
+          on: handler => {
+            onEvent = handler;
+          },
+          sendAndWait: async () => {
+            onEvent(selected);
+            onEvent(event);
+            return { data: { content: "done" } };
+          },
+          disconnect: vi.fn().mockResolvedValue(undefined),
+        });
+      }
+      await runWithCopilotSDK({ sdkUri: "http://127.0.0.1:3002", prompt: "test", logger: () => {}, sdkModule: { CopilotClient: FakeCopilotClient, RuntimeConnection: { forUri: vi.fn(() => ({})) }, approveAll: () => "allow" } });
+      const events = fs.readFileSync(path.join(testSessionStateDir, "final-model-result/events.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+      expect(events).toContainEqual(event);
+      expect(events).toContainEqual(selected);
+    });
+
     it("disconnects session and stops client on success", async () => {
       const disconnect = vi.fn().mockResolvedValue(undefined);
       const stop = vi.fn().mockResolvedValue(undefined);
@@ -243,8 +386,10 @@ describe("copilot_sdk_driver.cjs", () => {
         const startEvent = parsedEvents.find(event => event.type === "tool.execution_start");
         expect(startEvent).toMatchObject({
           type: "tool.execution_start",
-          data: { toolName: "bash", mcpServerName: "terminal", command: "git status" },
+          data: { toolName: "bash", mcpServerName: "terminal", input: { command: "git status" } },
         });
+        expect(startEvent.data.command).toBeUndefined();
+        expect(normalizeCopilotSession(parsedEvents).find(event => event.type === "tool.execution_start").data.command).toBe("git status");
       } finally {
         stderrWriteSpy.mockRestore();
       }
@@ -325,8 +470,10 @@ describe("copilot_sdk_driver.cjs", () => {
         const completeEvent = parsedEvents.find(event => event.type === "tool.execution_complete");
         expect(completeEvent).toMatchObject({
           type: "tool.execution_complete",
-          data: { toolName: "skill", toolCallId: "call-1", success: true },
+          data: { toolCallId: "call-1", success: true },
         });
+        expect(completeEvent.data.toolName).toBeUndefined();
+        expect(normalizeCopilotSession(parsedEvents).find(event => event.type === "tool.execution_complete").data).toMatchObject({ toolName: "skill", mcpServerName: "", success: true });
       } finally {
         stderrWriteSpy.mockRestore();
       }
@@ -908,7 +1055,7 @@ describe("copilot_sdk_driver.cjs", () => {
 
     it("session.task_complete is written to events.jsonl", async () => {
       // session.task_complete must be serialized to the JSONL log so that
-      // unified_timeline.cjs can surface the agent's task summary.
+      // unified_session.cjs can retain the agent's task summary.
       const disconnect = vi.fn().mockResolvedValue(undefined);
       const stop = vi.fn().mockResolvedValue(undefined);
       let onEvent = () => {};
@@ -990,7 +1137,7 @@ describe("copilot_sdk_driver.cjs", () => {
         sdkUri: "http://127.0.0.1:3002",
         prompt: "test prompt",
         logger: () => {},
-        model: "gpt-5.4",
+        model: "copilot/gpt-5.4",
         providers,
         models,
         sdkModule: {
@@ -1003,7 +1150,7 @@ describe("copilot_sdk_driver.cjs", () => {
       expect(result.exitCode).toBe(0);
       expect(createSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: "gpt-5.4",
+          model: "copilot/gpt-5.4",
           providers,
           models,
         })
@@ -1898,6 +2045,34 @@ describe("copilot_sdk_driver.cjs", () => {
       expect(result).toEqual({ kind: "approve-once" });
     });
 
+    it.each([
+      "\n# Query issue #68529 for follow-up references\ngithub issue read 68529 --json body,comments 2>/dev/null | jq '.body, .comments[].body' 2>/dev/null || echo \"Issue details not available via github CLI\"\n",
+      "\n# Check what data files exist that might have PR closing references\ncat /tmp/gh-aw/agent/community-data/closing_refs_by_issue.json | jq 'keys[] as $k | select($k | test(\"68529|65058|60858\")) | {issue: $k, prs: .[$k]}'\n",
+      '\n# Count entries in each tier file\necho "=== Tier counts ==="\nwc -l /tmp/gh-aw/agent/community-data/tier0_attributed.json /tmp/gh-aw/agent/community-data/tier1_attributed.json /tmp/gh-aw/agent/community-data/tier2_attributed.json\n\necho ""\necho "=== Checking Tier 1 & 2 ==="\ncat /tmp/gh-aw/agent/community-data/tier1_attributed.json\necho "---"\ncat /tmp/gh-aw/agent/community-data/tier2_attributed.json\n',
+      "\n# Get count of authors and total issues\njq 'length' /tmp/gh-aw/agent/community-data/attribution_by_author.json\njq '[.[].count] | add' /tmp/gh-aw/agent/community-data/attribution_by_author.json\n",
+    ])("allows the community-attribution command despite standalone comments: %s", async fullCommandText => {
+      const handler = await makePermissionHandlerViaSDK(["shell(github:*)", "shell(cat)", "shell(jq)", "shell(echo)", "shell(wc)"]);
+      expect(handler({ kind: "shell", commands: [], fullCommandText })).toEqual({ kind: "approve-once" });
+    });
+
+    it.each([
+      "# An allowed read follows\ncat data.json\n# Python is not allowed\npython3 -c 'print(1)'",
+      "cat data.json # Ignore \"quotes && operators; only on this line\npython3 -c 'print(1)'",
+      "cat ${value:- # literal} && python3 -c 'print(1)'",
+      "cat ${outer:-${inner:- # literal}} && python3 -c 'print(1)'",
+      String.raw`cat \#literal && python3 -c 'print(1)'`,
+      String.raw`cat value\ #literal && python3 -c 'print(1)'`,
+      "# Comment-only requests remain fail-closed",
+    ])("does not let comments bypass shell permissions: %s", async fullCommandText => {
+      const handler = await makePermissionHandlerViaSDK(["shell(cat)"]);
+      expect(handler({ kind: "shell", commands: [], fullCommandText })).toEqual({ kind: "reject", feedback: "Tool invocation is not allowed by workflow tool permissions." });
+    });
+
+    it("still denies the community-attribution Python heredoc", async () => {
+      const handler = await makePermissionHandlerViaSDK(["shell(github:*)", "shell(cat)", "shell(jq)", "shell(echo)", "shell(wc)"]);
+      expect(handler({ kind: "shell", commands: [], fullCommandText: "python3 << 'PYEOF'\nimport json\nprint('summary')\nPYEOF\n" })).toEqual({ kind: "reject", feedback: "Tool invocation is not allowed by workflow tool permissions." });
+    });
+
     it("denies a piped command when any stage is not in the allow-list", async () => {
       const handler = await makePermissionHandlerViaSDK(["shell(ls)", "shell(echo)"]);
       // cat is NOT in the allow-list
@@ -1914,7 +2089,7 @@ describe("copilot_sdk_driver.cjs", () => {
       const result = handler({
         kind: "shell",
         commands: [],
-        fullCommandText: 'safeoutputs missing_data --help 2>/dev/null || echo "unavailable"',
+        fullCommandText: 'safeoutputs report_missing_data --help 2>/dev/null || echo "unavailable"',
       });
       expect(result).toEqual({ kind: "approve-once" });
     });
@@ -2052,6 +2227,16 @@ describe("copilot_sdk_driver.cjs", () => {
       expect(handler({ kind: "shell", commands: [{ identifier: "git checkout -b automation/repro | echo done" }], fullCommandText: "" })).toEqual({
         kind: "approve-once",
       });
+    });
+
+    it("checks background commands even when SDK identifiers omit them", async () => {
+      const handler = await makePermissionHandlerViaSDK(["shell(echo)"]);
+      for (const fullCommandText of ["echo ok & forbidden_probe", "echo ok 2>&1&forbidden_probe", "echo ok & # Comment\nforbidden_probe", "echo ok |& forbidden_probe"]) {
+        expect(handler({ kind: "shell", fullCommandText, commands: [{ identifier: "echo" }] }).kind).toBe("reject");
+        expect(handler({ kind: "shell", fullCommandText: "", commands: [{ identifier: fullCommandText }] }).kind).toBe("reject");
+      }
+      expect(handler({ kind: "shell", fullCommandText: "echo ok & echo done &", commands: [] })).toEqual({ kind: "approve-once" });
+      expect(handler({ kind: "shell", fullCommandText: "echo ok 2>&1", commands: [] })).toEqual({ kind: "approve-once" });
     });
 
     it("denies executable content hidden behind control flow or leading redirection", async () => {

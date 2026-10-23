@@ -30,9 +30,18 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) { //nolint:larg
 
 	// Resolve firewall config once — used for both the schema URL and the container image tag.
 	firewallConfig := getFirewallConfig(config.WorkflowData)
+	if err := validateModelRouting(config.WorkflowData, config.EngineName); err != nil {
+		return "", err
+	}
+	if err := validateEngineFallbackModels(config.WorkflowData); err != nil {
+		return "", err
+	}
 
 	awfConfig := AWFConfigFile{
 		Schema: buildAWFConfigSchemaURL(firewallConfig),
+	}
+	if isModelRoutingEnabled(config.WorkflowData) {
+		awfConfig.Experimental = &AWFExperimentalConfig{ModelRouting: true}
 	}
 	if config.WorkflowData != nil {
 		awfConfig.Enclaves = buildAWFEnclavesConfig(config.WorkflowData.Enclaves)
@@ -132,10 +141,18 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) { //nolint:larg
 
 	apiProxy := &AWFAPIProxyConfig{
 		Enabled:             true,
+		FallbackModels:      nativeAWFFallbackModels(config.WorkflowData),
 		MaxRuns:             maxRuns,
 		MaxTurnCacheMisses:  maxTurnCacheMisses,
 		MaxAICredits:        maxAICredits,
 		EnableTokenSteering: tokenSteeringEnabled,
+	}
+	if isModelRoutingEnabled(config.WorkflowData) {
+		routing := config.WorkflowData.EngineConfig.ModelRouting
+		apiProxy.Routing = &AWFModelRoutingConfig{
+			Objective: AWFModelRoutingObjective{Goal: routing.Goal, Mode: routing.Mode},
+			Task:      AWFModelRoutingTask{ConversationFile: modelRoutingConversationFile},
+		}
 	}
 	if hostedWeb := buildHostedWebConfig(config.EngineName, config.EngineRuntimeID, config.WorkflowData, firewallConfig); hostedWeb != nil {
 		apiProxy.HostedWeb = hostedWeb
@@ -148,7 +165,11 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) { //nolint:larg
 		awfConfigLog.Printf("Skipping apiProxy.enableTokenSteering: AWF version %q requires at least %s", getAWFImageTag(firewallConfig), constants.AWFTokenSteeringMinVersion)
 	}
 
-	if mf := extractModelFallback(config.WorkflowData); mf != nil {
+	if config.WorkflowData != nil && config.WorkflowData.EngineConfig != nil && len(config.WorkflowData.EngineConfig.FallbackModels) > 0 {
+		// An explicit ordered chain must not silently insert a catalog-selected model.
+		disabled := TemplatableBool("false")
+		apiProxy.ModelFallback = &AWFModelFallbackConfig{Enabled: &disabled}
+	} else if mf := extractModelFallback(config.WorkflowData); mf != nil {
 		apiProxy.ModelFallback = mf
 		enabledDisplay := "<unset>"
 		if mf.Enabled != nil {
@@ -173,7 +194,12 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) { //nolint:larg
 
 	targets := map[string]*AWFAPITargetConfig{}
 
-	if openaiTarget := extractAPIProxyTargetHost(config.WorkflowData, "OPENAI_BASE_URL", firewallConfig); openaiTarget != "" {
+	openaiTarget := extractAPIProxyTargetHost(config.WorkflowData, "OPENAI_BASE_URL", firewallConfig)
+	codexOpenAITarget := config.EngineName == "codex" && NewCodexEngine().ResolveLLMProvider(config.WorkflowData) == LLMProviderOpenAI
+	if codexOpenAITarget && config.WorkflowData != nil && config.WorkflowData.EngineConfig != nil && config.WorkflowData.EngineConfig.APITarget != "" {
+		openaiTarget = config.WorkflowData.EngineConfig.APITarget
+	}
+	if openaiTarget != "" {
 		targets["openai"] = &AWFAPITargetConfig{Host: openaiTarget}
 		awfConfigLog.Printf("API proxy: custom openai target=%s", openaiTarget)
 	}
@@ -197,7 +223,11 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) { //nolint:larg
 		}
 		awfConfigLog.Printf("API proxy: custom %s authHeader=%s", provider, authHeader)
 	}
-	if copilotTarget := GetCopilotAPITarget(config.WorkflowData); copilotTarget != "" {
+	copilotTarget := GetCopilotAPITarget(config.WorkflowData)
+	if codexOpenAITarget && config.WorkflowData != nil && config.WorkflowData.EngineConfig != nil && config.WorkflowData.EngineConfig.APITarget != "" {
+		copilotTarget = ""
+	}
+	if copilotTarget != "" {
 		targets["copilot"] = &AWFAPITargetConfig{Host: copilotTarget}
 		awfConfigLog.Printf("API proxy: custom copilot target=%s", copilotTarget)
 	}
@@ -257,6 +287,19 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) { //nolint:larg
 		awfConfigLog.Printf("Models section: %d alias entries", len(config.WorkflowData.ModelMappings))
 	}
 	allowedModels, disallowedModels := resolveModelPolicyForAWFConfig(config.WorkflowData)
+	if isModelRoutingEnabled(config.WorkflowData) {
+		candidates, err := modelRoutingAWFCandidates(config.WorkflowData, config.EngineName, allowedModels, disallowedModels)
+		if err != nil {
+			return "", err
+		}
+		if apiProxySupportsRoutingCandidateModels(config.WorkflowData) {
+			// The model policy alone is the request policy; candidates only limit the router's pick.
+			apiProxy.Routing.CandidateModels = candidates
+		} else {
+			// AWF before v0.28.33 has no routing.candidateModels: the allow list is the router's pool.
+			allowedModels = candidates
+		}
+	}
 	if len(allowedModels) > 0 {
 		apiProxy.AllowedModels = allowedModels
 		awfConfigLog.Printf("Models policy: %d allowed model pattern(s)", len(allowedModels))
@@ -286,15 +329,17 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) { //nolint:larg
 	if len(containerImages) > 0 {
 		awfImageTag = ""
 	}
-	agentTimeout := 0
-	if isCloudHypervisorRuntime(config.WorkflowData) {
-		agentTimeout = resolveAWFContainerAgentTimeoutMinutes(config.WorkflowData)
-	}
-	if awfImageTag != "" || isArcDindTopology(config.WorkflowData) || agentTimeout > 0 || len(containerImages) > 0 {
+	agentTimeout := resolveAWFAgentTimeoutMinutes(config.WorkflowData, firewallConfig)
+	if awfImageTag != "" || isArcDindTopology(config.WorkflowData) || agentTimeout > 0 || len(containerImages) > 0 || isNVXRuntime(config.WorkflowData) {
 		container := &AWFContainerConfig{
 			ImageTag:     awfImageTag,
 			AgentTimeout: agentTimeout,
 			Images:       containerImages,
+		}
+		if isNVXRuntime(config.WorkflowData) {
+			nvx := effectiveNVXConfig(getAgentConfig(config.WorkflowData).NVX)
+			container.ContainerRuntime = string(AgentRuntimeNVX)
+			container.ContainerWorkDir = nvx.ContainerWorkDir
 		}
 		// NOTE: dockerHostPathPrefix is intentionally NOT set for arc-dind topology.
 		// With sysroot-stage active, the Docker daemon can access all needed paths:
@@ -318,6 +363,25 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) { //nolint:larg
 
 	if isCloudHypervisorRuntime(config.WorkflowData) {
 		awfConfig.CloudHypervisor = buildAWFCloudHypervisorConfig()
+	} else if isNVXRuntime(config.WorkflowData) {
+		agentConfig := getAgentConfig(config.WorkflowData)
+		awfConfig.NVX = buildAWFNVXConfig(agentConfig.NVX)
+	} else if hasCloudHypervisorEnclaves(config.WorkflowData) {
+		if awfConfig.Container == nil {
+			awfConfig.Container = &AWFContainerConfig{}
+		}
+		awfConfig.Container.ContainerRuntime = "docker"
+		awfConfig.CloudHypervisor = &AWFCloudHypervisorConfig{
+			PreviewEnabled:             true,
+			MountPolicy:                "workspace-only",
+			CloudHypervisorBinary:      "${GH_AW_CLOUD_HYPERVISOR_BINARY}",
+			KernelPath:                 "${GH_AW_CLOUD_HYPERVISOR_KERNEL}",
+			RootfsPath:                 "${GH_AW_CLOUD_HYPERVISOR_ROOTFS}",
+			SupervisorPath:             "${GH_AW_CLOUD_HYPERVISOR_SUPERVISOR}",
+			ArtifactManifestPath:       "${GH_AW_CLOUD_HYPERVISOR_ARTIFACT_MANIFEST}",
+			ArtifactManifestBundlePath: "${GH_AW_CLOUD_HYPERVISOR_ARTIFACT_MANIFEST_BUNDLE}",
+			ArtifactReleaseTag:         "${GH_AW_CLOUD_HYPERVISOR_ARTIFACT_RELEASE_TAG}",
+		}
 	}
 
 	// ── Logging section ──────────────────────────────────────────────────────
@@ -393,6 +457,73 @@ func buildAWFCloudHypervisorConfig() *AWFCloudHypervisorConfig {
 		MountPolicy:    "workspace-and-tool-cache",
 		VCPUCount:      constants.DefaultCloudHypervisorVCPUs,
 		MemoryMiB:      constants.DefaultCloudHypervisorMemoryMiB,
+	}
+}
+
+// resolveAWFAgentTimeoutMinutes returns the container.agentTimeout value to emit,
+// or 0 to omit it. Cloud Hypervisor and NVX always receive it. Other runtimes
+// receive it only when the AWF version sends runtime steering notices, because
+// AWF starts its runtime clock (and therefore its timeout notices) only when
+// agentTimeout is set.
+func resolveAWFAgentTimeoutMinutes(workflowData *WorkflowData, firewallConfig *FirewallConfig) int {
+	if isCloudHypervisorRuntime(workflowData) || isNVXRuntime(workflowData) {
+		return resolveAWFContainerAgentTimeoutMinutes(workflowData)
+	}
+	if !awfSupportsAgentTimeoutSteering(firewallConfig) {
+		awfConfigLog.Printf("Skipping container.agentTimeout: AWF version %q requires at least %s", getAWFImageTag(firewallConfig), constants.AWFAgentTimeoutSteeringMinVersion)
+		return 0
+	}
+	minutes := resolveAWFContainerAgentTimeoutMinutes(workflowData)
+	if minutes <= 0 {
+		return 0
+	}
+	// AWF stops the agent (exit code 124) once agentTimeout elapses, counted from
+	// agent start. The agentic step timeout counts from step start, so an
+	// agentTimeout of at least the step timeout can never fire before it. Omit
+	// agentTimeout when the step timeout is not a compile-time integer, since the
+	// two values could not be compared.
+	stepMinutes, ok := literalStepTimeoutMinutes(workflowData)
+	if !ok {
+		awfConfigLog.Printf("Container section: step timeout %q is not a literal number; omitting agentTimeout so the step timeout governs", resolveStepTimeoutValue(workflowData))
+		return 0
+	}
+	if stepMinutes > minutes {
+		awfConfigLog.Printf("Container section: raising agentTimeout from %d to the %d-minute step timeout", minutes, stepMinutes)
+		return stepMinutes
+	}
+	return minutes
+}
+
+// awfRuntimeAgentTimeoutExpression returns the step timeout expression to pass to
+// AWF as --agent-timeout at run time, or "" when none applies. It covers the
+// runtimes gated by awfSupportsAgentTimeoutSteering when the step timeout is a
+// GitHub Actions expression (e.g. the vars.GH_AW_DEFAULT_TIMEOUT_MINUTES default),
+// which integer-only container.agentTimeout cannot carry. Passing the resolved
+// step timeout keeps agentTimeout at the step-timeout floor.
+func awfRuntimeAgentTimeoutExpression(workflowData *WorkflowData) string {
+	if workflowData == nil || !isFirewallEnabled(workflowData) || isCloudHypervisorRuntime(workflowData) || isNVXRuntime(workflowData) {
+		return ""
+	}
+	firewallConfig := getFirewallConfig(workflowData)
+	if !awfSupportsAgentTimeoutSteering(firewallConfig) || resolveAWFAgentTimeoutMinutes(workflowData, firewallConfig) > 0 {
+		return ""
+	}
+	stepTimeout := strings.TrimSpace(resolveStepTimeoutValue(workflowData))
+	if !isExpression(stepTimeout) {
+		return ""
+	}
+	return stepTimeout
+}
+
+// applyAWFRuntimeAgentTimeoutEnvToMap exposes the runtime step timeout to the
+// agent step's run: script, so AWF receives it via --agent-timeout without
+// embedding ${{ }} expressions in the script.
+func applyAWFRuntimeAgentTimeoutEnvToMap(env map[string]string, workflowData *WorkflowData) {
+	if env == nil {
+		return
+	}
+	if expr := awfRuntimeAgentTimeoutExpression(workflowData); expr != "" {
+		env[awfRuntimeAgentTimeoutVarName] = expr
 	}
 }
 
@@ -515,6 +646,7 @@ func extractDefaultAiCreditsPricing(workflowData *WorkflowData) *AiCreditsPricin
 		Output:      p.Output,
 		CachedInput: p.CachedInput,
 		CacheWrite:  p.CacheWrite,
+		Reasoning:   p.Reasoning,
 	}
 }
 

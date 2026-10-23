@@ -1,12 +1,115 @@
 // @ts-check
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const require = createRequire(import.meta.url);
-const { runHarnessRetryLoop, shouldSkipForNoopSafeOutputs, shouldStopForNoopSafeOutputs } = require("./harness_retry_runner.cjs");
+const { captureExecutionEvidenceConfiguration, runHarnessRetryLoop, shouldSkipForNoopSafeOutputs, shouldStopForNoopSafeOutputs, stripExecutionEvidenceEnv } = require("./harness_retry_runner.cjs");
 
 describe("harness_retry_runner.cjs", () => {
+  let directory;
+  afterEach(() => {
+    if (directory) fs.rmSync(directory, { recursive: true, force: true });
+    directory = undefined;
+  });
+
+  function executionEnv(overrides = {}) {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), "noop-execution-"));
+    return {
+      GH_AW_AWF_EXECUTION_EVIDENCE_FILE: path.join(directory, "execution.json"),
+      GH_AW_AWF_EXECUTION_COMPONENT: "agent",
+      GITHUB_RUN_ID: "123",
+      GITHUB_RUN_ATTEMPT: "2",
+      ...overrides,
+    };
+  }
+
+  it.each(["agent", "detection", "evals"])("records run-scoped zero-use evidence for a pre-flight %s noop", component => {
+    const env = executionEnv({ GH_AW_AWF_EXECUTION_COMPONENT: component });
+    fs.writeFileSync(env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE, '{"state":"started"}');
+    expect(shouldSkipForNoopSafeOutputs({ safeOutputsPath: "/tmp/safe-outputs.jsonl", hasNoopInSafeOutputs: () => true, log: () => {}, executionEvidence: captureExecutionEvidenceConfiguration(env) })).toBe(true);
+    expect(JSON.parse(fs.readFileSync(env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE, "utf8"))).toEqual({
+      version: 1,
+      component,
+      run_id: 123,
+      run_attempt: 2,
+      state: "not_started",
+    });
+    expect(fs.existsSync(`${env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE}.tmp`)).toBe(false);
+  });
+
+  it("does not use a fixed component allow-list", () => {
+    const env = executionEnv({ GH_AW_AWF_EXECUTION_COMPONENT: "future_component" });
+    expect(shouldSkipForNoopSafeOutputs({ safeOutputsPath: "/tmp/safe-outputs.jsonl", hasNoopInSafeOutputs: () => true, log: () => {}, executionEvidence: captureExecutionEvidenceConfiguration(env) })).toBe(true);
+    expect(JSON.parse(fs.readFileSync(env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE, "utf8"))).toMatchObject({ component: "future_component", state: "not_started" });
+  });
+
+  it.each([
+    { GH_AW_AWF_EXECUTION_EVIDENCE_FILE: "relative.json" },
+    { GITHUB_RUN_ID: undefined },
+    { GITHUB_RUN_ID: "invalid" },
+    { GITHUB_RUN_ID: "9007199254740992" },
+    { GITHUB_RUN_ATTEMPT: "0" },
+    { GITHUB_RUN_ATTEMPT: "1.5" },
+    { GH_AW_AWF_EXECUTION_COMPONENT: "invalid/component" },
+  ])("does not manufacture zero-use evidence with invalid metadata %j", overrides => {
+    const env = executionEnv(overrides);
+    expect(shouldSkipForNoopSafeOutputs({ safeOutputsPath: "/tmp/safe-outputs.jsonl", hasNoopInSafeOutputs: () => true, log: () => {}, executionEvidence: captureExecutionEvidenceConfiguration(env) })).toBe(true);
+    expect(fs.existsSync(env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE)).toBe(false);
+  });
+
+  it("preserves started evidence when no pre-flight noop exists or a noop is written after an attempt", () => {
+    const env = executionEnv();
+    const started = '{"state":"started"}';
+    fs.writeFileSync(env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE, started);
+    expect(shouldSkipForNoopSafeOutputs({ safeOutputsPath: "/tmp/safe-outputs.jsonl", hasNoopInSafeOutputs: () => false, log: () => {}, executionEvidence: captureExecutionEvidenceConfiguration(env) })).toBe(false);
+    expect(shouldStopForNoopSafeOutputs({ attempt: 0, safeOutputsPath: "/tmp/safe-outputs.jsonl", hasNoopInSafeOutputs: () => true, log: () => {} })).toBe(true);
+    expect(fs.readFileSync(env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE, "utf8")).toBe(started);
+  });
+
+  it("keeps the noop exit when evidence cannot be written without replacing started evidence", () => {
+    const env = executionEnv();
+    const started = '{"state":"started"}';
+    fs.writeFileSync(env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE, started);
+    fs.mkdirSync(`${env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE}.tmp`);
+    const logs = [];
+    expect(shouldSkipForNoopSafeOutputs({ safeOutputsPath: "/tmp/safe-outputs.jsonl", hasNoopInSafeOutputs: () => true, log: message => logs.push(message), executionEvidence: captureExecutionEvidenceConfiguration(env) })).toBe(true);
+    expect(fs.readFileSync(env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE, "utf8")).toBe(started);
+    expect(logs.some(message => message.includes("could not record zero-use execution evidence"))).toBe(true);
+  });
+
+  it("records pre-flight noop evidence on the host runner", () => {
+    const env = executionEnv();
+    const safeOutputsPath = path.join(directory, "safe-outputs.jsonl");
+    fs.writeFileSync(safeOutputsPath, '{"type":"noop","message":"already done"}\n');
+    const result = spawnSync(process.execPath, [require.resolve("./harness_retry_runner.cjs"), "--preflight-noop"], {
+      encoding: "utf8",
+      env: { ...process.env, ...env, GH_AW_SAFE_OUTPUTS: safeOutputsPath },
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(fs.readFileSync(env.GH_AW_AWF_EXECUTION_EVIDENCE_FILE, "utf8"))).toMatchObject({
+      component: "agent",
+      run_id: 123,
+      run_attempt: 2,
+      state: "not_started",
+    });
+  });
+
+  it("strips evidence configuration from engine child environments", () => {
+    const env = executionEnv();
+    const childEnv = stripExecutionEvidenceEnv({ ...env });
+
+    expect(childEnv).not.toHaveProperty("GH_AW_AWF_EXECUTION_EVIDENCE_FILE");
+    expect(childEnv).not.toHaveProperty("GH_AW_AWF_EXECUTION_COMPONENT");
+    expect(env).toHaveProperty("GH_AW_AWF_EXECUTION_EVIDENCE_FILE");
+    expect(env).toHaveProperty("GH_AW_AWF_EXECUTION_COMPONENT");
+  });
+
   it("detects pre-flight noop safe-outputs", () => {
     const logs = [];
     const skipped = shouldSkipForNoopSafeOutputs({
@@ -70,6 +173,25 @@ describe("harness_retry_runner.cjs", () => {
     expect(result.exitCode).toBe(0);
     expect(result.attempts).toBe(1);
     expect(logs.some(message => message.includes("success on attempt 1"))).toBe(true);
+  });
+
+  it("never retries or suppresses cancellation", async () => {
+    const result = await runHarnessRetryLoop({
+      maxRetries: 3,
+      initialDelayMs: 1,
+      backoffMultiplier: 2,
+      maxDelayMs: 10,
+      driverStartTime: Date.now(),
+      harnessName: "Test",
+      log: () => {},
+      softTimeoutGuard: null,
+      runAttempt: async () => ({ exitCode: 143, output: "partial", hasOutput: true, cancelled: true }),
+      handleFailure: () => {
+        throw new Error("cancellation must bypass failure suppression");
+      },
+    });
+    expect(result.attempts).toBe(1);
+    expect(result.exitCode).toBe(143);
   });
 
   it("applies exponential backoff between retry decisions", async () => {
@@ -164,6 +286,31 @@ describe("harness_retry_runner.cjs", () => {
     expect(result.attempts).toBe(0);
     expect(result.lastResult).toBeNull();
     expect(logs.some(message => message.includes("before attempt 1"))).toBe(true);
+  });
+
+  it("caps backoff at the remaining soft deadline", async () => {
+    const guard = { timeoutMinutes: 2, softDeadlineMs: Date.now() + 50000 };
+    const sleeps = [];
+    const result = await runHarnessRetryLoop({
+      maxRetries: 3,
+      initialDelayMs: 100000,
+      backoffMultiplier: 2,
+      maxDelayMs: 100000,
+      driverStartTime: Date.now(),
+      harnessName: "Test",
+      log: () => {},
+      softTimeoutGuard: guard,
+      runAttempt: async () => ({ exitCode: 1, output: "partial", hasOutput: true }),
+      handleFailure: () => ({ action: "retry" }),
+      sleepFn: async ms => {
+        sleeps.push(ms);
+        guard.softDeadlineMs = Date.now() - 1;
+      },
+    });
+    expect(sleeps[0]).toBeGreaterThan(0);
+    expect(sleeps[0]).toBeLessThanOrEqual(50000);
+    expect(result.attempts).toBe(1);
+    expect(result.exitCode).toBe(1);
   });
 
   it("stops after backoff when the soft deadline expires during sleep", async () => {

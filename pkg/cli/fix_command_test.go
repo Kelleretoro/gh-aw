@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/github/gh-aw/pkg/parser"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -55,6 +56,95 @@ timeout_minutes: 30
 
 	assert.Contains(t, output, "✓ test-workflow.md")
 	assert.NotContains(t, output, "✓ ✓ test-workflow.md")
+}
+
+func TestProcessWorkflowFileWithInfo_IteratesUntilStable(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "workflow.md")
+	content := "---\ntools:\n  web-fetch: true\n---\nBody\n"
+	require.NoError(t, os.WriteFile(file, []byte(content), 0o600))
+	codemods := []Codemod{
+		{
+			ID: "remove-fetch", Name: "Remove fetch",
+			Apply: func(content string, fm map[string]any) (string, bool, error) {
+				if _, ok := fm["engine"]; !ok {
+					return content, false, nil
+				}
+				updated := strings.Replace(content, "  web-fetch: true\n", "", 1)
+				return updated, updated != content, nil
+			},
+		},
+		{
+			ID: "add-engine", Name: "Add engine",
+			Apply: func(content string, fm map[string]any) (string, bool, error) {
+				if _, ok := fm["engine"]; ok {
+					return content, false, nil
+				}
+				return strings.Replace(content, "---\n", "---\nengine: copilot\n", 1), true, nil
+			},
+		},
+	}
+	fixed, applied, err := processWorkflowFileWithInfo(file, codemods, true, false)
+	require.NoError(t, err)
+	require.True(t, fixed)
+	assert.Equal(t, []string{"Add engine", "Remove fetch"}, applied)
+	updated, err := os.ReadFile(file)
+	require.NoError(t, err)
+	assert.Equal(t, "---\nengine: copilot\ntools:\n---\nBody\n", string(updated))
+
+	fixed, _, err = processWorkflowFileWithInfo(file, codemods, true, false)
+	require.NoError(t, err)
+	assert.False(t, fixed)
+}
+
+func TestProcessWorkflowFileWithInfo_RejectsNonConvergingCodemods(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "workflow.md")
+	content := "---\nengine: copilot\n---\nBody\n"
+	require.NoError(t, os.WriteFile(file, []byte(content), 0o600))
+	codemods := []Codemod{
+		{
+			ID: "toggle", Name: "Toggle",
+			Apply: func(content string, _ map[string]any) (string, bool, error) {
+				if strings.Contains(content, "engine: copilot") {
+					return strings.Replace(content, "engine: copilot", "engine: codex", 1), true, nil
+				}
+				return strings.Replace(content, "engine: codex", "engine: copilot", 1), true, nil
+			},
+		},
+	}
+	_, _, err := processWorkflowFileWithInfo(file, codemods, true, false)
+	require.ErrorContains(t, err, "did not converge")
+	unchanged, err := os.ReadFile(file)
+	require.NoError(t, err)
+	assert.Equal(t, content, string(unchanged))
+}
+
+func TestProcessWorkflowFileWithInfo_StopsAfterThreePasses(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "workflow.md")
+	content := "---\nstage: 0\n---\nBody\n"
+	require.NoError(t, os.WriteFile(file, []byte(content), 0o600))
+	transitions := [][2]string{
+		{"stage: 0", "stage: 1"},
+		{"stage: 1", "stage: 2"},
+		{"stage: 2", "stage: 3"},
+		{"stage: 3", "stage: 4"},
+	}
+	calls := 0
+	codemods := []Codemod{{
+		ID: "advance-stage", Name: "Advance stage",
+		Apply: func(content string, _ map[string]any) (string, bool, error) {
+			from, to := transitions[calls][0], transitions[calls][1]
+			calls++
+			updated := strings.Replace(content, from, to, 1)
+			return updated, updated != content, nil
+		},
+	}}
+
+	_, _, err := processWorkflowFileWithInfo(file, codemods, true, false)
+	require.ErrorContains(t, err, "did not converge")
+	assert.Equal(t, maxCodemodPasses, calls)
+	unchanged, err := os.ReadFile(file)
+	require.NoError(t, err)
+	assert.Equal(t, content, string(unchanged))
 }
 
 func TestFixCommand_TimeoutMinutesMigration(t *testing.T) {
@@ -299,9 +389,11 @@ This is a test workflow.
 		t.Error("Expected log-level field to be removed, but it still exists")
 	}
 
-	if strings.Contains(updatedStr, "version: v1.0.0") {
-		t.Error("Expected version field to be removed, but it still exists")
-	}
+	parsed, err := parser.ExtractFrontmatterFromContent(updatedStr)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"allowed": []any{"defaults", "node", "github"},
+	}, parsed.Frontmatter["network"], "Only allowed domains should remain under network")
 
 	if !strings.Contains(updatedStr, "sandbox:") {
 		t.Errorf("Expected sandbox field to be added for nested firewall, got:\n%s", updatedStr)
@@ -309,9 +401,9 @@ This is a test workflow.
 	if !strings.Contains(updatedStr, "agent:") {
 		t.Errorf("Expected sandbox.agent object to be added for nested firewall, got:\n%s", updatedStr)
 	}
-	if !strings.Contains(updatedStr, `version: "v1.0.0"`) {
-		t.Errorf("Expected firewall version to be migrated to sandbox.agent.version, got:\n%s", updatedStr)
-	}
+	assert.Equal(t, map[string]any{
+		"agent": map[string]any{"id": "awf", "version": "v1.0.0"},
+	}, parsed.Frontmatter["sandbox"], "Firewall version should migrate to sandbox.agent as a string")
 
 	// Verify compilation works
 	// This ensures the codemod produces valid YAML
@@ -393,9 +485,14 @@ This workflow tests comment and empty line handling.
 		t.Error("Expected log-level field to be removed, but it still exists")
 	}
 
-	if strings.Contains(updatedStr, "version: v1.0.0") {
-		t.Error("Expected version field to be removed, but it still exists")
-	}
+	parsed, err := parser.ExtractFrontmatterFromContent(updatedStr)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"allowed": []any{"defaults", "github"},
+	}, parsed.Frontmatter["network"], "Only allowed domains should remain under network")
+	assert.Equal(t, map[string]any{
+		"agent": map[string]any{"id": "awf", "version": "v1.0.0"},
+	}, parsed.Frontmatter["sandbox"], "Firewall version should migrate to sandbox.agent as a string")
 
 	// Comments within the firewall block should also be removed
 	if strings.Contains(updatedStr, "# Firewall configuration") {
@@ -839,7 +936,7 @@ This is a test workflow.
 
 	assert.Contains(t, output, "Would update dispatcher skill: "+skillPath)
 	assert.Contains(t, output, "Would update Agentic Workflows custom agent: "+agentPath)
-	assert.Contains(t, output, "✓ No workflow fixes needed")
+	assert.Contains(t, output, "No workflow fixes needed")
 }
 
 func TestFixCommand_WriteUpdatesPromptAndAgentFiles(t *testing.T) {
@@ -1397,6 +1494,54 @@ tools:
 	if !strings.Contains(scaffolded, "github.aw.import-inputs.languages") {
 		t.Errorf("Expected scaffolded Serena workflow to pass languages through to upstream import, got:\n%s", scaffolded)
 	}
+}
+
+func TestRunFix_ScaffoldFailureDoesNotReportSuccessfulCodemods(t *testing.T) {
+	t.Chdir(t.TempDir())
+	workflowDir := filepath.Join(".github", "workflows")
+	require.NoError(t, os.MkdirAll(workflowDir, 0o755))
+	workflowFile := filepath.Join(workflowDir, "test-workflow.md")
+	content := "---\nengine: copilot\ntools:\n  serena: [\"typescript\"]\n---\nTest\n"
+	require.NoError(t, os.WriteFile(workflowFile, []byte(content), 0o600))
+	// A file where the shared directory belongs prevents scaffolding after the workflow is written.
+	require.NoError(t, os.WriteFile(filepath.Join(workflowDir, "shared"), []byte("blocked"), 0o600))
+
+	var disabled []string
+	for _, codemod := range GetAllCodemods() {
+		if codemod.ID != "serena-tools-to-shared-import" {
+			disabled = append(disabled, codemod.ID)
+		}
+	}
+	serenaCodemod := getCodemodByID("serena-tools-to-shared-import")
+	require.NotNil(t, serenaCodemod)
+
+	summary := &updatePRSummary{before: map[string]updatePRFile{}}
+	var runErr error
+	_, stderr := captureOutput(t, func() error {
+		runErr = RunFix(FixConfig{
+			Write:              true,
+			WorkflowDir:        workflowDir,
+			DisabledCodemodIDs: disabled,
+			OnApplied:          summary.recordFix,
+		})
+		return nil
+	})
+	var exitErr *ExitCodeError
+	require.ErrorAs(t, runErr, &exitErr)
+	assert.Equal(t, 1, exitErr.Code)
+	assert.Contains(t, stderr, "Error processing test-workflow.md")
+	assert.Contains(t, stderr, "failed to scaffold shared Serena workflow")
+	assert.NotContains(t, stderr, "Applied fixes to")
+	assert.NotContains(t, stderr, "No fixes needed")
+	assert.Empty(t, summary.applied, "an incomplete migration must not be reported as successfully applied")
+
+	written, err := os.ReadFile(workflowFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(written), "shared/mcp/serena.md", "the workflow was written before scaffolding failed")
+	body := summary.render("upgrade", map[string]updatePRFile{})
+	assert.NotContains(t, body, serenaCodemod.Name)
+	assert.NotContains(t, body, "Codemod step ran")
+	assert.NotContains(t, body, "Execution notes")
 }
 
 func TestRunFix_GuidedErrorReturnsExitCode2(t *testing.T) {

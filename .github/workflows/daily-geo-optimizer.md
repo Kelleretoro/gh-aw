@@ -50,7 +50,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install geo-optimizer-skill
-        run: pip install geo-optimizer-skill
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r .github/workflows/requirements-geo-optimizer.txt
 
       - name: Create results directory
         run: mkdir -p /tmp/gh-aw/agent/geo-optimizer
@@ -187,7 +188,7 @@ jobs:
           EOF
 
       - name: Upload geo-optimizer results
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: geo-optimizer-results
           path: /tmp/gh-aw/agent/geo-optimizer
@@ -196,7 +197,7 @@ jobs:
 
 steps:
   - name: Download geo-optimizer results
-    uses: actions/download-artifact@v8.0.1
+    uses: actions/download-artifact@v8.0.2
     with:
       name: geo-optimizer-results
       path: /tmp/gh-aw/agent/geo-optimizer

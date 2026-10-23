@@ -7,6 +7,7 @@ import (
 	actionpins "github.com/github/gh-aw/pkg/actionpins"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
+	"github.com/github/gh-aw/pkg/workflow/aw"
 )
 
 var workflowDataLog = logger.New("workflow:workflow_data")
@@ -35,6 +36,10 @@ type SkipIfCheckFailingConfig struct {
 	AllowPending bool     // if true, pending/in-progress checks are not treated as failing (default: treat pending as failing)
 }
 type WorkflowData struct {
+	SourceDocument                 *aw.Document // Authored source before preprocessing, import merging, or defaults
+	WorkQueuePolicy                *WorkQueuePolicyConfig
+	workQueueRepoIssuesConfigured  bool
+	DryRun                         bool // Disable compiler-managed GitHub mutations while retaining local diagnostics
 	Name                           string
 	WorkflowID                     string           // workflow identifier derived from markdown filename (basename without extension)
 	CompiledVersion                string           // gh-aw compiler version emitted to generated install steps as GH_AW_COMPILED_VERSION (release tag for releases, "dev" for non-release builds) so the install script can resolve a compat.json window at runtime without churn
@@ -55,6 +60,7 @@ type WorkflowData struct {
 	Redirect                       string           // optional redirect field describing a moved workflow location
 	TrackerID                      string           // optional tracker identifier for created assets (min 8 chars, alphanumeric + hyphens/underscores)
 	MaxDailyAICredits              *string          // optional 24-hour per-workflow AIC threshold (numeric string or GitHub Actions expression)
+	MaxDailyAICreditsExplicit      bool             // daily limit came from workflow/import configuration rather than the runtime default
 	MaxDailyAICBackend             string           // optional backend for the daily AIC guardrail ("repo-memory" for git-backed JSONL ledger)
 	MaxDailyAICreditsGitHubApp     *GitHubAppConfig // optional GitHub App for minting the token used by the daily AIC guardrail
 	MaxDailyAICContinueOnError     bool             // when true, unknown/unverifiable daily AIC accounting is a warning instead of failing closed
@@ -66,10 +72,13 @@ type WorkflowData struct {
 	ImportedMarkdown               string   // Only imports WITH inputs (for compile-time substitution)
 	ImportPaths                    []string // Import file paths for runtime-import macro generation (imports without inputs)
 	PromptImports                  []parser.PromptImportEntry
-	MainWorkflowMarkdown           string         // main workflow markdown without imports (for runtime-import)
-	IncludedFiles                  []string       // list of files included via @include directives (rendered as comment in lock file)
-	ImportInputs                   map[string]any // input values from imports with inputs (for github.aw.inputs.* substitution)
+	MainWorkflowMarkdown           string               // main workflow markdown without imports (for runtime-import)
+	DeferredPromptExpressions      []*ExpressionMapping // prompt values resolved after activation in the agent job
+	IncludedFiles                  []string             // list of files included via @include directives (rendered as comment in lock file)
+	ImportInputs                   map[string]any       // input values from imports with inputs (for github.aw.inputs.* substitution)
 	On                             string
+	AdmissionEnabled               bool // Opt-in from on.admission or repository admission configuration
+	WebhookSubscriptions           []WebhookSubscription
 	Permissions                    string
 	Network                        string // top-level network permissions configuration
 	Concurrency                    string // workflow-level concurrency configuration
@@ -79,7 +88,8 @@ type WorkflowData struct {
 	If                             string
 	TimeoutMinutes                 string
 	CustomSteps                    string
-	PreSteps                       string // steps to run at the very start of the agent job, before checkout
+	PreSteps                       string // authored/imported steps to run at the very start of the agent job, before checkout
+	GeneratedPreSteps              string // compiler-owned pre-steps, kept separate from authored/imported steps for effect validation
 	PreAgentSteps                  string // steps to run immediately before the agent execution step
 	PostSteps                      string // steps to run after AI execution
 	RunsOn                         string
@@ -90,9 +100,12 @@ type WorkflowData struct {
 	Tools                          map[string]any
 	LSP                            map[string]LSPServerConfig // top-level LSP server configuration for Copilot CLI
 	ParsedTools                    *Tools                     // Structured tools configuration (NEW: parsed from Tools map)
+	LedgerConfig                   *LedgerToolConfig          // Standalone Git-backed ledger configuration
 	ExplicitlyDisabledTools        map[string]struct{}        // tool names explicitly set to false before default resolution mutates/removes their map entries
 	BashDisabled                   bool                       // true when tools.bash was fully and explicitly refused (bash: false, or bash: []) after default-tool resolution; used by engines that can fully disable shell execution (e.g. Codex's features.shell_tool=false), see EngineCapabilities.BashDisable
 	MarkdownContent                string
+	SubAgentModels                 []parser.SubAgentModel // models declared by inline and imported sub-agents
+	SubAgents                      []parser.InlineSubAgent
 	AI                             string        // "claude" or "codex" (for backwards compatibility)
 	Model                          string        // Top-level LLM model override (from frontmatter model: field or imports)
 	EngineConfig                   *EngineConfig // Extended engine configuration
@@ -137,6 +150,7 @@ type WorkflowData struct {
 	TopLevelGitHubApp              *GitHubAppConfig                // top-level github-app fallback for all nested github-app token minting operations
 	LockForAgent                   bool                            // whether to lock the issue during agent workflow execution
 	Jobs                           map[string]any                  // custom job configurations with dependencies
+	AgentJobNeeds                  []string                        // resolved direct dependencies of the agent job
 	Cache                          string                          // cache configuration
 	NeedsTextOutput                bool                            // whether the workflow uses ${{ needs.task.outputs.text }}
 	NetworkPermissions             *NetworkPermissions             // parsed network permissions
@@ -216,6 +230,8 @@ type WorkflowData struct {
 	ModelPolicyBlocked             []string                        // merged models.blocked policy list (union across imports + main frontmatter)
 	DefaultAiCreditsPricing        *AiCreditsPricingConfig         // fallback per-token pricing from frontmatter models.default-ai-credits-pricing; used by AWF API proxy for unrecognized models
 	ActionPinMappings              map[string]string               // action-pin redirect table from aw.json action_pins: maps "owner/repo@version" → "owner/repo@version"
+	ActionPinPrefixes              map[string]string               // repository-prefix redirects from aw.json action_pin_prefixes
+	ActionPinSourceVersions        map[string]string               // inline labels for frontmatter steps already pinned by SHA
 	ContainerPinMappings           map[string]string               // container-pin redirect table from aw.json container_pins: maps source image → replacement image
 	GHES                           bool                            // select action versions compatible with GitHub Enterprise Server
 	Evals                          *EvalsConfig                    // BinEval evaluation configuration parsed from frontmatter evals field
@@ -247,6 +263,7 @@ func (d *WorkflowData) PinContext() *actionpins.PinContext {
 		GHES:              d.GHES,
 		Warnings:          d.ActionPinWarnings,
 		Mappings:          d.ActionPinMappings,
+		SourceVersions:    d.ActionPinSourceVersions,
 		ContainerMappings: d.ContainerPinMappings,
 		RecordResolutionFailure: func(f actionpins.ResolutionFailure) {
 			d.ActionResolutionFailures = append(d.ActionResolutionFailures, GHAWManifestResolutionFailure{
@@ -256,6 +273,7 @@ func (d *WorkflowData) PinContext() *actionpins.PinContext {
 			})
 		},
 	}
+	pinCtx.PrefixMappings = d.ActionPinPrefixes
 	// Only set Resolver if non-nil to avoid passing a typed nil interface value
 	// (which would be non-nil in actionpins but crash on method call).
 	if d.ActionResolver != nil {

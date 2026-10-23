@@ -85,12 +85,25 @@ func TestEnhanceToolDescription(t *testing.T) {
 			},
 		},
 		{
+			name:            "add_labels with default limits",
+			toolName:        "add_labels",
+			baseDescription: "Add labels to an issue.",
+			safeOutputs: &SafeOutputsConfig{
+				AddLabels: &AddLabelsConfig{},
+			},
+			wantContains: []string{
+				"Maximum 5 add_labels call(s)",
+				"Maximum 10 label(s) per call",
+			},
+		},
+		{
 			name:            "add_labels with allowed labels",
 			toolName:        "add_labels",
 			baseDescription: "Add labels to an issue.",
 			safeOutputs: &SafeOutputsConfig{
 				AddLabels: &AddLabelsConfig{
 					BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("5")},
+					MaxLabels:            strPtr("25"),
 					SafeOutputAllowBlockConfig: SafeOutputAllowBlockConfig{
 						Allowed: []string{"bug", "enhancement", "question"},
 					},
@@ -98,7 +111,8 @@ func TestEnhanceToolDescription(t *testing.T) {
 			},
 			wantContains: []string{
 				"CONSTRAINTS:",
-				"Maximum 5 label(s)",
+				"Maximum 5 add_labels call(s)",
+				"Maximum 25 label(s) per call",
 				`Only these labels are allowed: ["bug" "enhancement" "question"]`,
 			},
 		},
@@ -116,7 +130,8 @@ func TestEnhanceToolDescription(t *testing.T) {
 			},
 			wantContains: []string{
 				"CONSTRAINTS:",
-				"Maximum 3 label(s)",
+				"Maximum 3 add_labels call(s)",
+				"Maximum 10 label(s) per call",
 				`Only these labels are allowed: ["bug" "feature request" "good first issue" "help wanted"]`,
 			},
 		},
@@ -454,6 +469,13 @@ func TestLargeContentFieldsHaveExpectedMaxLength(t *testing.T) {
 		{tool: "report_incomplete", field: "details"},
 		{tool: "mark_pull_request_as_ready_for_review", field: "reason"},
 	}
+	expectedMaxLengths := map[string]float64{
+		"create_issue.body":                         524288,
+		"add_comment.body":                          524288,
+		"create_pull_request_review_comment.body":   524288,
+		"submit_pull_request_review.body":           524288,
+		"reply_to_pull_request_review_comment.body": 524288,
+	}
 
 	for _, tc := range fieldCases {
 		t.Run(tc.tool+"."+tc.field, func(t *testing.T) {
@@ -471,7 +493,11 @@ func TestLargeContentFieldsHaveExpectedMaxLength(t *testing.T) {
 
 			maxLength, ok := fieldValue["maxLength"].(float64)
 			require.True(t, ok, "expected maxLength for %s.%s", tc.tool, tc.field)
-			assert.InDelta(t, float64(65536), maxLength, 0, "expected maxLength=65536 for %s.%s", tc.tool, tc.field)
+			expectedMaxLength, ok := expectedMaxLengths[tc.tool+"."+tc.field]
+			if !ok {
+				expectedMaxLength = 65536
+			}
+			assert.InDelta(t, expectedMaxLength, maxLength, 0, "expected maxLength=%v for %s.%s", expectedMaxLength, tc.tool, tc.field)
 		})
 	}
 }

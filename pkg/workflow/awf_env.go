@@ -21,8 +21,27 @@ func applyDefaultMaxAICreditsEnvToMap(env map[string]string, workflowData *Workf
 	if env == nil {
 		return
 	}
+	if workflowData != nil && !workflowData.DryRun {
+		output := "admission-max-ai-credits"
+		if workflowData.IsEvalsRun {
+			output += "-evals"
+		} else if workflowData.IsDetectionRun {
+			output += "-threat-detection"
+		}
+		env["GH_AW_ADMISSION_RESULT"] = "${{ needs.activation.outputs.admission-result }}"
+		env["GH_AW_ADMISSION_MAX_AI_CREDITS"] = "${{ needs.activation.outputs." + output + " }}"
+	}
 	if workflowData != nil && workflowData.EngineConfig != nil && workflowData.EngineConfig.MaxAICredits != 0 {
 		return
+	}
+	if workflowData != nil && workflowData.DryRun {
+		if value, ok := workflowData.RawFrontmatter["max-ai-credits"].(string); ok && isExpression(value) {
+			if env[awfMaxAICreditsVarName] != value {
+				compilerDevelopmentLog.Printf("Dry-run mutation: set %s from max-ai-credits", awfMaxAICreditsVarName)
+			}
+			env[awfMaxAICreditsVarName] = value
+			return
+		}
 	}
 	if workflowData != nil && workflowData.IsEvalsRun {
 		env[awfMaxAICreditsVarName] = compilerenv.BuildDefaultEvalsMaxAICreditsExpression(strconv.FormatInt(constants.DefaultDetectionMaxAICredits, 10))
@@ -47,6 +66,12 @@ func applyDefaultMaxAICreditsEnvToMap(env map[string]string, workflowData *Workf
 // preserving the ${varName} reference for bash expansion and escaping bare $ signs
 // (e.g. "$schema" → "\$schema").
 func injectMaxAICreditsExpression(awfConfigJSON string, expr string) string {
+	const creditsKey = `"maxAiCredits":`
+	if idx := strings.Index(awfConfigJSON, creditsKey); idx >= 0 {
+		start := idx + len(creditsKey)
+		end := len(awfConfigJSON) - len(strings.TrimLeft(awfConfigJSON[start:], "-0123456789"))
+		return awfConfigJSON[:start] + expr + awfConfigJSON[end:]
+	}
 	const maxRunsKey = `"maxRuns":`
 	idx := strings.Index(awfConfigJSON, maxRunsKey)
 	if idx == -1 {
@@ -55,9 +80,7 @@ func injectMaxAICreditsExpression(awfConfigJSON string, expr string) string {
 	}
 	// Scan past the integer value of maxRuns.
 	valueEnd := idx + len(maxRunsKey)
-	for valueEnd < len(awfConfigJSON) && awfConfigJSON[valueEnd] >= '0' && awfConfigJSON[valueEnd] <= '9' {
-		valueEnd++
-	}
+	valueEnd = len(awfConfigJSON) - len(strings.TrimLeft(awfConfigJSON[valueEnd:], "0123456789"))
 	return awfConfigJSON[:valueEnd] + `,"maxAiCredits":` + expr + awfConfigJSON[valueEnd:]
 }
 
@@ -98,6 +121,9 @@ func ComputeAWFExcludeEnvVarNames(workflowData *WorkflowData, coreSecretVarNames
 	for _, name := range coreSecretVarNames {
 		addUnique(name)
 	}
+	for _, name := range fallbackProviderSecretNames(workflowData) {
+		addUnique(name)
+	}
 
 	// MCP gateway agent ID is always a secret when MCP servers are present.
 	if HasMCPServers(workflowData) {
@@ -124,7 +150,7 @@ func ComputeAWFExcludeEnvVarNames(workflowData *WorkflowData, coreSecretVarNames
 	if workflowData.MCPScripts != nil {
 		for _, toolConfig := range workflowData.MCPScripts.Tools {
 			for envName, envValue := range toolConfig.Env {
-				if strings.Contains(envValue, "${{ secrets.") || ContainsJobOutputExpr(envValue) {
+				if len(ExtractSecretsFromValue(envValue)) > 0 || ContainsJobOutputExpr(envValue) {
 					addUnique(envName)
 				}
 			}
@@ -134,7 +160,7 @@ func ComputeAWFExcludeEnvVarNames(workflowData *WorkflowData, coreSecretVarNames
 	// engine.env vars that contain a secret reference or a job-output expression.
 	if workflowData.EngineConfig != nil {
 		for varName, varValue := range workflowData.EngineConfig.Env {
-			if strings.Contains(varValue, "${{ secrets.") || ContainsJobOutputExpr(varValue) {
+			if len(ExtractSecretsFromValue(varValue)) > 0 || ContainsJobOutputExpr(varValue) {
 				addUnique(varName)
 			}
 		}
@@ -144,7 +170,7 @@ func ComputeAWFExcludeEnvVarNames(workflowData *WorkflowData, coreSecretVarNames
 	agentConfig := getAgentConfig(workflowData)
 	if agentConfig != nil {
 		for varName, varValue := range agentConfig.Env {
-			if strings.Contains(varValue, "${{ secrets.") || ContainsJobOutputExpr(varValue) {
+			if len(ExtractSecretsFromValue(varValue)) > 0 || ContainsJobOutputExpr(varValue) {
 				addUnique(varName)
 			}
 		}
@@ -166,6 +192,12 @@ func ComputeAWFExcludeEnvVarNames(workflowData *WorkflowData, coreSecretVarNames
 		addUnique(enclaveMCPGatewayEndpointEnv)
 		addUnique(enclaveMCPGatewayIdentityEnv)
 		addUnique(enclaveMCPReadinessTimeoutEnv)
+	}
+	if hasCloudHypervisorEnclaves(workflowData) {
+		addUnique("AWF_CLOUD_HYPERVISOR_ENCLAVE_SCRIPT_ROOTFS")
+		addUnique("AWF_CLOUD_HYPERVISOR_ENCLAVE_AGENT_ROOTFS")
+		addUnique("AWF_CLOUD_HYPERVISOR_ENCLAVE_MANIFEST")
+		addUnique("AWF_CLOUD_HYPERVISOR_ENCLAVE_MANIFEST_BUNDLE")
 	}
 	if enclaveGitHubIssuesEnabled(workflowData) {
 		addUnique(enclaveGitHubMCPAgentIDEnv)

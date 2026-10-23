@@ -10,6 +10,17 @@
       "type": "string",
       "description": "JSON Schema URL for IDE validation and autocomplete."
     },
+    "experimental": {
+      "type": "object",
+      "description": "Explicit opt-ins for experimental AWF features.",
+      "additionalProperties": false,
+      "properties": {
+        "modelRouting": {
+          "type": "boolean",
+          "description": "Experimental opt-in for task-level model routing. Must be true when apiProxy.routing is configured; without apiProxy.routing, routing remains inactive."
+        }
+      }
+    },
     "network": {
       "type": "object",
       "description": "Network egress configuration.",
@@ -148,7 +159,7 @@
         },
         "defaultAiCreditsPricing": {
           "type": "object",
-          "description": "Fallback per-token pricing ($/1M tokens) for models not in the built-in pricing table. When maxAiCredits is active and a model is unrecognized, this rate is used. If not set, unrecognized models are rejected with HTTP 400 (type: unknown_model_ai_credits).",
+          "description": "Fallback per-token pricing ($/1M tokens) for models not in a configured pricing catalog. When maxAiCredits is active and a model is unrecognized, this rate is used. If not set, unrecognized models are rejected with HTTP 400 (type: unknown_model_ai_credits).",
           "required": ["input", "output"],
           "properties": {
             "input": {
@@ -170,6 +181,82 @@
               "type": ["number", "null"],
               "minimum": 0,
               "description": "Cache write token price per 1M tokens. Null means cache writes are free."
+            },
+            "reasoning": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Reasoning token price per 1M tokens. Defaults to output when omitted."
+            }
+          },
+          "additionalProperties": false
+        },
+        "modelPricingCatalog": {
+          "type": "object",
+          "description": "Versioned, provider-scoped model prices supplied by a compiler or other authoritative catalog. Rates are USD per million tokens and are used offline; the catalog version is recorded with AI-credit usage.",
+          "required": ["schemaVersion", "unit", "catalogId", "version", "providers"],
+          "properties": {
+            "schemaVersion": {
+              "type": "integer",
+              "const": 1
+            },
+            "unit": {
+              "type": "string",
+              "const": "USD_PER_1M_TOKENS"
+            },
+            "catalogId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "providers": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "type": "object",
+                "required": ["models"],
+                "properties": {
+                  "models": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": {
+                      "type": "object",
+                      "required": ["input", "output", "cachedInput", "cacheWrite", "reasoning"],
+                      "properties": {
+                        "input": {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        "output": {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        "cachedInput": {
+                          "type": "number",
+                          "minimum": 0,
+                          "description": "Cached input token price per 1M tokens."
+                        },
+                        "cacheWrite": {
+                          "type": ["number", "null"],
+                          "minimum": 0,
+                          "description": "Cache write token price per 1M tokens. Null means no separate cache-write charge."
+                        },
+                        "reasoning": {
+                          "type": "number",
+                          "minimum": 0,
+                          "description": "Reasoning token price per 1M tokens; set to output when no distinct reasoning rate applies."
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
             }
           },
           "additionalProperties": false
@@ -244,6 +331,15 @@
             }
           }
         },
+        "fallbackModels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Ordered list of concrete model IDs to retry with when the requested model fails with a model-specific error: upstream 5xx, a connection error/timeout before any response, or a 400/404 reporting the model as unsupported, not found, or not accessible. 401, 403, and 429 responses never trigger a fallback. The API proxy rewrites the request's model (body 'model' field, or the Gemini '/models/<model>:' path segment), and records the model that actually served the request in token-usage logs ('model' plus a 'model_fallback' object). A redundant '<provider>/' prefix is stripped. Each fallback model must pass the same model-policy and budget guards as the requested model."
+        },
         "modelRouter": {
           "type": "object",
           "description": "Model-router settings for Copilot-compatible BYOK upstreams.",
@@ -265,6 +361,11 @@
           "additionalProperties": false,
           "required": ["objective", "task"],
           "properties": {
+            "candidateModels": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            },
             "objective": {
               "type": "object",
               "additionalProperties": false,
@@ -600,6 +701,11 @@
       "description": "Container and Docker configuration.",
       "additionalProperties": false,
       "properties": {
+        "containerRuntime": {
+          "type": "string",
+          "enum": ["docker", "gvisor", "sbx", "cloud-hypervisor", "nvx"],
+          "description": "Runtime for the primary agent, independent of enclave executor runtimes. The nvx runtime selects the explicit Linux x86_64 KVM one-shot microVM preview."
+        },
         "memoryLimit": {
           "type": "string",
           "description": "Docker memory limit for the agent container (e.g. \"4g\", \"512m\"). Uses Docker memory limit syntax."
@@ -800,6 +906,12 @@
           "default": 512,
           "description": "Guest memory in MiB."
         },
+        "scratchMib": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "description": "Optional primary guest /tmp tmpfs capacity in MiB; omitted preserves rootfs storage. Enclave scratch limits remain fixed."
+        },
         "apiTimeoutMs": {
           "type": "integer",
           "minimum": 1,
@@ -827,6 +939,69 @@
               "$ref": "#/$defs/sha256Digest"
             }
           }
+        }
+      }
+    },
+    "nvx": {
+      "type": "object",
+      "description": "NVX preview one-shot microVM configuration. Requires container.containerRuntime: \"nvx\" and explicit preview opt-in; supported only on Linux x86_64 KVM hosts.",
+      "additionalProperties": false,
+      "properties": {
+        "previewEnabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "mountPolicy": {
+          "type": "string",
+          "enum": ["workspace-only", "workspace-and-tool-cache"],
+          "default": "workspace-only"
+        },
+        "layerPath": {
+          "type": "string",
+          "description": "Absolute path to the workload-specific guest distro layer."
+        },
+        "artifactManifestPath": {
+          "type": "string",
+          "description": "Absolute path to the AWF release artifact manifest."
+        },
+        "artifactManifestBundlePath": {
+          "type": "string",
+          "description": "Absolute path to the offline manifest Sigstore attestation bundle."
+        },
+        "signerWorkflow": {
+          "type": "string",
+          "description": "Expected trusted workflow identity that signed the artifact manifest."
+        },
+        "openvmmPath": {
+          "type": "string",
+          "description": "Absolute path to the trusted, attested OpenVMM binary."
+        },
+        "kernelPath": {
+          "type": "string",
+          "description": "Absolute path to the trusted, attested guest kernel."
+        },
+        "initramfsPath": {
+          "type": "string",
+          "description": "Absolute path to the trusted, attested guest initramfs."
+        },
+        "memoryMib": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 512
+        },
+        "memoryMaxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 536870912
+        },
+        "pidsMax": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 128
+        },
+        "scratchBytes": {
+          "type": "integer",
+          "minimum": 1
         }
       }
     },
@@ -973,6 +1148,16 @@
           "type": "integer",
           "minimum": 1,
           "description": "Maximum number of bytes transferred per minute."
+        },
+        "maxGithubApiPointsRest": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum GitHub REST API secondary-rate-limit points allowed per AWF run. Requires security.difcProxy.host."
+        },
+        "maxGithubApiPointsGraphql": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum GitHub GraphQL API secondary-rate-limit points allowed per AWF run. Requires security.difcProxy.host."
         }
       }
     },
@@ -1622,6 +1807,31 @@
             "type": "object",
             "not": {
               "required": ["stagingImage"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["apiProxy"],
+        "properties": {
+          "apiProxy": {
+            "type": "object",
+            "required": ["routing"]
+          }
+        }
+      },
+      "then": {
+        "required": ["experimental"],
+        "properties": {
+          "experimental": {
+            "type": "object",
+            "required": ["modelRouting"],
+            "properties": {
+              "modelRouting": {
+                "const": true
+              }
             }
           }
         }

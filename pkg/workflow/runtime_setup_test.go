@@ -333,13 +333,13 @@ func TestGenerateRuntimeSetupSteps(t *testing.T) {
 		{
 			name: "generates node setup",
 			requirements: []RuntimeRequirement{
-				{Runtime: findRuntimeByID("node"), Version: "20"},
+				{Runtime: findRuntimeByID("node"), Version: "24"},
 			},
 			expectSteps: 1,
 			checkContent: []string{
 				"Setup Node.js",
 				"actions/setup-node@",
-				"node-version: '20'",
+				"node-version: '24'",
 			},
 		},
 		{
@@ -460,7 +460,7 @@ func TestGenerateRuntimeSetupSteps(t *testing.T) {
 			checkContent: []string{
 				"Setup Go",
 				"actions/setup-go@",
-				"go-version: '1.26'",
+				"go-version: '1.27.3'",
 				"cache: false",
 				"Capture GOROOT for AWF chroot mode",
 			},
@@ -670,7 +670,7 @@ func TestRuntimeSetupErrorMessages(t *testing.T) {
 				invalidYAML := "steps:\n\t- name: test\n\t  run: echo 'hello'"
 				// Need at least one runtime requirement to avoid early exit
 				requirements := []RuntimeRequirement{
-					{Runtime: findRuntimeByID("node"), Version: "20"},
+					{Runtime: findRuntimeByID("node"), Version: "24"},
 				}
 				_, _, err := DeduplicateRuntimeSetupStepsFromCustomSteps(invalidYAML, requirements)
 				return err
@@ -982,7 +982,7 @@ func TestGenerateRuntimeSetupStepsWithIfCondition(t *testing.T) {
 			requirements: []RuntimeRequirement{
 				{
 					Runtime:     findRuntimeByID("node"),
-					Version:     "20",
+					Version:     "24",
 					IfCondition: "hashFiles('package.json') != ''",
 				},
 			},
@@ -990,7 +990,7 @@ func TestGenerateRuntimeSetupStepsWithIfCondition(t *testing.T) {
 			checkContent: []string{
 				"Setup Node.js",
 				"actions/setup-node@",
-				"node-version: '20'",
+				"node-version: '24'",
 				"if: hashFiles('package.json') != ''",
 			},
 		},
@@ -1009,7 +1009,7 @@ func TestGenerateRuntimeSetupStepsWithIfCondition(t *testing.T) {
 				},
 				{
 					Runtime:     findRuntimeByID("node"),
-					Version:     "20",
+					Version:     "24",
 					IfCondition: "hashFiles('package.json') != ''",
 				},
 			},

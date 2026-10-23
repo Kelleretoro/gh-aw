@@ -28,6 +28,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -99,9 +100,12 @@ func createAndConfigureCompiler(config CompileConfig) *workflow.Compiler {
 		workflow.WithEngineOverride(config.EngineOverride),
 		workflow.WithFailFast(config.FailFast),
 	)
-	if config.activeModels != nil {
+	compiler.SetModelPricingResolver(func(_ context.Context, provider, model string) (map[string]float64, bool) {
+		return findExactModelPricing(provider, model)
+	})
+	if config.activeModels != nil || config.DryRun {
 		compiler.SetConfiguredModelValidator(func(data *workflow.WorkflowData) []string {
-			return unknownConfiguredModelMessages(data, config.activeModels)
+			return configuredModelValidationMessages(data, config.activeModels, config.DryRun)
 		})
 	}
 	compileCompilerSetupLog.Print("Created compiler instance")
@@ -133,7 +137,8 @@ func configureCompilerFlags(compiler *workflow.Compiler, config CompileConfig) {
 	compileCompilerSetupLog.Printf("Validation enabled: %v", config.Validate)
 
 	// Set noEmit flag to validate without generating lock files
-	compiler.SetNoEmit(config.NoEmit)
+	compiler.SetNoEmit(config.NoEmit || config.ReadOnly)
+	compiler.SetReadOnly(config.ReadOnly)
 	if config.NoEmit {
 		compileCompilerSetupLog.Print("No-emit mode enabled: validating without generating lock files")
 	}
@@ -142,6 +147,10 @@ func configureCompilerFlags(compiler *workflow.Compiler, config CompileConfig) {
 	compiler.SetStrictMode(config.Strict)
 	compiler.SetAllowActionRefs(config.AllowActionRefs)
 	compiler.SetForceStaged(config.Staged)
+	compiler.SetDryRun(config.DryRun)
+	compiler.SetEnvironmentOverride(config.EnvironmentOverride)
+	compiler.SetRequireSelfHostedRunners(config.RequireSelfHostedRunners)
+	compiler.SetLockFileLogo(!config.NoLogo)
 
 	// Set trial mode if specified
 	if config.TrialMode {

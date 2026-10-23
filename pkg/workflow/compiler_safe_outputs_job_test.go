@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -15,6 +16,30 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSafeOutputsPRLifecyclePermissions(t *testing.T) {
+	t.Parallel()
+	for _, trigger := range []string{"pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "workflow_call", "issues", "schedule"} {
+		t.Run(trigger, func(t *testing.T) {
+			data := &WorkflowData{
+				On:          "on:\n  " + trigger + ":",
+				SafeOutputs: &SafeOutputsConfig{CreateIssues: &CreateIssuesConfig{}},
+			}
+			permissions, _ := safeOutputsJobPermissions(data)
+			level, exists := permissions.Get(PermissionPullRequests)
+			if trigger == "issues" || trigger == "schedule" {
+				assert.False(t, exists)
+			} else {
+				assert.True(t, exists)
+				assert.Equal(t, PermissionRead, level)
+			}
+			permissions.Set(PermissionPullRequests, PermissionWrite)
+			addPRLifecycleReadPermission(data, permissions)
+			level, _ = permissions.Get(PermissionPullRequests)
+			assert.Equal(t, PermissionWrite, level)
+		})
+	}
+}
 
 // TestBuildConsolidatedSafeOutputsJob tests the main job builder function
 func TestBuildConsolidatedSafeOutputsJob(t *testing.T) {
@@ -263,6 +288,41 @@ func TestAddHandlerManagerOutputs(t *testing.T) {
 	assert.Equal(t, "${{ steps.process_safe_outputs.outputs.created_issue_number }}", outputs["created_issue_number"])
 	assert.Equal(t, "${{ steps.process_safe_outputs.outputs.created_pr_url }}", outputs["created_pr_url"])
 	assert.Equal(t, "${{ steps.process_safe_outputs.outputs.comment_id }}", outputs["comment_id"])
+	assert.Equal(t, "${{ steps.process_safe_outputs.outputs.activation_comment_links }}", outputs["activation_comment_links"])
+}
+
+func TestActivationCommentCallersExportLinks(t *testing.T) {
+	// Keep each caller's configuration isolated so another handler cannot mask a missing export.
+	callerConfigs := map[string]*SafeOutputsConfig{
+		"create_pull_request.cjs":         {CreatePullRequests: &CreatePullRequestsConfig{}},
+		"push_to_pull_request_branch.cjs": {PushToPullRequestBranch: &PushToPullRequestBranchConfig{}},
+	}
+	scripts, err := filepath.Glob("../../actions/setup/js/*.cjs")
+	require.NoError(t, err)
+	require.NotEmpty(t, scripts)
+	callPattern := regexp.MustCompile(`\bupdateActivationComment\w*\s*\(`)
+	callers := 0
+	for _, script := range scripts {
+		name := filepath.Base(script)
+		if strings.HasSuffix(name, ".test.cjs") || name == "update_activation_comment.cjs" {
+			continue
+		}
+		source, err := os.ReadFile(script)
+		require.NoError(t, err)
+		if !callPattern.Match(source) {
+			continue
+		}
+		callers++
+		t.Run(name, func(t *testing.T) {
+			config, ok := callerConfigs[name]
+			require.True(t, ok, "new activation-comment caller: add its standalone safe-output configuration here and update exportsActivationCommentLinks")
+			outputs := make(map[string]string)
+			addNamedSafeOutputHandlerOutputs(&WorkflowData{SafeOutputs: config}, outputs)
+			assert.Equal(t, "${{ steps.process_safe_outputs.outputs.activation_comment_links }}", outputs["activation_comment_links"],
+				"activation-comment callers must export links for the conclusion job")
+		})
+	}
+	require.Positive(t, callers, "expected runtime activation-comment callers")
 }
 
 func TestBuildConsolidatedSafeOutputsJobNeedsIncludesConfiguredDependencies(t *testing.T) {
@@ -984,6 +1044,22 @@ func TestJobOutputs(t *testing.T) {
 	assert.Equal(t, "${{ steps.process_safe_outputs.outputs.status }}", job.Outputs["process_safe_outputs_status"])
 }
 
+func TestWorkQueueOutcomeOutputIsWorkerOnly(t *testing.T) {
+	for _, worker := range []bool{false, true} {
+		outputs := map[string]string{}
+		addConditionalHandlerManagerOutputs(&WorkflowData{
+			SafeOutputs: &SafeOutputsConfig{},
+			Tools:       map[string]any{"work-queue": map[string]any{"worker": worker}},
+		}, outputs)
+		if worker {
+			assert.Equal(t, "${{ steps.process_safe_outputs.outputs.work_queue_outcome }}", outputs["work_queue_outcome"])
+		} else {
+			assert.NotContains(t, outputs, "work_queue_outcome")
+		}
+		assert.NotContains(t, outputs, "claim_results", "raw handler results must not become job outputs")
+	}
+}
+
 // TestJobDependencies tests that job dependencies are correctly set
 func TestJobDependencies(t *testing.T) {
 	tests := []struct {
@@ -1400,7 +1476,7 @@ func TestJobWithGitHubAppWorkflowCallUsesTargetRepoNameFallback(t *testing.T) {
 	stepsContent := strings.Join(job.Steps, "")
 
 	// Must use the repo-name-only output, NOT the full slug
-	assert.Contains(t, stepsContent, "repositories: ${{ needs.activation.outputs.target_repo_name }}",
+	assert.Contains(t, stepsContent, "repositories: ${{ needs.activation.outputs.target_repo_name || github.event.repository.name }}",
 		"GitHub App token step must use target_repo_name (repo name only) for workflow_call workflows")
 	assert.NotContains(t, stepsContent, "repositories: ${{ needs.activation.outputs.target_repo }}",
 		"GitHub App token step must not use target_repo (full slug) for workflow_call workflows")
@@ -1436,7 +1512,7 @@ func TestConclusionJobWithGitHubAppWorkflowCallUsesTargetRepoNameFallback(t *tes
 	stepsContent := strings.Join(job.Steps, "")
 
 	// Must use the repo-name-only output, NOT the full slug
-	assert.Contains(t, stepsContent, "repositories: ${{ needs.activation.outputs.target_repo_name }}",
+	assert.Contains(t, stepsContent, "repositories: ${{ needs.activation.outputs.target_repo_name || github.event.repository.name }}",
 		"Conclusion job GitHub App token step must use target_repo_name (repo name only) for workflow_call workflows")
 	assert.NotContains(t, stepsContent, "repositories: ${{ needs.activation.outputs.target_repo }}",
 		"Conclusion job GitHub App token step must not use target_repo (full slug) for workflow_call workflows")
@@ -1740,7 +1816,7 @@ func TestCreateCodeScanningAlertUploadJobWorkflowCallDependsOnActivation(t *test
 func TestBuildSafeOutputItemsManifestUploadStep(t *testing.T) {
 	steps := buildSafeOutputItemsManifestUploadStep("", func(action string) string {
 		return action + "@test-pin"
-	})
+	}, false, &WorkflowData{})
 
 	content := strings.Join(steps, "")
 
@@ -1749,4 +1825,74 @@ func TestBuildSafeOutputItemsManifestUploadStep(t *testing.T) {
 	assert.Contains(t, content, "/tmp/gh-aw/safe-output-items.jsonl")
 	assert.NotContains(t, content, "process-safe-outputs.stdout.log")
 	assert.NotContains(t, content, "process-safe-outputs.stderr.log")
+}
+
+func TestSafeOutputClaimArtifactsRequireWorkerAndSuccessfulRedaction(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		queue  any
+		staged bool
+		worker bool
+	}{
+		{name: "ordinary"},
+		{name: "queue-disabled", queue: false},
+		{name: "queue-reader", queue: true},
+		{name: "worker", queue: map[string]any{"worker": true}, worker: true},
+		{name: "staged-worker", queue: map[string]any{"worker": true}, staged: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			compiler := NewCompiler()
+			compiler.trialMode = test.staged
+			data := &WorkflowData{SafeOutputs: &SafeOutputsConfig{}, Tools: map[string]any{}}
+			if test.queue != nil {
+				data.Tools["work-queue"] = test.queue
+			}
+			before := []string{
+				"      - name: Process Safe Outputs\n",
+				"        env:\n",
+				"          PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}\n",
+			}
+			content := strings.Join(compiler.appendFinalSafeOutputSteps(data, before, ""), "")
+			require.NotContains(t, content, "/tmp/gh-aw/claims/*/delivery-receipt.json")
+			if test.worker {
+				require.Contains(t, content, "/tmp/gh-aw/claims/*/safe-output-items.jsonl")
+				require.Contains(t, content, "/tmp/gh-aw/claims/*/temporary-id-map.json")
+				require.Contains(t, content, "/tmp/gh-aw/claims/*/safe-output-errors.json")
+				require.Contains(t, content, "/tmp/gh-aw/claims/*/claim-delivery-errors.json")
+				require.Contains(t, content, "id: redact_secrets")
+				require.Contains(t, content, "steps.redact_secrets.outcome == 'success'")
+				require.Contains(t, content, "SECRET_PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}")
+				require.Contains(t, content, "retention-days: ${{ job.status == 'failure' && 7 || 1 }}")
+				require.Less(t, strings.Index(content, "id: redact_secrets"), strings.Index(content, "Upload Safe Outputs Items"))
+			} else {
+				require.NotContains(t, content, "/claims/")
+				require.NotContains(t, content, "redact_secrets")
+				require.NotContains(t, content, "retention-days:")
+			}
+		})
+	}
+}
+
+func TestClaimDiagnosticRetentionPreservesRepositoryOverrides(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		config *RepoConfig
+		want   any
+	}{
+		{name: "default", want: "${{ vars.GH_AW_DEFAULT_ARTIFACT_RETENTION_DAYS || (job.status == 'failure' && 7 || 1) }}"},
+		{name: "repository", config: &RepoConfig{ArtifactRetentionDays: new(TemplatableInt32("14"))}, want: 14},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			steps := buildSafeOutputItemsManifestUploadStep("", func(action string) string {
+				return action + "@v4"
+			}, true, &WorkflowData{})
+			output, err := applyArtifactRetention("jobs:\n  test:\n    steps:\n"+strings.Join(steps, ""), test.config)
+			require.NoError(t, err)
+			uploads := retentionTestSteps(t, output)
+			require.Len(t, uploads, 1)
+			assert.EqualValues(t, test.want, uploads[0]["with"].(map[string]any)["retention-days"])
+			assert.Contains(t, output, "steps.redact_secrets.outcome == 'success'")
+			assert.Contains(t, output, "/tmp/gh-aw/claims/*/claim-delivery-errors.json")
+		})
+	}
 }

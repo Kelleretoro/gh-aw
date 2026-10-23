@@ -42,6 +42,7 @@ func collectAuditAnalysisResults(ctx context.Context, run WorkflowRun, runOutput
 		applyUsageSummaryToAuditResults(usageSummary, &results)
 		results.skillActivations = mergeUsageActivitySkills(usageSummary.Skills, run, results.skillActivations)
 	}
+	results.modelRouting = analyzeModelRouting(runOutputDir)
 	// Historical runs predate precomputed friction: derive the observable subset
 	// from raw logs so audit output stays useful without rewriting history.
 	if results.friction == nil {
@@ -56,9 +57,10 @@ func collectAuditAnalysisResults(ctx context.Context, run WorkflowRun, runOutput
 
 func applyUsageSummaryToAuditResults(summary *usageActivitySummary, results *auditAnalysisResults) {
 	results.workingSet = summary.WorkingSet
+	results.ledger = summary.Ledger
 	results.friction = summary.Friction
 	applyUsageActivitySteeringSummary(summary.Steering, &results.tokenUsageSummary)
-	usageResult := &DownloadResult{RunAnalysis: RunAnalysis{MCPToolUsage: results.mcpToolUsage}}
+	usageResult := &DownloadResult{MCPToolUsage: results.mcpToolUsage}
 	applyUsageActivityMCPSummary(summary.Gateway, summary.Integrity, usageResult)
 	results.mcpToolUsage = usageResult.MCPToolUsage
 }
@@ -206,6 +208,11 @@ func launchFirewallAnalysis(g *errgroup.Group, gctx context.Context, results *au
 
 // launchSupplementalAuditAnalyses exclusively writes redactedDomainsAnalysis, rateLimitUsage, artifacts, and safeItemsCount.
 func launchSupplementalAuditAnalyses(g *errgroup.Group, gctx context.Context, results *auditAnalysisResults, runOutputDir string, verbose bool) {
+	runAuditAnalysis(g, gctx, true, "extractWorkQueueReport", "Failed to extract work queue operations", func(v *WorkQueueReport) {
+		results.workQueue = v
+	}, func() (*WorkQueueReport, error) {
+		return extractWorkQueueReport(runOutputDir)
+	})
 	runAuditAnalysis(g, gctx, verbose, "analyzeRedactedDomains", "Failed to analyze redacted domains", func(v *RedactedDomainsAnalysis) {
 		results.redactedDomainsAnalysis = v
 	}, func() (*RedactedDomainsAnalysis, error) {

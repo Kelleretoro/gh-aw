@@ -27,21 +27,27 @@ const workflowCompletionWaitTimeoutMinutes = 6 * 60
 // betweenWorkflowsDelay paces sequential workflow triggers to avoid overwhelming the GitHub API.
 const betweenWorkflowsDelay = 1 * time.Second
 
+// WorkflowRunFlags contains flags shared by interactive and non-interactive workflow runs.
+type WorkflowRunFlags struct {
+	Verbose        bool   // Enable verbose output
+	EngineOverride string // Override AI engine
+	RepoOverride   string // Target repository (owner/repo format)
+	RefOverride    string // Branch or tag name
+	AutoMergePRs   bool   // Auto-merge PRs created during execution
+	Push           bool   // Commit and push workflow files before running
+	DryRun         bool   // Validate without actually triggering
+	Approve        bool   // Approve safe update changes during compilation
+}
+
 // RunOptions contains all configuration options for running workflows
 type RunOptions struct {
+	WorkflowRunFlags
 	Enable            bool     // Enable the workflow if it's disabled
-	EngineOverride    string   // Override AI engine
-	RepoOverride      string   // Target repository (owner/repo format)
-	RefOverride       string   // Branch or tag name
-	AutoMergePRs      bool     // Auto-merge PRs created during execution
-	Push              bool     // Commit and push workflow files before running
 	WaitForCompletion bool     // Wait for workflow completion
 	RepeatCount       int      // Number of times to repeat (0 = run once)
 	Inputs            []string // Workflow inputs in key=value format
-	Verbose           bool     // Enable verbose output
-	DryRun            bool     // Validate without actually triggering
 	JSON              bool     // Output results in JSON format
-	Approve           bool     // Approve safe update changes during compilation
+	ExpectedRevision  string   // Require the returned native run to match this verified SHA without latest-run fallback.
 }
 
 // WorkflowRunResult contains the result of a single workflow run trigger for JSON output
@@ -122,7 +128,8 @@ func validateRunInputs(inputs []string) error {
 		if !strings.Contains(input, "=") {
 			return fmt.Errorf("input '%s' is not in key=value format. Expected each --input value as key=value. Example: --input environment=staging", input)
 		}
-		if parts := strings.SplitN(input, "=", 2); parts[0] == "" {
+		key, _, _ := strings.Cut(input, "=")
+		if key == "" {
 			return fmt.Errorf("input '%s' has an empty key before '='. Expected a non-empty key in key=value format. Example: --input environment=staging", input)
 		}
 	}
@@ -391,7 +398,7 @@ func handleWorkflowDryRun(lockFileName string, args []string, opts RunOptions) e
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Dry run mode - command that would be executed:"))
 		fmt.Fprintln(os.Stderr, console.FormatCommandMessage("gh "+strings.Join(args, " ")))
 	}
-	fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("✓ Validation passed for workflow: %s (dry run - not executed)", lockFileName)))
+	fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("Validation passed for workflow: %s (dry run - not executed)", lockFileName)))
 	return nil
 }
 
@@ -410,6 +417,14 @@ func executeWorkflowRun(ctx context.Context, lockFileName string, args []string,
 	fmt.Fprintln(os.Stderr, console.FormatSuccessMessage("Triggered workflow: "+lockFileName))
 	executionLog.Printf("Workflow triggered successfully: %s", lockFileName)
 	runInfo, runErr := resolveWorkflowRunInfo(lockFileName, output, opts)
+	if opts.ExpectedRevision != "" {
+		if runErr != nil {
+			return nil, fmt.Errorf("workflow activation was accepted but its run identity is unresolved; do not redispatch: %w", runErr)
+		}
+		if err := verifyExpectedWorkflowRun(ctx, lockFileName, runInfo, opts); err != nil {
+			return nil, fmt.Errorf("workflow activation was accepted but run verification failed; do not redispatch: %w", err)
+		}
+	}
 	return &workflowRunExecutionResult{
 		runInfo:    runInfo,
 		runInfoErr: runErr,
@@ -436,6 +451,9 @@ func resolveWorkflowRunInfo(lockFileName, output string, opts RunOptions) (*Work
 		executionLog.Printf("Parsed run info from gh output: id=%d, url=%s", parsedRunInfo.DatabaseID, parsedRunInfo.URL)
 		return parsedRunInfo, nil
 	}
+	if opts.ExpectedRevision != "" {
+		return nil, errors.New("GitHub CLI did not return the activated run URL; refusing to select the latest workflow run")
+	}
 	return getLatestWorkflowRunWithRetry(lockFileName, opts.RepoOverride, opts.Verbose)
 }
 
@@ -456,8 +474,14 @@ func waitForWorkflowRunCompletion(ctx context.Context, opts RunOptions, runInfo 
 		return nil
 	}
 	if runErr != nil {
+		if opts.ExpectedRevision != "" {
+			return runErr
+		}
 		printWorkflowRunInfoWarning(opts, runErr)
 		return nil
+	}
+	if opts.ExpectedRevision != "" && (opts.RepoOverride == "" || runInfo == nil || runInfo.DatabaseID <= 0) {
+		return errors.New("cannot wait without an exact verified dispatcher run identity and repository")
 	}
 	targetRepo := resolveWorkflowTargetRepo(opts)
 	if targetRepo == "" || runInfo == nil {
@@ -466,6 +490,9 @@ func waitForWorkflowRunCompletion(ctx context.Context, opts RunOptions, runInfo 
 	printWorkflowWaitMessage(opts.AutoMergePRs)
 	runIDStr := strconv.FormatInt(runInfo.DatabaseID, 10)
 	if err := WaitForWorkflowCompletion(ctx, targetRepo, runIDStr, workflowCompletionWaitTimeoutMinutes, opts.Verbose); err != nil {
+		if opts.ExpectedRevision != "" {
+			return fmt.Errorf("dispatcher wait failed; inspect the accepted activation before redispatching: %w", err)
+		}
 		if ctx.Err() != nil || errors.Is(err, ErrInterrupted) {
 			return err
 		}
@@ -656,12 +683,12 @@ func parseRunInfoFromOutput(output string) *WorkflowRunInfo {
 	if len(matches) < 2 {
 		return nil
 	}
-	runID, err := strconv.ParseInt(matches[1], 10, 64)
+	runID, err := strconv.ParseInt(matches[1], 10, 64) //nolint:uncheckedsliceindex // len(matches) is checked above.
 	if err != nil {
 		return nil
 	}
 	return &WorkflowRunInfo{
-		URL:        matches[0],
+		URL:        matches[0], //nolint:uncheckedsliceindex // len(matches) is checked above.
 		DatabaseID: runID,
 	}
 }

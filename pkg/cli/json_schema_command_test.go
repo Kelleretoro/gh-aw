@@ -31,6 +31,11 @@ func TestJSONSchemaCommand(t *testing.T) {
 					Overview:        OverviewData{},
 					Metrics:         MetricsData{},
 					DownloadedFiles: []FileInfo{},
+					KeyFindings: []AuditFinding{{
+						Code:        AuditFindingModelUnavailable,
+						Title:       "Model unavailable",
+						PlaybookURL: auditFindingPlaybookURL(AuditFindingModelUnavailable),
+					}},
 					MCPServerHealth: &MCPServerHealth{
 						Servers: []MCPServerHealthDetail{{
 							MCPServerStatsBase: MCPServerStatsBase{
@@ -47,10 +52,14 @@ func TestJSONSchemaCommand(t *testing.T) {
 				GroupedAuditReport{
 					RunsAnalyzed: 1,
 					Entries: []GroupedAuditEntry{{
-						RunID:               42,
-						Code:                AuditFindingWorkflowFailed,
-						Occurrences:         2,
-						RepresentativeEntry: AuditFinding{Code: AuditFindingWorkflowFailed, Title: "Workflow failed"},
+						RunID:       42,
+						Code:        AuditFindingWorkflowFailed,
+						Occurrences: 2,
+						RepresentativeEntry: AuditFinding{
+							Code:        AuditFindingWorkflowFailed,
+							Title:       "Workflow failed",
+							PlaybookURL: auditFindingPlaybookURL(AuditFindingWorkflowFailed),
+						},
 					}},
 				},
 			},
@@ -112,6 +121,11 @@ func TestJSONSchemaCommand(t *testing.T) {
 					Run: cachedLogsJSONLRunData{
 						RunData: RunData{RunID: 42},
 						Audit: &AuditData{
+							KeyFindings: []AuditFinding{{
+								Code:        AuditFindingModelAvailabilityUnknown,
+								Title:       "Model availability unknown",
+								PlaybookURL: auditFindingPlaybookURL(AuditFindingModelAvailabilityUnknown),
+							}},
 							MCPServerHealth: &MCPServerHealth{
 								Servers: []MCPServerHealthDetail{{
 									MCPServerStatsBase: MCPServerStatsBase{
@@ -263,6 +277,17 @@ func TestJSONSchemaCommandRejectsInvalidArguments(t *testing.T) {
 				t.Fatalf("failed command wrote partial output to stdout: %q", stdout)
 			}
 		})
+	}
+}
+
+func TestJSONSchemaRemovedEpisodeOutcomes(t *testing.T) {
+	t.Parallel()
+	stdout, _, err := executeJSONSchemaCommand("outcomes-episodes")
+	if err == nil || !strings.Contains(err.Error(), "unsupported schema: outcomes-episodes") {
+		t.Fatalf("expected removed schema to be unsupported, got %v", err)
+	}
+	if stdout != "" {
+		t.Fatalf("removed schema wrote output: %q", stdout)
 	}
 }
 

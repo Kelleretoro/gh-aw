@@ -45,6 +45,115 @@ func TestActivationArtifactUploadRunsAfterSuccessOrFailure(t *testing.T) {
 	uploadStep := extractWorkflowStepByName(t, steps, "Upload activation artifact")
 	assert.Contains(t, uploadStep, "if: success() || failure()")
 	assert.NotContains(t, uploadStep, "if: always()")
+	for _, filename := range []string{"system.txt", "user.txt", "prompt.txt"} {
+		assert.Contains(t, uploadStep, "/tmp/gh-aw/aw-prompts/"+filename)
+	}
+}
+
+func TestDynamicWorkflowsSavedWhenPRCheckoutDisabled(t *testing.T) {
+	enabled, disabled := true, false
+	engine := NewClaudeEngine()
+	engine.id = "dynamic-test"
+	compiler := NewCompiler()
+	require.NoError(t, compiler.engineRegistry.Register(engine))
+	data := &WorkflowData{
+		Name: "Dynamic workflows",
+		AI:   "dynamic-test",
+		EngineConfig: &EngineConfig{
+			ID:               "dynamic-test",
+			DynamicWorkflows: &enabled,
+		},
+		CheckoutConfigs: []*CheckoutConfig{{PullRequest: &disabled}},
+	}
+	job, err := compiler.buildActivationJob(data, false, "", "dynamic.lock.yml")
+	require.NoError(t, err)
+	steps := strings.Join(job.Steps, "")
+	save := extractWorkflowStepByName(t, steps, "Save agent config folders for base branch restoration")
+	assert.Contains(t, save, `GH_AW_AGENT_FOLDERS: ".agents .claude .github"`)
+	assert.Contains(t, extractWorkflowStepByName(t, steps, "Upload activation artifact"), "/tmp/gh-aw/base")
+	assert.Less(t, strings.Index(steps, "Save agent config folders for base branch restoration"), strings.Index(steps, "Upload activation artifact"))
+}
+
+func TestClaudeWorkflowsNotSavedWhenDynamicWorkflowsDisabled(t *testing.T) {
+	disabled := false
+	data := &WorkflowData{
+		Name: "Claude workflows",
+		AI:   "claude",
+		EngineConfig: &EngineConfig{
+			ID:               "claude",
+			DynamicWorkflows: &disabled,
+		},
+		CheckoutConfigs: []*CheckoutConfig{{PullRequest: &disabled}},
+	}
+	job, err := NewCompiler().buildActivationJob(data, false, "", "claude.lock.yml")
+	require.NoError(t, err)
+
+	assert.NotContains(t, strings.Join(job.Steps, ""), "Save agent config folders for base branch restoration")
+}
+
+func TestCopilotDynamicWorkflowsSnapshotWithPRCheckoutDisabled(t *testing.T) {
+	enabled, disabled := true, false
+	for _, tt := range []struct {
+		name    string
+		setting *bool
+		want    bool
+	}{
+		{name: "default"},
+		{name: "enabled", setting: &enabled, want: true},
+		{name: "disabled", setting: &disabled},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := &WorkflowData{
+				Name: "Copilot workflows",
+				AI:   "copilot",
+				EngineConfig: &EngineConfig{
+					ID:               "copilot",
+					DynamicWorkflows: tt.setting,
+				},
+				CheckoutConfigs: []*CheckoutConfig{{PullRequest: &disabled}},
+			}
+			job, err := NewCompiler().buildActivationJob(data, false, "", "copilot.lock.yml")
+			require.NoError(t, err)
+			steps := strings.Join(job.Steps, "")
+			if tt.want {
+				save := extractWorkflowStepByName(t, steps, "Save agent config folders for base branch restoration")
+				assert.Contains(t, save, `GH_AW_AGENT_FOLDERS: ".agents .github"`)
+				assert.Contains(t, extractWorkflowStepByName(t, steps, "Upload activation artifact"), "/tmp/gh-aw/base")
+			} else {
+				assert.NotContains(t, steps, "Save agent config folders for base branch restoration")
+			}
+		})
+	}
+}
+
+func TestWorkQueueSnapshotIsPreparedAndUploaded(t *testing.T) {
+	compiler := NewCompiler()
+	data := &WorkflowData{
+		Name:  "Work Queue",
+		Tools: map[string]any{"work-queue": true},
+	}
+	job, err := compiler.buildActivationJob(data, false, "", "queue.lock.yml")
+	require.NoError(t, err)
+	require.NotNil(t, job)
+
+	steps := strings.Join(job.Steps, "")
+	snapshotStep := extractWorkflowStepByName(t, steps, "Snapshot work queue state")
+	assert.Contains(t, snapshotStep, "write_work_queue_snapshot.cjs")
+	uploadStep := extractWorkflowStepByName(t, steps, "Upload activation artifact")
+	assert.Contains(t, uploadStep, "/tmp/gh-aw/work-queue.snapshot.json")
+	assert.Contains(t, job.Permissions, "contents: read")
+	assert.Contains(t, job.Permissions, "actions: read")
+	assert.Equal(t, "${{ steps.work_queue_snapshot.outputs.work_queue_origin }}", job.Outputs["work_queue_origin"])
+}
+
+func TestWorkQueueWorkerActivationCanPublishOnlyTrustedBindingBeforeEffects(t *testing.T) {
+	data := &WorkflowData{Tools: map[string]any{"work-queue": map[string]any{"worker": true}}, StaleCheckDisabled: true}
+	require.NoError(t, validateWorkQueueConfiguration(data))
+	job, err := NewCompiler().buildActivationJob(data, false, "", "worker.lock.yml")
+	require.NoError(t, err)
+	assert.Contains(t, job.Permissions, "contents: write")
+	assert.Contains(t, job.Permissions, "actions: read")
+	assert.Contains(t, strings.Join(job.Steps, ""), `GH_AW_WORK_QUEUE_ROLE: "worker"`)
 }
 
 func TestActivationInfoArtifactUpload(t *testing.T) {
@@ -76,28 +185,6 @@ func TestActivationInfoArtifactUpload(t *testing.T) {
 		assert.Contains(t, uploadStep, "actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf # v3.2.2")
 		assert.NotContains(t, uploadStep, "unarchived-artifact")
 	})
-}
-
-func TestOperationalValueGraderScopesActionsReadToActivation(t *testing.T) {
-	compiler := NewCompiler()
-	data := operationalValueGraderWorkflowData(".github/graders/example-operational-value.sh")
-	data.Name = "Operational Value"
-	data.StaleCheckDisabled = true
-	data.Permissions = "permissions:\n  contents: read"
-
-	job, err := compiler.buildActivationJob(data, false, "", "operational-value.lock.yml")
-	require.NoError(t, err)
-	require.NotNil(t, job)
-	assert.Contains(t, job.Permissions, "actions: read")
-	assert.Equal(t, "${{ steps.generate_aw_info.outputs.run_created_at }}", job.Outputs["run_created_at"])
-
-	steps := strings.Join(job.Steps, "")
-	assert.Contains(t, steps, "GH_AW_INFO_FETCH_RUN_CREATED_AT: \"true\"")
-	assert.Contains(t, steps, "await main(core, context)")
-
-	mainPermissions, err := compiler.buildMainJobPermissions(data)
-	require.NoError(t, err)
-	assert.NotContains(t, mainPermissions, "actions: read")
 }
 
 func TestGenerateCheckoutGitHubFolderForActivation_WorkflowCall(t *testing.T) {

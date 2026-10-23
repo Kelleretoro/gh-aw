@@ -17,8 +17,31 @@ describe("daily_aic_repo_memory_ledger", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     delete global.core;
     fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("streams repo-memory ledger buckets and recovers after corrupt large records", () => {
+    const repoMemoryDir = path.join(directory, "memory");
+    const root = ledger.ledgerRoot(repoMemoryDir);
+    fs.mkdirSync(root, { recursive: true });
+    const entry = { version: 1, repository: "owner/repo", workflow_id: "triage", run_id: 1, aic: 7, timestamp: new Date(now).toISOString() };
+    fs.writeFileSync(path.join(root, "2026-09-23.jsonl"), "noise\n".repeat(20000) + '{"broken":"' + "x".repeat(2 * 1024 * 1024) + '"}x\n' + JSON.stringify(entry));
+    const read = vi.spyOn(fs, "readFileSync");
+    const readChunk = vi.spyOn(fs, "readSync");
+    const close = vi.spyOn(fs, "closeSync");
+    expect(ledger.readLedgerEntries({ repoMemoryDir, repository: "owner/repo", workflowId: "triage", now })).toEqual([entry]);
+    expect(read).not.toHaveBeenCalled();
+    expect(readChunk.mock.calls.length).toBeGreaterThan(2);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces unreadable repo-memory ledgers instead of undercounting usage", () => {
+    vi.spyOn(fs, "openSync").mockImplementation(() => {
+      throw Object.assign(new Error("Permission denied"), { code: "EACCES" });
+    });
+    expect(() => ledger.readLedgerEntries({ repoMemoryDir: directory, repository: "owner/repo", workflowId: "triage", now })).toThrow("Failed to read daily AIC repo-memory ledger");
   });
 
   it("reads current and previous UTC day buckets and filters by repository, workflow, and window", () => {
@@ -79,5 +102,45 @@ describe("daily_aic_repo_memory_ledger", () => {
       aic: 7,
       timestamp: "2026-09-23T13:02:21.000Z",
     });
+    expect(ledger.readLedgerCoverageStart({ repoMemoryDir, repository: "owner/repo", workflowId: "triage", now })).toBe(now);
+  });
+
+  it("keeps coverage starts isolated per repository and workflow", () => {
+    expect(ledger.ledgerCoveragePath(directory, "owner/repo", "triage")).not.toBe(ledger.ledgerCoveragePath(directory, "other/repo", "triage"));
+    expect(ledger.ledgerCoveragePath(directory, "owner/repo", "triage")).not.toBe(ledger.ledgerCoveragePath(directory, "owner/repo", "other"));
+    expect(path.dirname(ledger.ledgerCoveragePath(directory, "owner/repo", "../triage"))).toBe(ledger.ledgerRoot(directory));
+  });
+
+  it.each(["missing", "malformed", "future", "wrong_identity"])("does not accept %s coverage metadata", kind => {
+    const file = ledger.ledgerCoveragePath(directory, "owner/repo", "triage");
+    fs.mkdirSync(ledger.ledgerRoot(directory), { recursive: true });
+    if (kind !== "missing") {
+      fs.writeFileSync(
+        file,
+        kind === "malformed" ? "{" : JSON.stringify({ version: 1, repository: kind === "wrong_identity" ? "other/repo" : "owner/repo", workflow_id: "triage", initialized_at: new Date(now + (kind === "future" ? 1 : -1)).toISOString() })
+      );
+    }
+    expect(ledger.readLedgerCoverageStart({ repoMemoryDir: directory, repository: "owner/repo", workflowId: "triage", now })).toBeNull();
+  });
+
+  it("surfaces unreadable coverage metadata instead of authorizing ledger-only accounting", () => {
+    vi.spyOn(fs, "readFileSync").mockImplementation(() => {
+      throw Object.assign(new Error("Permission denied"), { code: "EACCES" });
+    });
+    expect(() => ledger.readLedgerCoverageStart({ repoMemoryDir: directory, repository: "owner/repo", workflowId: "triage", now })).toThrow("Failed to read daily AIC repo-memory coverage");
+  });
+
+  it("preserves the original trusted writer coverage start across later appends", () => {
+    vi.stubEnv("GITHUB_RUN_ID", "42");
+    vi.stubEnv("GITHUB_REPOSITORY", "owner/repo");
+    vi.stubEnv("GH_AW_WORKFLOW_ID", "triage");
+    const options = { repoMemoryDir: directory, usageRoot: path.join(directory, "usage"), now };
+    try {
+      ledger.appendCurrentRunLedgerEntry(options);
+      ledger.appendCurrentRunLedgerEntry({ ...options, now: now + ledger.WINDOW_MS });
+      expect(ledger.readLedgerCoverageStart({ repoMemoryDir: directory, repository: "owner/repo", workflowId: "triage", now: now + ledger.WINDOW_MS })).toBe(now);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

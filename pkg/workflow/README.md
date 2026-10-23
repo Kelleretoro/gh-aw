@@ -136,6 +136,7 @@ The `checkout:` frontmatter key is parsed by `ParseCheckoutConfigs` into one or 
 | `PermissionMode` | `string` | `engine.permission-mode` | Agent permission mode |
 | `MaxTurns` | `string` | `engine.max-turns` | Maximum agent turns |
 | `MaxToolDenials` | `string` | `engine.max-tool-denials` | Max repeated tool denials before stopping (Copilot SDK mode only) |
+| `MaxToolCalls` | `string` | `max-tool-calls` | Aggregate run-wide tool dispatch budget (built-in Copilot SDK driver only) |
 | `MaxRuns` | `int` | `engine.max-runs` | Maximum LLM invocations per run (AWF `apiProxy.maxRuns`) |
 | `MaxContinuations` | `int` | `engine.max-continuations` | Maximum autopilot continuations (copilot engine; `> 1` enables `--autopilot`) |
 | `MaxAICredits` | `int64` | `engine.max-ai-credits` | Maximum AI credits per run for AWF API-proxy firewall enforcement |
@@ -276,9 +277,9 @@ Each safe-output tool type has its own configuration struct parsed from the `saf
 | `DispatchRepositoryConfig` | struct | Configuration for dispatching `repository_dispatch` events |
 | `DispatchWorkflowConfig` | struct | Configuration for dispatching GitHub Actions workflows |
 | `HideCommentConfig` | struct | Configuration for hiding/minimizing GitHub comments |
-| `IssueReportingConfig` | struct | Shared configuration base for `missing_data`, `missing_tool`, and `report_incomplete` safe outputs |
-| `MissingDataConfig` | type alias | `= IssueReportingConfig` for the `missing_data` safe output |
-| `MissingToolConfig` | type alias | `= IssueReportingConfig` for the `missing_tool` safe output |
+| `IssueReportingConfig` | struct | Shared configuration base for `report_missing_data`, `report_missing_tool`, and `report_incomplete` safe outputs |
+| `MissingDataConfig` | type alias | `= IssueReportingConfig` for the `report_missing_data` safe output |
+| `MissingToolConfig` | type alias | `= IssueReportingConfig` for the `report_missing_tool` safe output |
 | `ReportIncompleteConfig` | type alias | `= IssueReportingConfig` for the `report_incomplete` safe output |
 | `LinkSubIssueConfig` | struct | Configuration for linking issues as sub-issues |
 | `MarkPullRequestAsReadyForReviewConfig` | struct | Configuration for marking draft PRs as ready for review |
@@ -569,7 +570,7 @@ Detects dangerous patterns in externally-sourced markdown files (e.g., from `gh 
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `GenerateWorkflowHeader` | `func(sourceFile, generatedBy, customInstructions string) string` | Generates the standard ASCII-art + regeneration-instructions header comment for compiled lock files; `sourceFile` is the `.md` source path, `generatedBy` names the generator, and `customInstructions` is appended verbatim |
+| `GenerateWorkflowHeader` | `func(sourceFile, generatedBy, customInstructions string, logo ...bool) string` | Generates the standard header comment for compiled lock files; `sourceFile` is the `.md` source path, `generatedBy` names the generator, `customInstructions` is appended verbatim, and optional `logo` controls the ASCII art (default: true) |
 
 ### Validation Functions
 
@@ -1436,6 +1437,7 @@ This appendix is generated from the current non-test Go source files in this pac
 | `maintenance_workflow.go` | `FetchDefaultBranch` | `func FetchDefaultBranch(slug string) string` | FetchDefaultBranch queries the GitHub API to determine the default branch of the given repository slug (owner/repo). |
 | `maintenance_workflow.go` | `GenerateMaintenanceWorkflow` | `func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWorkflowOptions) error` | GenerateMaintenanceWorkflow generates the agentics-maintenance. |
 | `markdown_security_scanner.go` | `FormatSecurityFindings` | `func FormatSecurityFindings(findings []SecurityFinding, filePath string) string` | FormatSecurityFindings formats a list of findings into a human-readable error message filePath: the workflow file path to include in error messages |
+| `resource_security_scanner.go` | `FormatResourceSecurityFindings` | `func FormatResourceSecurityFindings(findings []SecurityFinding, filePath string) string` | Formats resource findings without Markdown-specific wording |
 | `mcp_cli_mount.go` | `GetMCPCLIPathSetup` | `func GetMCPCLIPathSetup(data *WorkflowData) string` | GetMCPCLIPathSetup returns a shell command that adds the MCP CLI bin directory to PATH inside the AWF container. |
 | `mcp_config_types.go` | `(MapToolConfig).GetAny` | `func (MapToolConfig).GetAny(key string) (any, bool)` | Exported function or method declared in `mcp_config_types.go`. |
 | `mcp_config_types.go` | `(MapToolConfig).GetString` | `func (MapToolConfig).GetString(key string) (string, bool)` | Exported function or method declared in `mcp_config_types.go`. |
@@ -1610,7 +1612,59 @@ This appendix is generated from the current non-test Go source files in this pac
 
 <!-- END SOURCE-VERIFIED EXPORT COVERAGE -->
 
+### Additional Exported Types
+
+The following exported types were verified against source (`pkg/workflow/*.go`) and were not previously described in this specification.
+
+| Type | Kind | Group |
+|------|------|-------|
+| `AWFCloudHypervisorConfig`, `AWFCloudHypervisorSHA256Config`, `AWFExperimentalConfig`, `AWFFilesystemConfig`, `AWFHostedWebConfig`, `AWFHostedWebPolicy`, `AWFModelRoutingConfig`, `AWFModelRoutingObjective`, `AWFModelRoutingTask` | struct | Agent Workflow Firewall (AWF) configuration sections |
+| `CopilotModelRoutingConfig`, `HostedWebPolicy` | struct | Model routing and hosted-web policy configuration |
+| `AgentEnclaveConfig`, `AgentEnclaveGitHubConfig`, `AgentEnclaveGitHubToolConfig`, `AgentEnclaveToolsConfig`, `ScriptEnclaveConfig`, `EnclaveConfig`, `EnclaveRepository`, `DynamicEnclavePolicy`, `DynamicEnclaveQuotas` | struct | Enclave configuration |
+| `EnclavesConfig` | alias (`[]*EnclaveConfig`) | List of enclave configurations |
+| `ApproveWorkflowRunConfig`, `UploadCodeCoverageConfig` | struct | Safe-output job configurations |
+| `AssignWorkItemConfig`, `AzureDevOpsArtifactLinkConfig`, `CommentOnWorkItemConfig`, `CreateWorkItemConfig`, `LinkWorkItemsConfig`, `UpdateWorkItemConfig`, `UploadWorkItemAttachmentConfig` | struct | Azure DevOps work-item safe outputs |
+| `JiraSafeOutputConfig`, `LinearCreateIssueConfig`, `LinearTargetConfig`, `LinearUpdateIssueConfig` | struct | Jira and Linear safe outputs |
+| `CloseOlderConfig`, `SafeUpdateOptions`, `ThreatDetectionSuppression` | struct | Safe-output behavior options |
+| `SafeOutputsURLsPolicy` | alias (`string`) | URL policy for safe outputs |
+| `BuiltinGraderMeta`, `GraderDefinition` | struct | Grader definitions |
+| `ContinualExperimentConfig`, `ExperimentDecisionConfig` | struct | Experiment configuration |
+| `DriveMemoryConfig`, `DriveMemoryEntry`, `DriveMemoryToolConfig`, `MemoryValidationConfig` | struct | Drive memory and memory validation |
+| `LedgerCompactionConfig`, `LedgerConfig`, `LedgerToolConfig`, `RepoMemoryLedgerCompactionConfig`, `RepoMemoryLedgerConfig` | struct | Ledger and repo-memory ledger configuration |
+| `EnginePluginsDefinition`, `PluginReference` | struct | Engine plugin definitions |
+| `PluginInstallationProvider` | interface | Engine-specific plugin installation |
+| `PostConfigPluginInstallationProvider` | interface | Installs plugin state after runtime configuration is written |
+| `GHAWManifestDetectionPolicy` | struct | Effective threat-detection compiler policy recorded in the manifest independently of jobs |
+| `GHAWManifestMCPServer`, `GHAWManifestMemoryValidationScript` | struct | gh-aw manifest entries |
+| `MCPGatewayAgentPolicy` | struct | MCP gateway agent policy |
+| `MCPParamType`, `ReactionType`, `RunnerTopology` | alias (`string`) | String-typed enumerations |
+| `PullRequestEventTransition` | struct | Pull-request event transition description |
+| `ShellScriptResource` | struct | Embedded shell script resource |
+| `WorkflowFile`, `WorkflowFileJob`, `WorkflowFilePermissions` | struct | Parsed GitHub Actions workflow file model |
+| `HostedWebCapabilities` | struct | Hosted web-search support, `max-uses` support, and unsupported reason |
+| `HostedWebCapabilityProvider` | interface | Reports hosted web-search support for a workflow via `GetHostedWebCapabilities` |
+| `AWFNVXConfig`, `AgentNVXConfig` | struct | NVX preview runtime config for the AWF config file and agent sandbox overrides |
+| `MemoryJSONSchemaConfig` | struct | JSON schema file/format settings for memory validation |
+| `AgyEngine` | struct | Agy engine (constructed with `NewAgyEngine`) |
+| `WorkQueueClaimAdapter`, `WorkQueueGraphQL`, `WorkQueueGitTree`, `WorkQueueRestRequest`, `WorkQueueRestVerifier` | struct | Work-queue claim adapter binding custom output to a verified effect |
+| `WorkQueueIssuesConfig`, `WorkQueueMemoryConfig`, `WorkQueuePolicyConfig` | struct | Work-queue issues, memory, and policy configuration (policy is a proposal; the installed ledger policy grants authority) |
+
+### Additional exported functions
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `NewAgyEngine` | `func NewAgyEngine() *AgyEngine` | Creates the Agy engine |
+| `ParseStaleCheckMode` | `func ParseStaleCheckMode(frontmatter map[string]any) (disabled, full bool)` | Reads the `on` stale-check mode from frontmatter |
+| `ScanResourceSecurity` | `func ScanResourceSecurity(content []byte) []SecurityFinding` | Scans non-Markdown resources for Unicode obfuscation; returns nil for invalid UTF-8 |
+| `ValidateEnvironmentOverride` | `func ValidateEnvironmentOverride(name string) error` | Validates a literal Actions environment name; empty means no override |
+
 ## Source Synchronization
+
+Reviewed against source on 2026-10-11: added previously-undocumented hosted-web, NVX, Agy, memory schema, and work-queue types plus `NewAgyEngine`, `ParseStaleCheckMode`, `ScanResourceSecurity`, and `ValidateEnvironmentOverride`.
+
+Reviewed against source on 2026-10-04: added `PostConfigPluginInstallationProvider` and `GHAWManifestDetectionPolicy` to the "Additional Exported Types" table.
+
+Reviewed against source on 2026-10-01: added 66 previously-undocumented exported types to the "Additional Exported Types" table above.
 
 Reviewed against recent source updates on 2026-09-20: added 14 previously-undocumented exported package-level functions (GitHub App manifest permission helpers, engine default domain sets, GitHub CLI proxy-mode detection, operational-value evaluator path helpers, grader/experiment reference rewriting, and secret/shell-env substitution) to the appendix table below. No other public-contract deltas were identified beyond the sections above.
 

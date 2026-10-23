@@ -294,12 +294,14 @@ func jsonFieldNames(v any) []string {
 func mcpToolParams() map[string]toolParamEntry {
 	return map[string]toolParamEntry{
 		"status":      jsonFieldNames(statusArgs{}),
+		"health":      jsonFieldNames(healthArgs{}),
 		"compile":     jsonFieldNames(compileArgs{}),
 		"logs":        jsonFieldNames(logsArgs{}),
 		"audit":       jsonFieldNames(auditArgs{}),
 		"audit-diff":  jsonFieldNames(auditDiffArgs{}),
 		"checks":      jsonFieldNames(checksArgs{}),
 		"mcp-inspect": jsonFieldNames(mcpInspectArgs{}),
+		"work-queue":  jsonFieldNames(workQueueArgs{}),
 		"add":         jsonFieldNames(addArgs{}),
 		"update":      jsonFieldNames(updateArgs{}),
 		"fix":         jsonFieldNames(fixArgs{}),

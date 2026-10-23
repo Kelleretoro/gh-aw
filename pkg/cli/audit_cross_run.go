@@ -25,19 +25,26 @@ const spikeDetectionMultiplier = 2.0
 // CrossRunAuditReport represents aggregated audit data across multiple workflow runs.
 // It includes firewall analysis, metrics trends, MCP server health, and error trends.
 type CrossRunAuditReport struct {
-	RunsAnalyzed        int                         `json:"runs_analyzed"`
-	RunsWithData        int                         `json:"runs_with_data"`
-	RunsWithoutData     int                         `json:"runs_without_data"`
-	Summary             CrossRunSummary             `json:"summary"`
-	MetricsTrend        MetricsTrendData            `json:"metrics_trend"`
-	MCPHealth           []MCPServerCrossRunHealth   `json:"mcp_health,omitempty"`
-	ErrorTrend          ErrorTrendData              `json:"error_trend"`
-	DomainInventory     []DomainInventoryEntry      `json:"domain_inventory"`
-	PerRunBreakdown     []PerRunFirewallBreakdown   `json:"per_run_breakdown"`
-	Drain3Insights      []ObservabilityInsight      `json:"drain3_insights,omitempty"`
-	ClusterAnalysis     *ClusterAnalysis            `json:"cluster_analysis,omitempty"`
-	GitHubAPIRateLimit  *GitHubAPIRateLimitReport   `json:"github_api_rate_limit,omitempty"`
-	GitHubAPIRateLimits []*GitHubAPIRateLimitReport `json:"github_api_rate_limits,omitempty"`
+	FailureInvestigation *FailureInvestigation       `json:"failure_investigation,omitempty"`
+	FailureClusters      []FailureCluster            `json:"failure_clusters,omitempty"`
+	RunsAnalyzed         int                         `json:"runs_analyzed"`
+	RunsWithData         int                         `json:"runs_with_data"`
+	RunsWithoutData      int                         `json:"runs_without_data"`
+	Summary              CrossRunSummary             `json:"summary"`
+	MetricsTrend         MetricsTrendData            `json:"metrics_trend"`
+	MCPHealth            []MCPServerCrossRunHealth   `json:"mcp_health,omitempty"`
+	ErrorTrend           ErrorTrendData              `json:"error_trend"`
+	DomainInventory      []DomainInventoryEntry      `json:"domain_inventory"`
+	PerRunBreakdown      []PerRunFirewallBreakdown   `json:"per_run_breakdown"`
+	Drain3Insights       []ObservabilityInsight      `json:"drain3_insights,omitempty"`
+	ClusterAnalysis      *ClusterAnalysis            `json:"cluster_analysis,omitempty"`
+	GitHubAPIRateLimit   *GitHubAPIRateLimitReport   `json:"github_api_rate_limit,omitempty"`
+	GitHubAPIRateLimits  []*GitHubAPIRateLimitReport `json:"github_api_rate_limits,omitempty"`
+	ModelRouting         *ModelRoutingLogsSummary    `json:"model_routing,omitempty"`
+	Episodes             []EpisodeData               `json:"episodes,omitempty"`
+	Edges                []EpisodeEdge               `json:"edges,omitempty"`
+	Outcomes             []OutcomesData              `json:"outcomes,omitempty"`
+	EpisodeOutcomes      *EpisodeOutcomesData        `json:"episode_outcomes,omitempty"`
 }
 
 // CrossRunSummary provides top-level statistics across all analyzed runs.
@@ -398,11 +405,9 @@ func buildCrossRunMCPHealth(mcpServerMap map[string]*crossRunMCPServerAgg, total
 			unreliable = true
 		}
 		health = append(health, MCPServerCrossRunHealth{
-			MCPServerStatsBase: MCPServerStatsBase{
-				ServerName:    name,
-				ToolCallCount: agg.totalCalls,
-				ErrorCount:    agg.totalErrors,
-			},
+			ServerName:    name,
+			ToolCallCount: agg.totalCalls,
+			ErrorCount:    agg.totalErrors,
 			RunsConnected: connected,
 			TotalRuns:     totalRuns,
 			ErrorRate:     errorRate,

@@ -160,24 +160,6 @@ func TestCalculateTrend(t *testing.T) {
 	}
 }
 
-func TestGroupRunsByWorkflow(t *testing.T) {
-	t.Parallel()
-	runs := []WorkflowRun{
-		{WorkflowName: "workflow-a", Conclusion: "success"},
-		{WorkflowName: "workflow-b", Conclusion: "success"},
-		{WorkflowName: "workflow-a", Conclusion: "failure"},
-		{WorkflowName: "workflow-c", Conclusion: "success"},
-		{WorkflowName: "workflow-b", Conclusion: "success"},
-	}
-
-	grouped := GroupRunsByWorkflow(runs)
-
-	assert.Len(t, grouped, 3, "Should have 3 different workflows")
-	assert.Len(t, grouped["workflow-a"], 2, "workflow-a should have 2 runs")
-	assert.Len(t, grouped["workflow-b"], 2, "workflow-b should have 2 runs")
-	assert.Len(t, grouped["workflow-c"], 1, "workflow-c should have 1 run")
-}
-
 func TestCalculateHealthSummary(t *testing.T) {
 	t.Parallel()
 	workflowHealths := []WorkflowHealth{
@@ -390,4 +372,30 @@ func TestIsDriverExitFailure(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestHealthSummaryStatusCountsAndAboveThresholdFailures(t *testing.T) {
+	workflows := []WorkflowHealth{
+		{Status: "healthy", SuccessRate: 100},
+		{Status: "recovery_observed", SuccessRate: 100},
+		{Status: "failures_observed", SuccessRate: 90, FailureCount: 1},
+		{Status: "insufficient_evidence", SuccessRate: 50, FailureCount: 1},
+		{Status: "subagent_failures_observed", SuccessRate: 100, SubagentFailureCount: 2},
+		{Status: "failures_observed", IntentionalFailure: true, FailureCount: 1},
+		{Status: "no_recent_runs"},
+	}
+	summary := CalculateHealthSummary(workflows, "bounded", 80)
+	assert.Equal(t, 2, summary.HealthyWorkflows, "an above-threshold failure status is not healthy")
+	assert.Equal(t, 2, summary.ObservedFailureWorkflows)
+	assert.Equal(t, 1, summary.DegradedWorkflows, "legacy degradation is sub-agent-only")
+	assert.Equal(t, 2, summary.InsufficientWorkflows)
+	assert.Equal(t, map[string]int{
+		"healthy": 1, "recovery_observed": 1, "failures_observed": 2,
+		"insufficient_evidence": 1, "subagent_failures_observed": 1, "no_recent_runs": 1,
+	}, summary.StatusCounts)
+	total := 0
+	for _, count := range summary.StatusCounts {
+		total += count
+	}
+	assert.Equal(t, summary.TotalWorkflows, total)
 }

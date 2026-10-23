@@ -14,7 +14,7 @@ permissions:
 engine:
   id: codex
   model-provider: openai
-model: openai/gpt-5.3-codex
+model: openai/gpt-6-sol
 strict: true
 network:
   allowed:
@@ -73,6 +73,7 @@ safe-outputs:
     group: true
   link-sub-issue:
     max: 50
+    target: "*"
   create-discussion:
     expires: 1d
     title-prefix: "[Issue Arborist] "

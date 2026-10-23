@@ -51,6 +51,7 @@ tools:
   edit: null
   bash:
     - "find specs -type f -name \"*.md\" | sort"
+    - "cat /tmp/gh-aw/cache-memory/formal-spec-verifier/rotation.json"
     - "cat specs/*.md"
     - "find . -name \"*_test.go\" -path \"*/pkg/*\" | head -20"
     - "cat pkg/workflow/*.go | head -200"
@@ -93,7 +94,7 @@ Schema:
 ```
 
 - On first run (file missing): initialize `{ "last_index": 0, "processed": [], "last_run": "" }`.
-- Run `find specs -type f -name '*.md' | sort` to get the full list.
+- Run exactly `find specs -type f -name "*.md" | sort` to get the full list. Run it separately from the cache read; do not add `head`, `wc`, `cd`, or other shell commands to it.
 - Select the spec at `(last_index + 1) % len(specs)` that is **not** in `processed` from the last 14 days.
 - If all specs were processed within the last 14 days, reset `processed` to `[]` and start from `last_index 0`.
 
@@ -124,12 +125,13 @@ Before analyzing the selected spec, check for existing notes from previous runs:
 ```
 
 If a note file exists for the selected spec, read it and use the prior predicate list as a starting point, extending or refining it rather than starting from scratch. If no prior notes exist, proceed fresh.
+Use built-in file inspection tools for note files; do not combine note and cache reads with shell commands.
 
 ---
 
 ## Step 2 — Read and Parse the Specification
 
-Read the selected spec file in full with `bash`.
+Read the selected spec file in full with built-in file inspection tools (or an allowed standalone `cat specs/*.md` command for a top-level spec). Do not combine reads or pipe them through `head`.
 
 Use built-in file inspection tools only for read-only analysis when bash output is insufficient. Do not modify repository files.
 
@@ -189,10 +191,10 @@ Create exactly one issue using the `create_issue` safe output.
 ### Output Contract (Required)
 
 1. Draft the title and body locally first if needed, but emit exactly one final `create_issue` safe output only after the full payload is complete.
-2. Do **not** use `bash`, `cli-proxy`, or the `safeoutputs` CLI to create the issue or inspect the tool schema. Emit the safe output directly with `title` and `body` arguments.
-3. Do **not** use `python3`, `node`, `jq`, or any other scripting runtime to construct or validate the issue payload — build the body string inline and emit the safe output directly.
+2. Use the configured safe-output transport. With `cli-proxy`, direct safe-output MCP tools are not exposed. Invoke `safeoutputs create_issue '<JSON>'` from `bash` with a complete JSON object containing `title` and `body` as one single-quoted argument. Inside JSON strings, encode newlines as `\n`, double quotes as `\"`, backslashes as `\\`, and apostrophes as `\u0027`; Unicode can remain literal. Stdin is also supported with `safeoutputs create_issue .`, but prefer inline JSON without auxiliary tools, pipelines, temporary files, or shell expansion. Transport support does not grant extra shell permissions. If a direct safe-output tool is actually exposed instead, call it with the same arguments.
+3. Do **not** use `python3`, `node`, `jq`, or any other scripting runtime to construct or validate the issue payload — build the body string inline. Do not redirect it to a file.
 4. Never retry `create_issue` with empty, placeholder, or partial arguments.
-5. If the quality checks below cannot be met, emit `report_incomplete` directly as a safe output instead of `create_issue`.
+5. If the quality checks below cannot be met, emit `report_incomplete` through the same transport instead of `create_issue`. With `cli-proxy`, use `safeoutputs report_incomplete '{"reason":"<concrete blocker>"}'`; never substitute a prose-only failure report.
 
 ### Issue format
 
@@ -263,7 +265,7 @@ Before emitting `create_issue`, verify the body:
 - The generated test file has no obvious syntax errors — **visual review only**: scan for mismatched braces, missing imports, and undefined identifiers. Do **not** run `go build`, `go test`, `go version`, `python3`, `node`, `jq`, or any compiler or runtime to verify.
 - Is at least 1200 characters long.
 
-If these checks cannot be met, emit `report_incomplete` directly as a safe output instead of `create_issue`.
+If these checks cannot be met, emit `report_incomplete` through the configured safe-output transport instead of `create_issue`.
 
 ---
 

@@ -35,11 +35,9 @@ const (
 	// long time.
 	maxMCPLogsSubprocessTimeoutMinutes = 60
 
-	// defaultMCPAuditTimeoutMinutes is the default subprocess timeout for the audit
-	// tool.  Auditing a single run typically takes 5–30 s, but large runs with many
-	// artifact sets can take longer.  5 minutes gives ample headroom while still
-	// bounding the subprocess lifetime.
-	defaultMCPAuditTimeoutMinutes = 5
+	// Leave time to return an incomplete envelope before the default 60s RPC limit.
+	defaultMCPAuditResponseTimeout = 55 * time.Second
+	mcpAuditResponseMargin         = 5 * time.Second
 	// defaultMCPAuditDiffTimeoutMinutes is the default subprocess timeout for the
 	// audit-diff tool.  5 minutes gives ample headroom for the artifact-download
 	// and diff steps while still bounding the subprocess lifetime.
@@ -98,6 +96,11 @@ func newMCPSubprocessContext(ctx context.Context, timeout time.Duration, toolNam
 
 // logsArgs holds the input parameters for the logs tool.
 type logsArgs struct {
+	EpisodeRun            string   `json:"episode_run,omitempty" jsonschema:"Retrieve a canonical episode from this seed run ID or URL instead of workflow discovery; count caps all examined candidates"`
+	EpisodeRepository     string   `json:"episode_repository,omitempty" jsonschema:"Seed [HOST/]owner/repo for episode_run IDs; otherwise uses the run URL or GITHUB_REPOSITORY"`
+	AllowRepositories     []string `json:"allow_repositories,omitempty" jsonschema:"Additional owner/repo explicitly allowed for episode retrieval on the seed host"`
+	MaxAPIRequests        int      `json:"max_api_requests,omitempty" jsonschema:"Hard REST request budget for episode_run retrieval, including artifact discovery and downloads (default: 500)"`
+	Refresh               bool     `json:"refresh,omitempty" jsonschema:"Refresh the cached episode_run snapshot instead of reusing it"`
 	WorkflowName          string   `json:"workflow_name,omitempty" jsonschema:"Name of the workflow to download logs for (empty for all)"`
 	Count                 int      `json:"count,omitempty" jsonschema:"Number of workflow runs to download (default: 100)"`
 	StartDate             string   `json:"start_date,omitempty" jsonschema:"Filter runs created after this date (YYYY-MM-DD or delta like -1d, -1w, -1mo)"`
@@ -114,10 +117,10 @@ type logsArgs struct {
 	IgnoreWorkflowRuns    []int64  `json:"ignore_workflow_runs,omitempty" jsonschema:"Workflow run IDs to exclude"`
 	Timeout               int      `json:"timeout,omitempty" jsonschema:"Maximum time in minutes to spend downloading logs (default: auto-scales with count in the MCP server, rounded up in 40-run increments; e.g. 1 minute up to 40, 2 minutes for 41-80, 3 minutes for 81-120, and so on)"`
 	MaxGitHubAPIRateLimit int      `json:"max_github_api_rate_limit,omitempty" jsonschema:"Maximum used GitHub core API requests before pausing one target or stopping multiple targets. Positive values are absolute; negative values reserve requests from the API-reported limit (for example, 12000 or -2000)."`
-	MaxStorageMB          int      `json:"max_storage,omitempty" jsonschema:"Maximum logs storage in MB after pruning non-essential cache data (0 means unlimited)."`
+	MaxStorageMB          *int     `json:"max_storage,omitempty" jsonschema:"Maximum logs storage in MB after pruning non-essential cache data (default: 1024 MB; 0 means unlimited)."`
 	PruneOlderRuns        bool     `json:"prune_older_runs,omitempty" jsonschema:"Remove oldest completed runs when non-essential cache pruning cannot satisfy max_storage."`
 	MaxTokens             int      `json:"max_tokens,omitempty" jsonschema:"Deprecated: accepted for backward compatibility but ignored. Output is always written to a file."`
-	Artifacts             []string `json:"artifacts,omitempty" jsonschema:"Artifact sets to download (default: info,usage). Valid sets: all, activation, agent, detection, evals, experiment, firewall, github-api, graders, info, mcp, usage. The compact usage set is always added so per-run token_usage is populated."`
+	Artifacts             []string `json:"artifacts,omitempty" jsonschema:"Artifact sets to download (default: info,usage). Valid sets: all, activation, agent, detection, evals, experiment, firewall, github-api, graders, info, mcp, usage, work-queue. The compact usage set is always added so per-run token_usage is populated."`
 }
 
 // defaultMCPLogsToolArtifacts is the artifact selection used when the caller does
@@ -221,46 +224,64 @@ func registerLogsTool(server *mcp.Server, execCmd execCmdFunc, actor string, val
 	return nil
 }
 
-const logsToolDescription = `Download and analyze workflow logs.
+const logsToolDescription = `Download workflow logs. Returns JSON file_path; errors may be inline.
 
-In the normal case, returns a file path to a JSON file with workflow run data and metrics.
-The data is written to a file to avoid large inline payloads. Use the returned file_path
-to read the full data. In rare error cases (e.g., invalid workflow name), a JSON error
-response is returned inline instead.
+Read the returned file_path first; it contains the complete report JSON. Use jq
+against that file to project summary, failure_investigation and continuation before runs.
+For partial results ("partial": true), follow continuation or every per-target entry
+in continuations, preserving repository, updated end_date and before_run_id.
+Partial episode evidence may have no cursor. coverage_status is partial or unknown,
+never proof of complete episode membership. Read coverage_reasons and the report.
+State incomplete coverage until collection finishes.
 
-If the command times out before fetching all available logs, a "continuation" field will be present
-in the JSON data with updated parameters to continue fetching more data.
-Check for the presence of the continuation field to determine if there are more logs available.
+Start with failure_investigation.selected_runs: a deduplicated initial audit plan.
+Prioritize failure_boundary over generic aftermath. Read failure_clusters for selected
+cluster IDs; signal.job/step identify boundaries. Clusters overlap: count unique run IDs,
+never sum counts. Membership describes symptoms, not proven causes. Recommendations
+exclude intentional_failure runs; metadata_only groups remain unknown.
+Cluster statistics use the returned failed sample, not fleet failure rates.
+Wilson bounds assume independent observations; retries and missing diagnostics
+limit interpretation. They are not root-cause confidence.
 
-When results are incomplete, the tool response also sets "partial": true and repeats the
-"continuation" cursor inline, so partial results can be detected without reading the file.
+Read representative_runs or selected_runs audit_path/logs_path before fetching evidence;
+use the audit tool if unavailable. Representatives expose workflow/engine/model context.
+Report cluster IDs, unique affected runs, inspected URLs and remaining uncertainty.
 
-The continuation field includes all necessary parameters (before_run_id, etc.) to resume fetching
-from where the previous request stopped due to timeout.
+token_usage (input+output) and aic are always present per run. The usage artifact is
+downloaded by default and added to explicit selections. Compact metadata is not complete
+logs; missing evidence does not prove absence of failure.
 
-Each run record includes a "token_usage" field (input+output tokens) and an "aic" field.
-Both are always present, so aggregating them across runs yields real fleet-level metrics.
-The compact "usage" artifact set is downloaded by default (and added to any explicit
-artifact selection) because it carries the per-run token usage data.`
+Set episode_run to a seed run ID or URL for bounded canonical episode retrieval.
+count then caps all candidate runs examined, not only matching members.
+allow_repositories explicitly permits additional repositories on the seed host;
+max_api_requests caps the entire operation, including compact artifact downloads.
+Read episode_retrieval for fixed time/repository bounds, counters, stop reasons
+and evidence gaps. It never establishes complete episode membership.
+Identical episode retrievals reuse a cached snapshot; set refresh to collect
+again. collected_at and cached identify snapshot provenance; REST counters
+describe its original collection, not requests made while reading the cache.
+episodes[].explanation shows recorded hops (including reusable invocations sharing
+a run), hop/run edges, and missing evidence. Run costs are separate in run_costs;
+never multiply or allocate a run's cost across its hops.`
 
 // newLogsToolHandler builds the handler for the logs tool.
-func newLogsToolHandler(execCmd execCmdFunc, actor string, validateActor bool) func(context.Context, *mcp.CallToolRequest, logsArgs) (*mcp.CallToolResult, any, error) {
+func newLogsToolHandler(execCmd execCmdFunc, actor string, validateActor bool) func(context.Context, *mcp.CallToolRequest, logsArgs) (*mcp.CallToolResult, any, error) { //nolint:largefunc // Existing MCP handler remains centralized.
 	return func(ctx context.Context, req *mcp.CallToolRequest, args logsArgs) (*mcp.CallToolResult, any, error) {
-		// Check actor permissions first
 		if err := checkActorPermission(ctx, actor, validateActor, "logs"); err != nil {
 			return nil, nil, err
 		}
 
-		// Check for cancellation before starting
 		select {
 		case <-ctx.Done():
 			return nil, nil, newMCPError(jsonrpc.CodeInternalError, "request cancelled", ctx.Err().Error())
 		default:
 		}
 
-		// Validate firewall parameters
 		if args.Firewall && args.NoFirewall {
 			return nil, nil, newMCPError(jsonrpc.CodeInvalidParams, "conflicting parameters: cannot specify both 'firewall' and 'no_firewall'", nil)
+		}
+		if err := validateMCPEpisodeLogsArgs(args); err != nil {
+			return nil, nil, newMCPError(jsonrpc.CodeInvalidParams, err.Error(), nil)
 		}
 
 		// Validate workflow name before executing command
@@ -332,11 +353,11 @@ func buildLogsEmptyResult(cause error) (*mcp.CallToolResult, any, error) {
 // tool, returning the arguments along with the effective run count and the
 // effective timeout (in minutes) applied to the subprocess.
 func buildLogsCommandArgs(ctx context.Context, args logsArgs) ([]string, int, int) {
+	if args.EpisodeRun != "" {
+		return buildEpisodeLogsCommandArgs(ctx, args)
+	}
 	// Force output directory to /tmp/gh-aw/aw-mcp/logs for MCP server
 	cmdArgs := []string{"logs", "-o", constants.TmpAwMcpLogsDir}
-	if args.WorkflowName != "" {
-		cmdArgs = append(cmdArgs, args.WorkflowName)
-	}
 	effectiveCount := effectiveMCPLogsToolCount(args.Count)
 	cmdArgs = append(cmdArgs, "-c", strconv.Itoa(effectiveCount))
 	cmdArgs = appendLogsFilterArgs(cmdArgs, args)
@@ -352,6 +373,10 @@ func buildLogsCommandArgs(ctx context.Context, args logsArgs) ([]string, int, in
 
 	// Always use --json mode in MCP server
 	cmdArgs = append(cmdArgs, "--json")
+	if args.WorkflowName != "" {
+		// Workflow display names are literal positionals, including flag-shaped names.
+		cmdArgs = append(cmdArgs, "--", args.WorkflowName)
+	}
 
 	return cmdArgs, effectiveCount, timeoutValue
 }
@@ -395,17 +420,17 @@ func appendLogsFilterArgs(cmdArgs []string, args logsArgs) []string {
 		cmdArgs = append(cmdArgs, "--before-run-id", strconv.FormatInt(args.BeforeRunID, 10))
 	}
 	if len(args.IgnoreWorkflowRuns) > 0 {
-		runIDs := make([]string, len(args.IgnoreWorkflowRuns))
-		for i, runID := range args.IgnoreWorkflowRuns {
-			runIDs[i] = strconv.FormatInt(runID, 10)
+		runIDs := make([]string, 0, len(args.IgnoreWorkflowRuns))
+		for _, runID := range args.IgnoreWorkflowRuns {
+			runIDs = append(runIDs, strconv.FormatInt(runID, 10))
 		}
 		cmdArgs = append(cmdArgs, "--ignore-workflow-runs", strings.Join(runIDs, ","))
 	}
 	if args.MaxGitHubAPIRateLimit != 0 {
 		cmdArgs = append(cmdArgs, "--max-github-api-rate-limit", strconv.Itoa(args.MaxGitHubAPIRateLimit))
 	}
-	if args.MaxStorageMB != 0 {
-		cmdArgs = append(cmdArgs, "--max-storage", strconv.Itoa(args.MaxStorageMB))
+	if args.MaxStorageMB != nil {
+		cmdArgs = append(cmdArgs, "--max-storage", strconv.Itoa(*args.MaxStorageMB))
 	}
 	if args.PruneOlderRuns {
 		cmdArgs = append(cmdArgs, "--prune-older-runs")
@@ -458,7 +483,7 @@ type auditArgs struct {
 	RunID        any      `json:"run_id,omitempty"          jsonschema:"Alias for run_id_or_url. Accepts run ID or run/job URL (including step anchors). String or number."`
 	RunIDOrURL   any      `json:"run_id_or_url,omitempty"   jsonschema:"Deprecated: use run_ids_or_urls instead. Accepts run ID or run/job URL (including step anchors). String or number."`
 	RunIDsOrURLs []string `json:"run_ids_or_urls,omitempty" jsonschema:"One or more workflow run IDs or URLs. Single item: detailed audit report. Multiple items: diff mode with first as base (see tool description for accepted formats)."`
-	Artifacts    []string `json:"artifacts,omitempty"        jsonschema:"Artifact sets to download (default: all). Valid sets: all, activation, agent, detection, experiment, firewall, github-api, mcp, usage"`
+	Artifacts    []string `json:"artifacts,omitempty"        jsonschema:"Artifact sets to download (default: all). Valid sets: all, activation, agent, detection, experiment, firewall, github-api, mcp, usage, work-queue"`
 	MaxTokens    int      `json:"max_tokens,omitempty"       jsonschema:"Deprecated: accepted for backward compatibility but ignored."`
 	Experiment   string   `json:"experiment,omitempty"       jsonschema:"Filter to runs that include this experiment name. When set, runs whose experiment artifact does not contain an assignment for this experiment name are skipped."`
 	Variant      string   `json:"variant,omitempty"          jsonschema:"Filter to runs assigned this specific variant value. Requires experiment to be set."`
@@ -555,7 +580,22 @@ Single-run returns JSON with:
 - experiments: A/B experiment assignments if present (assignments map, cumulative_counts map)
 - graders: Deterministic grader results if present (results with id, name, status, value, unit, passed, direction, threshold, plus aggregate counts: total, passed, failed, error_count, unavailable_count)
 
-Multi-run diff returns JSON describing changes between the base and each comparison run.`
+Multi-run diff returns JSON describing changes between the base and each comparison run.
+
+Audit reserves response time before the default 60-second tool deadline. On timeout,
+returns an error envelope with partial:true and complete:false, plus partial_results
+when single-run metadata or analysis results are available. Incomplete results are
+not complete audit reports. Retry to reuse downloaded artifacts, or narrow artifacts.`
+
+func mcpAuditResponseDeadline(ctx context.Context) time.Time {
+	responseDeadline := time.Now().Add(defaultMCPAuditResponseTimeout)
+	if deadline, ok := ctx.Deadline(); ok {
+		if earlier := deadline.Add(-mcpAuditResponseMargin); earlier.Before(responseDeadline) {
+			return earlier
+		}
+	}
+	return responseDeadline
+}
 
 // newAuditToolHandler builds the handler for the audit tool.
 func newAuditToolHandler(execCmd execCmdFunc, actor string, validateActor bool) func(context.Context, *mcp.CallToolRequest, auditArgs) (*mcp.CallToolResult, any, error) {
@@ -581,25 +621,25 @@ func newAuditToolHandler(execCmd execCmdFunc, actor string, validateActor bool) 
 			return nil, nil, err
 		}
 
-		cmdArgs := buildAuditCommandArgs(args, runItems)
-
-		notifyProgress(ctx, req, 0, 100, "Downloading audit artifacts...")
-
-		// Detach from the gateway's per-tool RPC deadline; see newMCPSubprocessContext.
-		subCtx, subCancel := newMCPSubprocessContext(ctx, time.Duration(defaultMCPAuditTimeoutMinutes)*time.Minute, "audit")
+		responseDeadline := mcpAuditResponseDeadline(ctx)
+		subCtx, subCancel := context.WithDeadline(ctx, responseDeadline)
 		defer subCancel()
+		notifyProgress(ctx, req, 0, 100, "Downloading audit artifacts...")
 
 		// Execute the CLI command.
 		// Use separate stdout/stderr capture instead of CombinedOutput because:
 		// - Stdout contains JSON output (--json flag)
 		// - Stderr contains console messages and debug logs that shouldn't be mixed with JSON
-		stdout, execErr := runMCPExecOutput(subCtx, execCmd, cmdArgs...)
+		stdout, execErr := runMCPAuditSubprocess(subCtx, responseDeadline, execCmd, args, runItems)
 
 		// The audit command outputs JSON to stdout when --json flag is used.
 		// If the command fails, we need to provide detailed error information.
 		outputStr := string(stdout)
 
 		if execErr != nil {
+			if subCtx.Err() != nil {
+				execErr = subCtx.Err()
+			}
 			return buildAuditErrorResult(execErr, outputStr, runItems)
 		}
 
@@ -613,6 +653,25 @@ func newAuditToolHandler(execCmd execCmdFunc, actor string, validateActor bool) 
 	}
 }
 
+func runMCPAuditSubprocess(ctx context.Context, responseDeadline time.Time, execCmd execCmdFunc, args auditArgs, runItems []string) ([]byte, error) {
+	if err := defaultMCPSubprocessGuardrail.acquire(ctx); err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return nil, err
+	}
+	defer defaultMCPSubprocessGuardrail.release()
+
+	timeout := time.Until(responseDeadline)
+	if timeout <= mcpAuditResponseMargin {
+		return nil, context.DeadlineExceeded
+	}
+	cmdArgs := buildAuditCommandArgs(args, nil)
+	cmdArgs = append(cmdArgs, "--timeout", (timeout - mcpAuditResponseMargin).String())
+	cmdArgs = appendMCPPositionals(cmdArgs, runItems...)
+	return execCmd(ctx, cmdArgs...).Output()
+}
+
 // resolveAuditRunItems resolves the list of run IDs/URLs to pass to the audit
 // command. run_ids_or_urls takes precedence; it falls back to run_id, then to
 // the deprecated run_id_or_url.
@@ -624,6 +683,9 @@ func resolveAuditRunItems(args auditArgs) ([]string, error) {
 			return nil, newMCPError(jsonrpc.CodeInvalidParams, err.Error(), nil)
 		}
 		if hasRunID {
+			if err := validateMCPPositionalArgs("run_id", runID); err != nil {
+				return nil, err
+			}
 			runItems = []string{runID}
 		}
 	}
@@ -633,11 +695,17 @@ func resolveAuditRunItems(args auditArgs) ([]string, error) {
 			return nil, newMCPError(jsonrpc.CodeInvalidParams, err.Error(), nil)
 		}
 		if hasRunIDOrURL {
+			if err := validateMCPPositionalArgs("run_id_or_url", runIDOrURL); err != nil {
+				return nil, err
+			}
 			runItems = []string{runIDOrURL}
 		}
 	}
 	if len(runItems) == 0 {
 		return nil, newMCPError(jsonrpc.CodeInvalidParams, "at least one run ID or URL must be provided via run_ids_or_urls, run_id, or run_id_or_url", nil)
+	}
+	if err := validateMCPPositionalArgs("run_ids_or_urls", runItems...); err != nil {
+		return nil, err
 	}
 	return runItems, nil
 }
@@ -648,7 +716,6 @@ func resolveAuditRunItems(args auditArgs) ([]string, error) {
 // directly - the audit command handles single vs. diff mode.
 func buildAuditCommandArgs(args auditArgs, runItems []string) []string {
 	cmdArgs := []string{"audit"}
-	cmdArgs = append(cmdArgs, runItems...)
 	cmdArgs = append(cmdArgs, "-o", constants.TmpAwMcpLogsDir, "--json")
 	if len(args.Artifacts) > 0 {
 		cmdArgs = append(cmdArgs, "--artifacts", strings.Join(args.Artifacts, ","))
@@ -662,14 +729,17 @@ func buildAuditCommandArgs(args auditArgs, runItems []string) []string {
 	if args.Runtime != "" {
 		cmdArgs = append(cmdArgs, "--runtime", args.Runtime)
 	}
-	return appendRepoFlagFromEnv(cmdArgs)
+	cmdArgs = appendRepoFlagFromEnv(cmdArgs)
+	if len(runItems) > 0 {
+		cmdArgs = appendMCPPositionals(cmdArgs, runItems...)
+	}
+	return cmdArgs
 }
 
 // buildAuditErrorResult converts a failed audit subprocess execution into a JSON
 // error envelope instead of an MCP protocol error so callers always receive
-// consistent JSON and the run IDs are always present. IsError must be false so
-// that callers (e.g. mcp_cli_bridge) treat this as a graceful not-found /
-// failure response rather than a fatal protocol error.
+// consistent JSON and the run IDs are always present. Timeouts are tool errors;
+// other failures retain the existing graceful JSON error envelope.
 func buildAuditErrorResult(err error, outputStr string, runItems []string) (*mcp.CallToolResult, any, error) {
 	// Try to get stderr for message extraction
 	var stderr string
@@ -701,12 +771,27 @@ func buildAuditErrorResult(err error, outputStr string, runItems []string) (*mcp
 			"Use the 'logs' tool to list recent run IDs",
 		},
 	}
+	var partial map[string]any
+	if json.Unmarshal([]byte(outputStr), &partial) == nil && partial["partial"] == true && partial["complete"] == false {
+		errorEnvelope["partial"] = true
+		errorEnvelope["complete"] = false
+		errorEnvelope["partial_results"] = partial
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errorEnvelope["partial"] == true {
+		errorEnvelope["partial"] = true
+		errorEnvelope["complete"] = false
+		errorEnvelope["error"] = "audit timed out before analysis completed"
+		errorEnvelope["suggestions"] = []string{
+			"Retry the same audit to reuse downloaded artifacts",
+			"Request fewer artifact sets with artifacts",
+		}
+	}
 	jsonBytes, jsonErr := json.Marshal(errorEnvelope)
 	if jsonErr != nil {
 		return nil, nil, newMCPError(jsonrpc.CodeInternalError, errorMsg, nil)
 	}
 	return &mcp.CallToolResult{
-		IsError: false,
+		IsError: errorEnvelope["partial"] == true,
 		Content: []mcp.Content{&mcp.TextContent{Text: string(jsonBytes)}},
 	}, nil, nil
 }
@@ -715,7 +800,7 @@ func buildAuditErrorResult(err error, outputStr string, runItems []string) (*mcp
 type auditDiffArgs struct {
 	BaseRunID     string   `json:"base_run_id"     jsonschema:"Numeric ID of the base (reference) workflow run"`
 	CompareRunIDs []string `json:"compare_run_ids" jsonschema:"One or more numeric IDs of the comparison runs"`
-	Artifacts     []string `json:"artifacts,omitempty" jsonschema:"Artifact sets to download (default: all). Valid sets: all, activation, agent, detection, experiment, firewall, github-api, mcp, usage"`
+	Artifacts     []string `json:"artifacts,omitempty" jsonschema:"Artifact sets to download (default: all). Valid sets: all, activation, agent, detection, experiment, firewall, github-api, mcp, usage, work-queue"`
 }
 
 // registerAuditDiffTool registers the audit-diff tool with the MCP server.
@@ -771,16 +856,23 @@ func newAuditDiffToolHandler(execCmd execCmdFunc, actor string, validateActor bo
 		if len(args.CompareRunIDs) == 0 {
 			return nil, nil, newMCPError(jsonrpc.CodeInvalidParams, "compare_run_ids must contain at least one run ID", nil)
 		}
+		if err := validateMCPPositionalArgs("base_run_id", args.BaseRunID); err != nil {
+			return nil, nil, err
+		}
+		if err := validateMCPPositionalArgs("compare_run_ids", args.CompareRunIDs...); err != nil {
+			return nil, nil, err
+		}
 
 		// Build: gh aw audit diff <base> <compare...> -o ... --json [--artifacts ...]
-		cmdArgs := []string{"audit", "diff", args.BaseRunID}
-		cmdArgs = append(cmdArgs, args.CompareRunIDs...)
+		cmdArgs := []string{"audit", "diff"}
 		cmdArgs = append(cmdArgs, "-o", constants.TmpAwMcpLogsDir, "--json")
 		if len(args.Artifacts) > 0 {
 			cmdArgs = append(cmdArgs, "--artifacts", strings.Join(args.Artifacts, ","))
 		}
 
 		cmdArgs = appendRepoFlagFromEnv(cmdArgs)
+		cmdArgs = appendMCPPositionals(cmdArgs, args.BaseRunID)
+		cmdArgs = append(cmdArgs, args.CompareRunIDs...)
 
 		notifyProgress(ctx, req, 0, 100, "Downloading artifacts for diff...")
 

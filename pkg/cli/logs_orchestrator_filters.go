@@ -20,6 +20,8 @@ type runFilterOpts struct {
 	engine            string
 	runtime           string
 	noStaged          bool
+	dryRun            bool
+	noDryRun          bool
 	firewallOnly      bool
 	noFirewall        bool
 	safeOutputType    string
@@ -28,7 +30,8 @@ type runFilterOpts struct {
 	gradersOnly       bool
 }
 
-var fetchJobStatusesForProcessedRun = fetchJobStatuses
+var fetchJobDetailsForProcessedRun = fetchJobDetailsWithCounts
+var fetchPRLifecycleForProcessedRun = fetchObsoletePREvidence
 
 // matchEngineFilter checks whether the run recorded in awInfo matches the
 // requested engine filter string.  It returns (matches, detectedEngineID).
@@ -57,7 +60,7 @@ func matchRuntimeFilter(awInfo *AwInfo, awInfoErr error, filterRuntime string) (
 func applyRunFilters(ctx context.Context, result DownloadResult, opts runFilterOpts, verbose bool) bool {
 	var awInfo *AwInfo
 	var awInfoErr error
-	if opts.engine != "" || opts.runtime != "" || opts.noStaged || opts.firewallOnly || opts.noFirewall {
+	if opts.engine != "" || opts.runtime != "" || opts.noStaged || opts.dryRun || opts.noDryRun || opts.firewallOnly || opts.noFirewall {
 		awInfoPath := filepath.Join(result.LogsPath, "aw_info.json")
 		awInfo, awInfoErr = parseAwInfo(awInfoPath, verbose)
 	}
@@ -65,6 +68,7 @@ func applyRunFilters(ctx context.Context, result DownloadResult, opts runFilterO
 	return skipByEngineFilter(result, opts, awInfo, awInfoErr, verbose) ||
 		skipByRuntimeFilter(result, opts, awInfo, awInfoErr, verbose) ||
 		skipByStagedFilter(result, opts, awInfo, awInfoErr, verbose) ||
+		skipByDryRunFilter(result, opts, awInfo, awInfoErr, verbose) ||
 		skipByFirewallFilter(result, opts, awInfo, awInfoErr, verbose) ||
 		skipBySafeOutputFilter(result, opts, verbose) ||
 		skipByFilteredIntegrityFilter(result, opts, verbose) ||
@@ -121,6 +125,21 @@ func skipByStagedFilter(result DownloadResult, opts runFilterOpts, awInfo *AwInf
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Skipping run %d: workflow is staged (filtered out by --exclude-staged)", result.Run.DatabaseID)))
 	}
 	return true
+}
+
+func skipByDryRunFilter(result DownloadResult, opts runFilterOpts, awInfo *AwInfo, awInfoErr error, verbose bool) bool {
+	if !opts.dryRun && !opts.noDryRun {
+		return false
+	}
+	if awInfoErr != nil || awInfo == nil {
+		logAndMaybeExplainSkip(result.Run.DatabaseID, "dry-run metadata unavailable", "dry-run filter requires valid aw_info.json", verbose)
+		return true
+	}
+	if (opts.dryRun && !awInfo.DryRun) || (opts.noDryRun && awInfo.DryRun) {
+		logAndMaybeExplainSkip(result.Run.DatabaseID, "dry-run filter mismatch", fmt.Sprintf("dry_run=%t does not match requested filter", awInfo.DryRun), verbose)
+		return true
+	}
+	return false
 }
 
 func skipByFirewallFilter(result DownloadResult, opts runFilterOpts, awInfo *AwInfo, awInfoErr error, verbose bool) bool {
@@ -198,6 +217,36 @@ func logAndMaybeExplainSkip(runID int64, logReason, message string, verbose bool
 	}
 }
 
+func populateRunJobEvidence(ctx context.Context, run *WorkflowRun, result *DownloadResult, verbose, logFailedJobs bool) {
+	// Add failed jobs to error count.
+	if jobs, failedJobCount, err := fetchJobDetailsForProcessedRun(ctx, run.DatabaseID, "", verbose, run.Attempt); err == nil {
+		result.JobDetails = jobs
+		run.ErrorCount += failedJobCount
+		if verbose && logFailedJobs && failedJobCount > 0 {
+			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Added %d failed jobs to error count for run %d", failedJobCount, run.DatabaseID)))
+		}
+	} else {
+		if len(result.JobDetails) == 0 {
+			result.JobDetails = nil
+		}
+		logsOrchestratorLog.Printf("Could not establish job evidence for run %d: %v", run.DatabaseID, err)
+		if verbose {
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to fetch job evidence for run %d: %v", run.DatabaseID, err)))
+		}
+	}
+	if result.JobDetails != nil && len(result.JobDetails) == 0 {
+		proof, err := fetchPRLifecycleForProcessedRun(ctx, *run)
+		if err != nil {
+			logsOrchestratorLog.Printf("PR lifecycle evidence unavailable: %v", err)
+			if verbose {
+				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(err.Error()))
+			}
+		} else {
+			run.ObsoletePR = proof
+		}
+	}
+}
+
 // buildProcessedRun constructs a ProcessedRun from a DownloadResult, computing
 // duration, action minutes, and job-failure counts.
 func buildProcessedRun(ctx context.Context, result DownloadResult, verbose, logFailedJobs bool) ProcessedRun {
@@ -208,20 +257,17 @@ func buildProcessedRun(ctx context.Context, result DownloadResult, verbose, logF
 	run.ErrorCount = 0
 	run.WarningCount = 0
 	run.LogsPath = result.LogsPath
-
-	// Add failed jobs to error count.
-	if failedJobCount, err := fetchJobStatusesForProcessedRun(ctx, run.DatabaseID, verbose); err == nil {
-		run.ErrorCount += failedJobCount
-		if verbose && logFailedJobs && failedJobCount > 0 {
-			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Added %d failed jobs to error count for run %d", failedJobCount, run.DatabaseID)))
-		}
-	}
+	run.ObsoletePR = nil
+	populateRunJobEvidence(ctx, &run, &result, verbose, logFailedJobs)
 
 	// Always use GitHub API timestamps for duration calculation.
 	// GitHub Actions bills per minute, rounded up per job.
 	if !run.StartedAt.IsZero() && !run.UpdatedAt.IsZero() {
 		run.Duration = run.UpdatedAt.Sub(run.StartedAt)
 		run.ActionMinutes = math.Ceil(run.Duration.Minutes())
+		if result.JobDetails != nil && len(result.JobDetails) == 0 {
+			run.ActionMinutes = 0
+		}
 	}
 
 	return ProcessedRun{
@@ -241,6 +287,8 @@ func buildProcessedRun(ctx context.Context, result DownloadResult, verbose, logF
 		SkillActivations:        result.SkillActivations,
 		TokenUsage:              result.TokenUsage,
 		WorkingSet:              result.WorkingSet,
+		Ledger:                  result.Ledger,
+		WorkQueue:               result.WorkQueue,
 		Friction:                result.Friction,
 		GitHubRateLimitUsage:    result.GitHubRateLimitUsage,
 		JobDetails:              result.JobDetails,

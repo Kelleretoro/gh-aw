@@ -31,6 +31,7 @@ type ImportsResult struct {
 	MergedPluginObjects           []map[string]any      // Object-form Agent Plugin references from all imports
 	MergedSafeOutputs             []string              // Merged safe-outputs configurations from all imports
 	MergedGraders                 string                // Merged graders configuration from all imports (JSON objects, one per line)
+	GraderRunSources              map[string]string     // Declaring files for imported grader run paths.
 	MergedMCPScripts              []string              // Merged mcp-scripts configurations from all imports
 	MergedMarkdown                string                // Only contains imports WITH inputs (for compile-time substitution)
 	ImportPaths                   []string              // List of import file paths for runtime-import macro generation (replaces MergedMarkdown)
@@ -57,6 +58,7 @@ type ImportsResult struct {
 	MergedTopLevelGitHubApp       string                // JSON-encoded top-level github-app from first imported workflow that defines it
 	MergedCheckout                string                // JSON-encoded checkout configurations from imported workflows (one JSON value per line)
 	MergedPostSteps               string                // Merged post-steps configuration from all imports (appended in order)
+	ActionPinSourceVersions       map[string]string     // Inline labels for imported SHA-pinned action references
 	MergedLabels                  []string              // Merged labels from all imports (union of label names)
 	MergedCaches                  []string              // Merged cache configurations from all imports (appended in order)
 	MergedJobs                    string                // Merged jobs from imported YAML workflows (JSON format)
@@ -74,6 +76,7 @@ type ImportsResult struct {
 	MergedEngineModel             string                // First engine.model found in imports that have no engine.id (model preference without engine selection)
 	MergedMaxTurns                string                // First max-turns value found across all imports (JSON-encoded, first-wins)
 	MergedMaxToolDenials          string                // First max-tool-denials value found across all imports (JSON-encoded, first-wins)
+	MergedMaxToolCalls            string                // First max-tool-calls value found across all imports (JSON-encoded, first-wins)
 	MergedMaxRuns                 string                // First max-runs value found across all imports (JSON-encoded, first-wins)
 	MergedMaxTurnCacheMisses      string                // First max-turn-cache-misses value found across all imports (JSON-encoded, first-wins)
 	MergedMaxAICredits            string                // First max-ai-credits value found across all imports (JSON-encoded, first-wins)
@@ -83,6 +86,8 @@ type ImportsResult struct {
 	MergedExcludedEnv             []string              // Union of excluded-env lists from all imports (deduplicated, used to extend the main workflow's excluded-env)
 	ImportedFiles                 []string              // List of imported file paths (for manifest)
 	AgentFile                     string                // Path to custom agent file (if imported)
+	SubAgentModels                []SubAgentModel       // models declared by imported inline agents and agent files
+	SubAgents                     []InlineSubAgent      // imported inline definitions for engine-specific validation
 	AgentImportSpec               string                // Original import specification for agent file (e.g., "owner/repo/path@ref")
 	RepositoryImports             []string              // List of repository imports (format: "owner/repo@ref") for .github folder merging
 	// ImportInputs uses map[string]any because input values can be different types (string, number, boolean).

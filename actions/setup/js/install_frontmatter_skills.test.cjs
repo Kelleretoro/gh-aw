@@ -19,6 +19,7 @@ describe("install_frontmatter_skills", () => {
       GH_AW_INFO_ENGINE_ID: process.env.GH_AW_INFO_ENGINE_ID,
       GH_AW_GH_SKILL_AGENT_NAME: process.env.GH_AW_GH_SKILL_AGENT_NAME,
       GH_AW_FRONTMATTER_SKILLS: process.env.GH_AW_FRONTMATTER_SKILLS,
+      GH_AW_SKILL_INSTALL_INDEX: process.env.GH_AW_SKILL_INSTALL_INDEX,
     };
     originalCore = global.core;
     originalExec = global.exec;
@@ -58,11 +59,14 @@ describe("install_frontmatter_skills", () => {
     } else {
       process.env.GH_AW_FRONTMATTER_SKILLS = originalEnv.GH_AW_FRONTMATTER_SKILLS;
     }
+    if (originalEnv.GH_AW_SKILL_INSTALL_INDEX === undefined) delete process.env.GH_AW_SKILL_INSTALL_INDEX;
+    else process.env.GH_AW_SKILL_INSTALL_INDEX = originalEnv.GH_AW_SKILL_INSTALL_INDEX;
     global.core = originalCore;
     global.exec = originalExec;
     fs.rmSync(tempRoot, { recursive: true, force: true });
     fs.rmSync("/tmp/gh-aw/.claude", { recursive: true, force: true });
     fs.rmSync("/tmp/gh-aw/skill_install_failures.json", { force: true });
+    fs.rmSync("/tmp/gh-aw/skill_install_history.json", { force: true });
   });
 
   it("splits repo-level and path-level skill specs into gh skill install arguments", () => {
@@ -151,9 +155,25 @@ describe("install_frontmatter_skills", () => {
     expect(global.exec.exec).toHaveBeenNthCalledWith(1, "gh", ["skill", "install", "githubnext/skills", "--all", "--pin", "abc123", "--agent", "claude-code", "--dir", "/tmp/gh-aw/.claude/skills", "--force"]);
     expect(global.exec.exec).toHaveBeenNthCalledWith(2, "gh", ["skill", "install", "githubnext/skills", "review/security", "--pin", "def456", "--agent", "claude-code", "--dir", "/tmp/gh-aw/.claude/skills", "--force"]);
     expect(global.exec.exec).toHaveBeenNthCalledWith(3, "gh", ["skill", "install", "${{ inputs.skill_ref }}", "--agent", "claude-code", "--dir", "/tmp/gh-aw/.claude/skills", "--force"]);
-    expect(global.core.summary.addRaw).toHaveBeenCalledWith(expect.stringContaining("### Frontmatter skills installed"));
-    expect(global.core.summary.addRaw).toHaveBeenCalledWith(expect.stringContaining("<details>"));
+    expect(global.core.summary.addRaw).toHaveBeenCalledWith(expect.stringMatching(/^<details>\n<summary>Skill install details<\/summary>/));
     expect(global.core.summary.addRaw).toHaveBeenCalledWith(expect.stringContaining('["githubnext/skills@abc123","githubnext/skills/review/security@def456","${{ inputs.skill_ref }}"]'));
+  });
+
+  it("records changed skill digests per installation without copying skill contents or tokenized references", async () => {
+    process.env.GH_AW_SKILL_DIR = ".claude/skills";
+    process.env.GH_AW_SKILL_INSTALL_INDEX = "1";
+    process.env.GH_AW_FRONTMATTER_SKILLS = "owner/skills/a@abc123";
+    global.exec.exec = vi.fn().mockImplementation(async () => {
+      const directory = "/tmp/gh-aw/.claude/skills/a";
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, "SKILL.md"), "PRIVATE_SKILL");
+      return 0;
+    });
+    await script.main();
+    const history = fs.readFileSync("/tmp/gh-aw/skill_install_history.json", "utf8");
+    expect(JSON.parse(history)).toEqual([{ name: "a", digest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/), source: "frontmatter-1" }]);
+    expect(history).not.toContain("PRIVATE_SKILL");
+    expect(history).not.toContain("owner/skills");
   });
 
   it("omits --agent when no gh skill agent name is provided", async () => {
@@ -175,7 +195,7 @@ describe("install_frontmatter_skills", () => {
     const failures = JSON.parse(fs.readFileSync("/tmp/gh-aw/skill_install_failures.json", "utf8"));
     expect(failures).toEqual([{ skill: "bad/repo@abc123", error: "exit code 1 HTTP 404" }]);
     expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("Failed to install skill 'bad/repo@abc123'"));
-    expect(global.core.summary.addRaw).toHaveBeenCalledWith(expect.stringContaining("<details open>"));
+    expect(global.core.summary.addRaw).toHaveBeenCalledWith(expect.stringMatching(/^<details open>\n<summary>Skill install details<\/summary>/));
   });
 
   it("installs local path references using --from-local at runtime", async () => {

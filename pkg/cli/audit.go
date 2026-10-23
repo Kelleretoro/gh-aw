@@ -29,6 +29,8 @@ type AuditOptions struct {
 	EvalsOnly        bool
 	Group            bool
 	NoBaseline       bool
+	Search           string
+	SearchLimit      int
 }
 
 type auditRunConfig struct {
@@ -43,12 +45,15 @@ type auditRunConfig struct {
 	jobID            int64
 	stepNumber       int
 	artifactFilter   []string
+	includeWorkQueue bool
 	experimentFilter string
 	variantFilter    string
 	runtimeFilter    string
 	evalsOnly        bool
 	group            bool
 	noBaseline       bool
+	search           string
+	searchLimit      int
 	// evalsArtifactRequested is true when evals were requested via --evals or
 	// explicit --artifacts evals, and is used to trigger legacy dedicated-evals
 	// fallback behavior for older runs.
@@ -77,7 +82,10 @@ type auditAnalysisResults struct {
 	policyAnalysis          *PolicyAnalysis
 	mcpToolUsage            *MCPToolUsageData
 	tokenUsageSummary       *TokenUsageSummary
+	modelRouting            *ModelRoutingSummary
 	workingSet              *WorkingSetMetrics
+	ledger                  *LedgerActivity
+	workQueue               *WorkQueueReport
 	friction                *FrictionCostSummary
 	redactedDomainsAnalysis *RedactedDomainsAnalysis
 	rateLimitUsage          *GitHubRateLimitUsage

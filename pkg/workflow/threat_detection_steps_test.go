@@ -7,7 +7,43 @@ import (
 	"testing"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/stretchr/testify/assert"
 )
+
+func TestThreatDetectionExecutionRequiresPreparedInputs(t *testing.T) {
+	for _, external := range []bool{false, true} {
+		for _, engine := range []string{"copilot", "claude", "codex"} {
+			t.Run(engine+map[bool]string{false: "/inline", true: "/external"}[external], func(t *testing.T) {
+				data := &WorkflowData{
+					AI: engine,
+					Features: map[string]any{
+						string(constants.GHAWDetectionFeatureFlag): external,
+					},
+					SafeOutputs: &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{}},
+				}
+				steps := strings.Join(NewCompiler().buildDetectionJobSteps(data), "")
+				setup := extractWorkflowStepByName(t, steps, "Setup threat detection")
+				assert.Contains(t, setup, "id: detection_setup")
+				assert.Contains(t, setup, "if: "+detectionStepCondition)
+				assert.Contains(t, setup, "setup_threat_detection.cjs")
+
+				// Inspect the execution step itself, not a condition elsewhere in the job.
+				stepID := "id: detection_agentic_execution"
+				executionPos := strings.Index(steps, stepID)
+				if executionPos < 0 {
+					t.Fatal("missing detector execution step")
+				}
+				stepStart := strings.LastIndex(steps[:executionPos], "      - name:")
+				execution := steps[stepStart:]
+				if next := strings.Index(execution[1:], "\n      - name:"); next >= 0 {
+					execution = execution[:next+1]
+				}
+				assert.Contains(t, execution, "if: "+detectionExecutionCondition)
+				assert.Contains(t, steps, "if: always()\n", "conclusion and evidence must remain available after setup fails")
+			})
+		}
+	}
+}
 
 func TestThreatDetectionInlineStepsDependencies(t *testing.T) {
 	// Test that inline detection steps are generated when threat detection is enabled
@@ -286,7 +322,7 @@ func TestBuildUploadDetectionLogStep(t *testing.T) {
 	expectedComponents := []string{
 		"name: Upload threat detection log",
 		"if: always()",
-		"uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+		"uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
 		"name: " + constants.DetectionArtifactName.String(),
 		"            /tmp/gh-aw/threat-detection/detection.log",
 		"            /tmp/gh-aw/threat-detection/detection_usage.json",

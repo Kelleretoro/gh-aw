@@ -3,9 +3,11 @@
 package workflow
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +17,124 @@ import (
 
 	"github.com/github/gh-aw/pkg/testutil"
 )
+
+func TestThreatDetectionSplitEngineProviderIsolation(t *testing.T) {
+	for _, mainEngine := range []string{"claude", "codex"} {
+		for _, externalDetector := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/external=%t", mainEngine, externalDetector), func(t *testing.T) {
+				baseURL, apiKey := "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"
+				if mainEngine == "codex" {
+					baseURL, apiKey = "OPENAI_BASE_URL", "OPENAI_API_KEY"
+				}
+				tmpDir := testutil.TempDir(t, "split-engine-provider-*")
+				workflowPath := filepath.Join(tmpDir, "split-engine.md")
+				content := fmt.Sprintf(`---
+on: push
+engine:
+  id: %s
+  env:
+    %s: https://openrouter.ai/api
+    %s: ${{ secrets.OPENROUTER_API_KEY }}
+network:
+  allowed: [defaults, openrouter.ai]
+safe-outputs:
+  create-issue:
+  threat-detection:
+    engine:
+      id: copilot
+      model: sonnet
+features:
+  gh-aw-detection: %t
+---
+Review documentation.
+`, mainEngine, baseURL, apiKey, externalDetector)
+				if err := os.WriteFile(workflowPath, []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := NewCompiler().CompileWorkflow(workflowPath); err != nil {
+					t.Fatal(err)
+				}
+				result, err := os.ReadFile(stringutil.MarkdownToLockFile(workflowPath))
+				if err != nil {
+					t.Fatal(err)
+				}
+				compiled := string(result)
+				agent := extractJobSection(compiled, "agent")
+				if !strings.Contains(agent, "openrouter.ai") || !strings.Contains(agent, "secrets.OPENROUTER_API_KEY") {
+					t.Fatal("main agent provider settings must remain intact")
+				}
+				detection := extractJobSection(compiled, "detection")
+				if detection == "" {
+					t.Fatal("detection job missing")
+				}
+				// Main-provider-only credentials must not reach any detection step,
+				// including host-side redaction on a separate detection runner.
+				for _, forbidden := range []string{baseURL, apiKey, "openrouter.ai", "secrets.OPENROUTER_API_KEY"} {
+					if strings.Contains(detection, forbidden) {
+						t.Errorf("main provider setting %q leaked into compiled detection job", forbidden)
+					}
+				}
+				conclusion := extractJobSection(compiled, "conclusion")
+				if !strings.Contains(conclusion, "::warning::Threat detection produced no security verdict.") {
+					t.Fatal("conclusion must visibly warn about a missing verdict")
+				}
+			})
+		}
+	}
+}
+
+func TestCompiledOTLPEnvExcludedFromAgentDetectionAndEvals(t *testing.T) {
+	for _, external := range []bool{false, true} {
+		t.Run(fmt.Sprintf("external=%t", external), func(t *testing.T) {
+			workflowPath := filepath.Join(t.TempDir(), "otlp-detection.md")
+			content := fmt.Sprintf(`---
+on: push
+engine: copilot
+observability:
+  otlp:
+    endpoint:
+      - url: https://primary.example.com:4317
+        headers: ${{ secrets.OTLP_HEADERS }}
+      - url: https://secondary.example.com:4317
+safe-outputs:
+  create-issue:
+  threat-detection: true
+evals:
+  - id: completed
+    question: Did the workflow complete?
+features:
+  gh-aw-detection: %t
+---
+Test workflow
+`, external)
+			if err := os.WriteFile(workflowPath, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := NewCompiler().CompileWorkflow(workflowPath); err != nil {
+				t.Fatal(err)
+			}
+			result, err := os.ReadFile(stringutil.MarkdownToLockFile(workflowPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			compiled := string(result)
+			for _, name := range otlpSandboxExcludedEnvVarNames {
+				if !strings.Contains(compiled, name+":") {
+					t.Errorf("host-side OTLP environment must retain %s", name)
+				}
+				for _, job := range []string{"agent", "detection", "evals"} {
+					section := extractJobSection(compiled, job)
+					if section == "" {
+						t.Fatalf("%s job missing", job)
+					}
+					if !strings.Contains(section, "--exclude-env "+name) {
+						t.Errorf("%s AWF command must exclude %s", job, name)
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestThreatDetectionIsolation(t *testing.T) {
 	compiler := NewCompiler()
@@ -681,6 +801,10 @@ permissions:
   copilot-requests: write
 safe-outputs:
   create-issue:
+  threat-detection:
+    engine:
+      id: codex
+      model-provider: github
 features:
   gh-aw-detection: true
 tools:
@@ -759,6 +883,7 @@ func TestExternalDetectorCodexConfigUsesOpenAIProxyPort(t *testing.T) {
 	tests := []struct {
 		name       string
 		engineYAML string
+		wantError  string
 	}{
 		{
 			name:       "default provider",
@@ -767,6 +892,7 @@ func TestExternalDetectorCodexConfigUsesOpenAIProxyPort(t *testing.T) {
 		{
 			name:       "anthropic provider override",
 			engineYAML: "engine:\n  id: codex\n  model-provider: anthropic\n",
+			wantError:  "Responses-compatible",
 		},
 	}
 
@@ -792,7 +918,12 @@ Test workflow`
 			if err := os.WriteFile(workflowPath, []byte(workflowContent), 0644); err != nil {
 				t.Fatalf("Failed to write workflow file: %v", err)
 			}
-			if err := compiler.CompileWorkflow(workflowPath); err != nil {
+			if err := compiler.CompileWorkflow(workflowPath); tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("Expected unsupported provider error containing %q, got %v", tt.wantError, err)
+				}
+				return
+			} else if err != nil {
 				t.Fatalf("Failed to compile workflow: %v", err)
 			}
 
@@ -835,7 +966,7 @@ Test workflow`
 // history.model_provider, which Codex ignores, causing it to fall back to the
 // default openai provider and bypass the AWF api-proxy sidecar (401 Unauthorized).
 func TestExternalDetectorCodexConfigModelProviderAtRoot(t *testing.T) {
-	config := buildExternalDetectorCodexConfig("http://172.30.0.30:10000", "ws://172.30.0.30:10000")
+	config := buildExternalDetectorCodexConfig("http://172.30.0.30:10000", "ws://172.30.0.30:10000", false)
 
 	// Strip any leading whitespace from each line so the config reads as plain
 	// TOML regardless of the exact indentation used in the source template.
@@ -898,63 +1029,116 @@ func TestExternalDetectorCodexConfigModelProviderAtRoot(t *testing.T) {
 }
 
 // TestExternalDetectorCodexFirewallDomains verifies that the Codex external detection
-// path includes the required API domains in the AWF firewall allowlist.
-// Without the correct allowed domains the firewall blocks api.openai.com, chatgpt.com
-// and api.github.com and the detection job exits with code 1/2 (engine_error).
+// path retains concrete API transport without implicitly allowing vendor auth/telemetry.
 func TestExternalDetectorCodexFirewallDomains(t *testing.T) {
-	compiler := NewCompiler()
+	for _, tt := range []struct {
+		name, provider string
+		vendorOptIn    bool
+	}{
+		{name: "OpenAI transport", provider: "openai"},
+		{name: "GitHub transport", provider: "github"},
+		{name: "explicit vendor opt-in", provider: "openai", vendorOptIn: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			compiler := NewCompiler()
 
-	tmpDir := testutil.TempDir(t, "test-external-detector-codex-fw-*")
-	workflowPath := filepath.Join(tmpDir, "test-codex-fw.md")
+			tmpDir := testutil.TempDir(t, "test-external-detector-codex-fw-*")
+			workflowPath := filepath.Join(tmpDir, "test-codex-fw.md")
 
-	workflowContent := `---
+			network := ""
+			if tt.vendorOptIn {
+				network = "network:\n  allowed: [codex-vendor]\n"
+			}
+			workflowContent := fmt.Sprintf(`---
 on: push
-engine: codex
+engine:
+  id: codex
+  model-provider: %s
+%spermissions:
+  contents: read
+  copilot-requests: write
 safe-outputs:
   create-issue:
+  threat-detection:
+    engine:
+      id: codex
+      model-provider: %s
 features:
   gh-aw-detection: true
 tools:
   github:
     mode: gh-proxy
 ---
-Test workflow`
+Test workflow`, tt.provider, network, tt.provider)
 
-	if err := os.WriteFile(workflowPath, []byte(workflowContent), 0644); err != nil {
-		t.Fatalf("Failed to write workflow file: %v", err)
-	}
+			if err := os.WriteFile(workflowPath, []byte(workflowContent), 0644); err != nil {
+				t.Fatalf("Failed to write workflow file: %v", err)
+			}
 
-	if err := compiler.CompileWorkflow(workflowPath); err != nil {
-		t.Fatalf("Failed to compile workflow: %v", err)
-	}
+			if err := compiler.CompileWorkflow(workflowPath); err != nil {
+				t.Fatalf("Failed to compile workflow: %v", err)
+			}
 
-	lockFile := stringutil.MarkdownToLockFile(workflowPath)
-	result, err := os.ReadFile(lockFile)
-	if err != nil {
-		t.Fatalf("Failed to read compiled workflow: %v", err)
-	}
+			lockFile := stringutil.MarkdownToLockFile(workflowPath)
+			result, err := os.ReadFile(lockFile)
+			if err != nil {
+				t.Fatalf("Failed to read compiled workflow: %v", err)
+			}
 
-	detectionSection := extractJobSection(string(result), "detection")
-	if detectionSection == "" {
-		t.Fatal("Detection job not found in compiled workflow")
-	}
+			detectionSection := extractJobSection(string(result), "detection")
+			if detectionSection == "" {
+				t.Fatal("Detection job not found in compiled workflow")
+			}
 
-	allowDomainsLine := ""
-	for line := range strings.SplitSeq(detectionSection, "\n") {
-		if strings.Contains(line, "allowDomains") {
-			allowDomainsLine = line
-			break
-		}
-	}
-	if allowDomainsLine == "" {
-		t.Fatal("Detection job AWF config must include network.allowDomains")
-	}
+			allowDomainsLine := ""
+			for line := range strings.SplitSeq(detectionSection, "\n") {
+				if strings.Contains(line, "allowDomains") {
+					allowDomainsLine = line
+					break
+				}
+			}
+			if allowDomainsLine == "" {
+				t.Fatal("Detection job AWF config must include network.allowDomains")
+			}
+			allowDomainsLine = strings.ReplaceAll(allowDomainsLine, `\"`, `"`)
 
-	// Assert against the specific AWF allowDomains JSON line to avoid false positives
-	// from unrelated occurrences elsewhere in the rendered detection job.
-	for _, domain := range []string{"api.openai.com", "chatgpt.com", "openai.com", "github.com", "api.github.com"} {
-		if !strings.Contains(allowDomainsLine, domain) {
-			t.Errorf("Codex external detector AWF allowDomains must include %q", domain)
-		}
+			// Assert against the specific AWF allowDomains JSON line to avoid false positives
+			// from unrelated occurrences elsewhere in the rendered detection job.
+			for _, domain := range []string{"github.com", "api.github.com", "host.docker.internal"} {
+				if !strings.Contains(allowDomainsLine, strconv.Quote(domain)) {
+					t.Errorf("Codex external detector AWF allowDomains must include %q", domain)
+				}
+			}
+			for _, domain := range []string{"openai.com", "chatgpt.com"} {
+				if strings.Contains(allowDomainsLine, strconv.Quote(domain)) {
+					t.Errorf("Codex external detector must not allow vendor parent %q", domain)
+				}
+			}
+			if got := strings.Contains(allowDomainsLine, strconv.Quote("api.openai.com")); got != (tt.provider == "openai") {
+				t.Errorf("OpenAI API transport allowed=%t for provider %q", got, tt.provider)
+			}
+			if tt.provider == "github" && !strings.Contains(allowDomainsLine, strconv.Quote("api.githubcopilot.com")) {
+				t.Error("GitHub-hosted detector must retain Copilot routing transport")
+			}
+			for _, domain := range []string{"auth.openai.com", "ab.chatgpt.com"} {
+				if got := strings.Contains(allowDomainsLine, strconv.Quote(domain)); got != tt.vendorOptIn {
+					t.Errorf("vendor host %q allowed=%t, want %t", domain, got, tt.vendorOptIn)
+				}
+			}
+			if tt.vendorOptIn {
+				agentSection := extractJobSection(string(result), "agent")
+				agentDomains := firewallDomainRules(t, agentSection, "allowDomains")
+				for _, domain := range []string{"auth.openai.com", "ab.chatgpt.com"} {
+					if !slices.Contains(agentDomains, domain) {
+						t.Errorf("compiled agent network.allowed codex-vendor must allow %q, got %v", domain, agentDomains)
+					}
+				}
+				for _, domain := range []string{"openai.com", "chatgpt.com", "codex-vendor"} {
+					if slices.Contains(agentDomains, domain) {
+						t.Errorf("compiled agent firewall must not contain %q", domain)
+					}
+				}
+			}
+		})
 	}
 }

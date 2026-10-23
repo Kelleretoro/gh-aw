@@ -19,7 +19,8 @@ var expressionExtractionLog = logger.New("workflow:expression_extraction")
 
 // Pre-compiled regexes for performance (avoid recompilation in hot paths)
 var (
-	awContextExpressionRegex = regexp.MustCompile(`github\.aw\.context\.([a-zA-Z0-9_]+)([^a-zA-Z0-9_-]|$)`)
+	awContextExpressionRegex    = regexp.MustCompile(`github\.aw\.context\.([a-zA-Z0-9_]+)([^a-zA-Z0-9_-]|$)`)
+	gatewayExpressionTokenRegex = regexp.MustCompile(`'(?:[^']|'')*'|"[^"]*"|[a-zA-Z_][a-zA-Z0-9_.-]*`)
 )
 
 // ExpressionMapping represents a mapping between a GitHub expression and its environment variable
@@ -58,6 +59,7 @@ var defaultContentTransformers = []contentTransformer{
 	transformActivationOutputs,
 	transformExperimentsExpression,
 	transformAwContextExpression,
+	transformGatewayEventsExpression,
 }
 
 // applyContentTransformers runs content through each transformer in order,
@@ -126,9 +128,13 @@ func (e *ExpressionExtractor) processMatch(originalExpr, rawContent string) {
 		))
 	}
 
+	envVar := e.generateEnvVarName(content)
+	if name, ok := regexSubmatchAt(experimentNameRegex.FindStringSubmatch(originalContent), 1); ok {
+		envVar = ExperimentEnvVarName(name)
+	}
 	e.mappings[originalExpr] = &ExpressionMapping{
 		Original: originalExpr,
-		EnvVar:   e.generateEnvVarName(content),
+		EnvVar:   envVar,
 		Content:  content,
 	}
 
@@ -144,10 +150,12 @@ func (e *ExpressionExtractor) ExtractExpressions(markdown string) ([]*Expression
 	expressionExtractionLog.Printf("Found %d expression matches", len(matches))
 
 	for _, match := range matches {
-		if len(match) < 2 {
+		originalExpr, hasOriginal := regexSubmatchAt(match, 0)
+		content, hasContent := regexSubmatchAt(match, 1)
+		if !hasOriginal || !hasContent {
 			continue
 		}
-		e.processMatch(match[0], match[1])
+		e.processMatch(originalExpr, content)
 	}
 
 	// Convert map to sorted slice for consistent ordering
@@ -220,7 +228,7 @@ func transformActivationOutputs(expr string) string {
 			// Check if this is a complete token (not part of a larger identifier)
 			// Look at the character after the match (if any)
 			endIdx := idx + len(oldExpr)
-			if endIdx < len(expr) {
+			if endIdx >= 0 && endIdx < len(expr) {
 				nextChar := expr[endIdx]
 				// If the next character is alphanumeric or underscore, this is a partial match
 				if (nextChar >= 'a' && nextChar <= 'z') ||
@@ -285,28 +293,58 @@ func ExperimentEnvVarName(experimentName string) string {
 // context, causing the expression to always evaluate to false.
 func transformExperimentsExpression(expr string) string {
 	if m := experimentNameRegex.FindStringSubmatch(expr); m != nil {
-		return "steps.pick-experiment.outputs." + m[1]
+		if name, ok := regexSubmatchAt(m, 1); ok {
+			return "steps.pick-experiment.outputs." + name
+		}
 	}
 	if m := experimentComparisonRegex.FindStringSubmatch(expr); m != nil {
+		name, hasName := regexSubmatchAt(m, 1)
+		remainder, hasRemainder := regexSubmatchAt(m, 2)
+		if !hasName || !hasRemainder {
+			return expr
+		}
 		// Convert double quotes to single quotes: GitHub Actions expressions only
 		// support single-quoted string literals, not double-quoted ones.
 		// This replacement is safe because experimentComparisonRegex guarantees
 		// that quotes only appear as delimiters around the string literal value;
 		// no embedded quotes of the same kind are allowed by the pattern.
-		remainder := strings.ReplaceAll(m[2], `"`, `'`)
-		return "steps.pick-experiment.outputs." + m[1] + remainder
+		remainder = strings.ReplaceAll(remainder, `"`, `'`)
+		return "steps.pick-experiment.outputs." + name + remainder
 	}
 	return expr
+}
+
+func regexSubmatchAt(matches []string, index int) (string, bool) {
+	if index < 0 || index >= len(matches) {
+		return "", false
+	}
+	return matches[index], true
 }
 
 // transformAwContextExpression rewrites github.aw.context.<field> references to
 // parsed aw_context access expressions.
 //
+// These expressions only ever appear in prompt content rendered by the activation
+// job's own steps (see generatePrompt), so they must read the normalized value from
+// the step that produces it (steps.generate_aw_info.outputs.aw_context) rather than
+// needs.activation.outputs.aw_context: a job cannot reference its own output via
+// needs.<self>, and the activation job is the one that both emits and consumes this
+// output.
+//
 // Example:
 //
-//	github.aw.context.item_number -> fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number
+//	github.aw.context.item_number -> fromJSON(steps.generate_aw_info.outputs.aw_context || '{}').item_number
 func transformAwContextExpression(expr string) string {
-	return awContextExpressionRegex.ReplaceAllString(expr, "fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').$1$2")
+	return awContextExpressionRegex.ReplaceAllString(expr, "fromJSON(steps.generate_aw_info.outputs.aw_context || '{}').$1$2")
+}
+
+func transformGatewayEventsExpression(expr string) string {
+	return gatewayExpressionTokenRegex.ReplaceAllStringFunc(expr, func(token string) string {
+		if token == "gateway.events" || strings.HasPrefix(token, "gateway.events.") {
+			return "fromJSON(steps.generate_aw_info.outputs.aw_context || '{}').webhook.deliveries" + strings.TrimPrefix(token, "gateway.events")
+		}
+		return token
+	})
 }
 
 // simpleIdentifierRegex matches simple JavaScript property access chains like
@@ -396,6 +434,7 @@ func (e *ExpressionExtractor) generateEnvVarName(content string) string {
 
 	// Fall back to hash-based name for complex expressions
 	// Use SHA256 hash to generate a unique identifier
+	// content is unevaluated workflow expression source, not its runtime value; the digest is only an environment variable name.
 	hash := sha256.Sum256([]byte(content))
 	hashStr := hex.EncodeToString(hash[:])
 
@@ -488,10 +527,10 @@ func SubstituteImportInputs(content string, importInputs map[string]any) string 
 	substituteFunc := func(regex *regexp.Regexp, inputCategory string) func(string) string {
 		return func(match string) string {
 			matches := regex.FindStringSubmatch(match)
-			if len(matches) < 2 {
+			path, ok := regexSubmatchAt(matches, 1)
+			if !ok {
 				return match
 			}
-			path := matches[1]
 			// Resolve potentially dotted path (e.g. "config.apiKey" for object inputs)
 			if value, found := resolveImportInputByPath(importInputs, path); found {
 				strValue := marshalImportInputValue(value)

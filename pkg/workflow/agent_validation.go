@@ -191,6 +191,9 @@ func (c *Compiler) validateMaxToolDenialsSupport(frontmatter map[string]any, eng
 	agentValidationLog.Printf("Validating max-tool-denials support: engine=%s, maxToolDenials=%s, copilotSDK=%v",
 		engine.GetID(), engineConfig.MaxToolDenials, engineConfig.CopilotSDK)
 
+	if engine.GetID() == string(constants.PiEngine) && (engineConfig.Driver == "" || engineConfig.Driver == "pi_agent_core_driver.cjs" || engineConfig.Driver == "pi_rpc_driver.cjs") {
+		return nil
+	}
 	if engine.GetID() != string(constants.CopilotEngine) {
 		return fmt.Errorf("max-tool-denials not supported: engine '%s' does not support max-tool-denials (supported only with engine 'copilot' and engine.copilot-sdk: true)", engine.GetID())
 	}
@@ -199,6 +202,32 @@ func (c *Compiler) validateMaxToolDenialsSupport(frontmatter map[string]any, eng
 		return errors.New("max-tool-denials requires Copilot SDK mode: set engine.copilot-sdk: true when using max-tool-denials")
 	}
 
+	return nil
+}
+
+// validateMaxToolCallsSupport limits aggregate tool-call enforcement to the built-in
+// Copilot SDK driver, whose pre-tool hook intercepts primary and subagent dispatches.
+func (c *Compiler) validateMaxToolCallsSupport(frontmatter map[string]any, engine CodingAgentEngine) error {
+	_, engineConfig, _ := c.ExtractEngineConfig(frontmatter)
+	return validateMaxToolCallsConfig(engineConfig, engine)
+}
+
+func validateMaxToolCallsConfig(engineConfig *EngineConfig, engine CodingAgentEngine) error {
+	if engineConfig == nil || engineConfig.MaxToolCalls == "" {
+		return nil
+	}
+	if engine.GetID() == string(constants.PiEngine) {
+		if engineConfig.Driver != "" && engineConfig.Driver != "pi_agent_core_driver.cjs" && engineConfig.Driver != "pi_rpc_driver.cjs" {
+			return errors.New("max-tool-calls requires the built-in Pi CLI, SDK, or RPC driver; custom Pi drivers cannot enforce the aggregate budget")
+		}
+		return nil
+	}
+	if engine.GetID() != string(constants.CopilotEngine) || !engineConfig.CopilotSDK {
+		return errors.New("max-tool-calls requires engine 'copilot' with engine.copilot-sdk: true; other engines do not currently expose an enforceable tool-dispatch hook")
+	}
+	if engineConfig.Driver != "" || engineConfig.HarnessScript != "" {
+		return errors.New("max-tool-calls requires the built-in Copilot SDK driver and harness; custom engine.driver or engine.harness overrides cannot enforce the aggregate budget")
+	}
 	return nil
 }
 
@@ -223,22 +252,33 @@ func (c *Compiler) validateUniversalLLMConsumerModel(frontmatter map[string]any,
 	return nil
 }
 
-// validatePiEngineRequirements validates Pi's required tool configuration.
-func (c *Compiler) validatePiEngineRequirements(tools *ToolsConfig, engine CodingAgentEngine) error {
-	if engine.GetID() != "pi" {
+// validateCopilotWebToolsSupport uses the resolved engine configuration so imported
+// SDK settings are honored. Native web tools are unavailable in offline BYOK mode.
+func (c *Compiler) validateCopilotWebToolsSupport(engine CodingAgentEngine, engineConfig *EngineConfig, tools map[string]any) error {
+	if engine.GetID() != string(constants.CopilotEngine) {
 		return nil
 	}
 
-	if tools == nil || tools.GitHub == nil ||
-		(tools.GitHub.Mode != GitHubMCPModeGHProxy && tools.GitHub.Mode != GitHubMCPModeCLI) {
-		return errors.New("engine 'pi' requires tools.github.mode: gh-proxy")
+	collector := NewErrorCollector(c.failFast)
+	for _, tool := range []string{"web-fetch", "web-search"} {
+		if !isCopilotToolValueEnabled(tools, tool) || (tool == "web-fetch" && engineConfig != nil && engineConfig.CopilotSDK) {
+			continue
+		}
+		suggestion := fmt.Sprintf("Remove tools.%s and configure an MCP server instead, or use a supported engine, for example:\n\nengine: codex", tool)
+		if tool == "web-fetch" {
+			suggestion += "\n\nFor Copilot's proxy-aware custom fetch tool, enable SDK mode:\n\nengine:\n  id: copilot\n  copilot-sdk: true"
+		}
+		err := NewValidationError(
+			"tools."+tool,
+			tool,
+			fmt.Sprintf("Copilot's native '%s' tool is unavailable because offline BYOK mode disables web tools (COPILOT_OFFLINE=true)", tool),
+			suggestion,
+		)
+		if returnErr := collector.Add(err); returnErr != nil {
+			return returnErr
+		}
 	}
-
-	if !tools.CLIProxy {
-		return errors.New("engine 'pi' requires tools.cli-proxy: true")
-	}
-
-	return nil
+	return collector.FormattedError("Copilot web tools")
 }
 
 // validateWebSearchSupport validates that web-search tool is only used with engines that support this feature
@@ -250,6 +290,10 @@ func (c *Compiler) validateWebSearchSupport(frontmatter map[string]any, tools ma
 		// No web-search specified, no validation needed
 		return
 	}
+	if engine.GetID() == string(constants.CopilotEngine) {
+		// Copilot's unavailable native tools are rejected after engine imports resolve.
+		return
+	}
 
 	agentValidationLog.Printf("Validating web-search support for engine: %s", engine.GetID())
 
@@ -259,21 +303,6 @@ func (c *Compiler) validateWebSearchSupport(frontmatter map[string]any, tools ma
 		fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(fmt.Sprintf("Engine '%s' does not support the web-search tool. See https://github.github.com/gh-aw/guides/web-search/ for alternatives.", engine.GetID())))
 		c.IncrementWarningCount()
 		return
-	}
-
-	if engine.GetID() == string(constants.CopilotEngine) {
-		_, engineConfig, _ := c.ExtractEngineConfig(frontmatter)
-		if !copilotSupportsWebSearch(engineConfig) {
-			version := ""
-			if engineConfig != nil {
-				version = engineConfig.Version
-			}
-			agentValidationLog.Printf("Copilot CLI version %s does not support web-search tool, emitting warning", version)
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(fmt.Sprintf(
-				"Copilot CLI versions before %s do not support the web-search tool. Upgrade engine.version or omit it to use the default Copilot CLI version.",
-				constants.CopilotWebSearchMinVersion)))
-			c.IncrementWarningCount()
-		}
 	}
 }
 

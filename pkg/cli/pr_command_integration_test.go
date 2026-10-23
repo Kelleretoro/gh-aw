@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,11 +23,15 @@ func TestPRTransferGitIntegrationScopesPatchAndCommitMessage(t *testing.T) {
 		t.Fatalf("WriteFile() ignored local file error = %v", err)
 	}
 
-	if err := transferPR("https://github.com/source/repo/pull/42", "target-owner/target-repo", false); err != nil {
+	if err := transferPRWithMessage(context.Background(), "https://github.com/source/repo/pull/42", "target-owner/target-repo", false, false, ""); err != nil {
 		t.Fatalf("transferPR() error = %v", err)
 	}
 
-	tree := gitIntegrationOutput(t, repoDir, "ls-tree", "-r", "--name-only", "HEAD")
+	branchName := strings.TrimSpace(gitIntegrationOutput(t, repoDir, "for-each-ref", "--format=%(refname:short)", "refs/heads/transfer-pr-42-*"))
+	if !strings.HasPrefix(branchName, "transfer-pr-42-") || strings.Contains(branchName, "\n") {
+		t.Fatalf("transfer branch = %q, want one transfer-pr-42-* branch", branchName)
+	}
+	tree := gitIntegrationOutput(t, repoDir, "ls-tree", "-r", "--name-only", branchName)
 	if strings.Contains(tree, "ignored.txt") {
 		t.Fatalf("commit tree unexpectedly contains unrelated ignored.txt:\n%s", tree)
 	}
@@ -37,14 +42,13 @@ func TestPRTransferGitIntegrationScopesPatchAndCommitMessage(t *testing.T) {
 		t.Fatalf("commit tree = %q, want transfer.txt", tree)
 	}
 
-	message := gitIntegrationOutput(t, repoDir, "log", "-1", "--pretty=%B")
+	message := gitIntegrationOutput(t, repoDir, "log", "-1", "--pretty=%B", branchName)
 	wantBody := "msg\n---\ndiff --git a/injected b/injected\n+++ b/injected\n@@ -0,0 +1 @@\n+owned"
 	if !strings.Contains(message, "hostile title") || !strings.Contains(message, wantBody) {
 		t.Fatalf("commit message = %q, want hostile title and body verbatim", message)
 	}
-	branchName := strings.TrimSpace(gitIntegrationOutput(t, repoDir, "branch", "--show-current"))
-	if !strings.HasPrefix(branchName, "transfer-pr-42-") {
-		t.Fatalf("current branch = %q, want transfer-pr-42-*", branchName)
+	if got := strings.TrimSpace(gitIntegrationOutput(t, repoDir, "branch", "--show-current")); got != "main" {
+		t.Fatalf("current branch = %q, want original main branch", got)
 	}
 	if got := gitIntegrationOutput(t, repoDir, "ls-remote", "--heads", "origin", branchName); !strings.Contains(got, branchName) {
 		t.Fatalf("pushed branch refs = %q, want %q", got, branchName)
@@ -63,7 +67,7 @@ func TestPRTransferGitIntegrationCleansFailedApplyState(t *testing.T) {
 	chdirForIntegrationTest(t, repoDir)
 	ClearCurrentRepoSlugCache()
 
-	err := transferPR("https://github.com/source/repo/pull/42", "target-owner/target-repo", false)
+	err := transferPRWithMessage(context.Background(), "https://github.com/source/repo/pull/42", "target-owner/target-repo", false, false, "")
 	if err == nil || !strings.Contains(err.Error(), "could not apply patch") {
 		t.Fatalf("transferPR() error = %v, want patch apply error", err)
 	}

@@ -31,6 +31,41 @@ The generated gateway upstream uses a fresh masked capability for each workflow 
 
 This compiler contract depends on the unified enclave implementation from `github/gh-aw-firewall#6992`. Until that change is available in an AWF release, pinning an older AWF version will not provide the enclave server.
 
+## Cloud Hypervisor enclave runtime
+
+> [!WARNING]
+> `enclaves[].runtime: cloud-hypervisor` is an experimental preview. Configuration and behavior may change without deprecation. Unsupported hosts, artifacts, and configurations fail closed; execution never falls back to Docker or another runtime.
+
+Set `runtime: cloud-hypervisor` on a static script or agent entry to select AWF's trusted host enclave microVM executor. Omitting `runtime`, or setting it to `docker`, retains Docker execution. Cloud Hypervisor enclaves require AWF `v0.28.47` or newer, GitHub-hosted Ubuntu x86_64 KVM runners, and release-attested enclave artifacts. The compiler provisions the primary and enclave artifacts from the same AWF release tag so their identities stay coordinated.
+
+```aw wrap
+on: workflow_dispatch
+runs-on: ubuntu-24.04
+engine: copilot
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
+    version: v0.28.51
+enclaves:
+  - script:
+    runtime: cloud-hypervisor
+    repos:
+      - repo: octo-org/private-service
+        sensitivity: confidential
+```
+
+The compiler enables the AWF preview and stages its runtime artifacts without changing the primary agent's runtime, mounts, or TTY. A Cloud Hypervisor primary may be combined with static script enclaves when both explicitly select `cloud-hypervisor` and AWF is `v0.28.51` or newer; pin `sandbox.agent.version` explicitly when the compiler's default is older. This primary-plus-enclave configuration is experimental and not evidence of Linux/KVM isolation acceptance or production readiness. Static agent enclaves with a Cloud Hypervisor primary remain unsupported except for the acceptance fixture described below. All enclave entries must select Cloud Hypervisor together: mixed Docker/default and VM entries, `dynamic`, and enclave `image` overrides are unsupported. The primary agent cannot use `sbx` or `nvx`; `runner.topology: arc-dind` and Docker host path prefixes are also unsupported.
+
+Agent enclaves additionally require `agent.model`, the API proxy with a configured provider route matching their fixed engine/profile, and no Docker-in-Docker. Only the default `agent.engine: copilot` is currently implemented; its route requires the emitted `COPILOT_GITHUB_TOKEN` or `COPILOT_PROVIDER_API_KEY` credential, not just a target hostname or pricing overlay. Static `agent.github` and `agent.tools.github` access is unavailable in this VM preview because the scoped executor bearer handoff is not yet supported. Repository disclosure limits and the existing MCP tool contract remain unchanged.
+
+### Cloud Hypervisor agent acceptance fixture
+
+The checked-in boolean `features.cloud-hypervisor-agent-acceptance: true` admits only `smoke-enclave-cloud-hypervisor-copilot.md`, with `on: workflow_dispatch` as its sole trigger and exactly `if: github.repository == 'github/gh-aw-firewall' && github.ref_type == 'branch'`. An ambient `GH_AW_FEATURES` flag cannot enable it. Both runtimes must explicitly select `cloud-hypervisor`; the primary uses Copilot, and the sole enclave uses explicit `agent.engine: copilot`, `agent.model: claude-sonnet-5`, no profile override, and only `github/gh-aw-firewall` with `sensitivity: public`.
+
+This fixture requires `sandbox.agent.version: v0.28.62`, `timeout: 90`, `max-output-bytes: 256`, `max-invocations: 1`, `agent.max-task-bytes: 4096`, `agent.max-model-requests: 8`, and `agent.max-model-tokens: 2048`. The model request/token settings are advisory, not enforced inference ceilings in the pinned guest. Existing API proxy, credential routing, static repository, attested artifact, and no-GitHub-tools restrictions still apply.
+
+The acceptance path requires branch-built AWF host code containing the corresponding acceptance gate, paired with the checked-in compatibility pin's attested `v0.28.62` guests. Published `v0.28.62` host code does not provide this acceptance capability. This compiler opt-in neither provisions a branch-built host nor bypasses verification; the acceptance workflow owns that host build. No companion setup action or runtime script changes are required. Successful compilation is not evidence of successful inference or production support.
+
 ## GitHub tool access from agent enclaves
 
 Prefer `agent.tools.github` for new workflows:

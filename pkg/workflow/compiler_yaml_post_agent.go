@@ -13,7 +13,15 @@ import (
 // patch/bundle paths, and firewall audit paths.
 func (c *Compiler) collectArtifactPaths(data *WorkflowData, engine CodingAgentEngine, logFileFull string, initialPaths []string) []string { //nolint:largefunc // Existing artifact policy remains explicit and ordered.
 	paths := initialPaths
-	paths = append(paths, agentExecutionEvidencePath)
+	paths = append(paths, agentExecutionEvidencePath, agentExecutionExitCodePath,
+		constants.TmpGhAwDirSlash+"agent-session.jsonl", constants.TmpGhAwDirSlash+"agent-errors.jsonl",
+		constants.TmpGhAwDirSlash+"aw-prompts/user.txt", constants.TmpGhAwDirSlash+"aw-prompts/system.txt")
+	if len(data.Plugins) > 0 {
+		paths = append(paths, pluginInstallationsPath)
+	}
+	if hasSkillInventory(data) {
+		paths = append(paths, constants.TmpGhAwDirSlash+"skill_inventory.json")
+	}
 
 	// Merge engine-declared output files into the unified artifact instead of creating a
 	// separate agent_outputs artifact.
@@ -36,8 +44,26 @@ func (c *Compiler) collectArtifactPaths(data *WorkflowData, engine CodingAgentEn
 	if isFirewallEnabled(data) || engine.GetID() == string(constants.CopilotEngine) {
 		paths = append(paths, constants.TmpGhAwDirSlash+constants.TokenUsageFilename.String())
 	}
+	if isModelRoutingEnabled(data) {
+		// The post-run parser patches this runner-side copy with the AWF selection.
+		// Keep it in the agent artifact; activation's separate "info" artifact remains
+		// the compile-time snapshot for compatibility with existing downloads.
+		paths = append(paths, constants.TmpGhAwDirSlash+"agent/aw_info.json")
+		paths = append(paths, constants.TmpGhAwDirSlash+"agent/awf-routing-outcome.json")
+	}
+	if isModelRoutingEnabled(data) || engine.GetID() == string(constants.CopilotEngine) {
+		paths = append(paths, constants.TmpGhAwDirSlash+"runtime/aw_info.json")
+	}
 	if engine.GetID() == string(constants.CopilotEngine) {
-		paths = append(paths, constants.TmpGhAwDirSlash+"agent_usage.jsonl")
+		paths = append(paths,
+			constants.TmpGhAwDirSlash+"agent_usage.jsonl",
+			constants.TmpGhAwDirSlash+"agent/model-endpoint-mismatch.json",
+		)
+	}
+	if engineRunsSharedModelResolution(engine.GetID()) {
+		// Configured and resolved model recorded by the shared "resolve configured model"
+		// step in resolve_model_alias.cjs; unified_session.cjs projects it into aw_session.jsonl.
+		paths = append(paths, constants.TmpGhAwDirSlash+modelResolutionRecordPath)
 	}
 
 	// Collect agent stdio logs path for unified upload
@@ -59,11 +85,6 @@ func (c *Compiler) collectArtifactPaths(data *WorkflowData, engine CodingAgentEn
 		paths = append(paths, constants.TmpGhAwDirSlash+constants.OtlpExportErrorsFilename.String())
 	}
 
-	// Collect grader manifest and results when graders are configured.
-	if data.Graders != nil && data.Graders.HasGraders() {
-		paths = append(paths, collectGraderArtifactPaths(data.Graders)...)
-	}
-
 	// Collect safe outputs and agent output paths for the unified artifact.
 	// These were previously uploaded as separate safe-output and agent-output artifacts.
 	if data.SafeOutputs != nil {
@@ -78,6 +99,16 @@ func (c *Compiler) collectArtifactPaths(data *WorkflowData, engine CodingAgentEn
 		// (via safe-outputs.jobs.*.artifacts) that their steps depend on. Persist them
 		// in the unified agent artifact so they survive into the downstream job.
 		paths = append(paths, collectSafeJobArtifactPaths(data.SafeOutputs.Jobs)...)
+	}
+	if isWorkQueueParticipant(data) {
+		paths = append(paths, constants.WorkQueueFinishIntentPath)
+		paths = append(paths, constants.WorkQueueIntentPath)
+		for _, extension := range secretRedactionScannedExtensions {
+			paths = append(paths, constants.WorkQueueClaimArtifactsPath+"/**/*"+extension)
+		}
+		if usesPatchesAndCheckouts(data.SafeOutputs) {
+			paths = append(paths, constants.WorkQueueClaimArtifactsPath+"/*/aw-*.bundle")
+		}
 	}
 
 	// Collect git patch path if safe-outputs with PR operations is configured.
@@ -109,11 +140,13 @@ func (c *Compiler) collectArtifactPaths(data *WorkflowData, engine CodingAgentEn
 			// On ARC/DinD, logs are under ${{ runner.temp }}/gh-aw (daemon-visible path).
 			// Use ${{ runner.temp }} because `with:` blocks expand Actions expressions, not shell vars.
 			paths = append(paths, constants.AWFConfigFilePathExpr)
+			paths = append(paths, constants.AWFResolvedConfigFilePathExpr)
 			paths = append(paths, constants.AWFProxyLogsDirExpr+"/")
 			paths = append(paths, constants.AWFAuditDirExpr+"/")
 			paths = append(paths, constants.AWFReflectFilePathExpr)
 		} else {
 			paths = append(paths, constants.AWFConfigFilePath.String())
+			paths = append(paths, constants.AWFResolvedConfigFilePath.String())
 			paths = append(paths, constants.AWFProxyLogsDir.String()+"/")
 			paths = append(paths, constants.AWFAuditDir.String()+"/")
 			// Include the AWF /reflect payload persisted by the agent harness.
@@ -201,20 +234,12 @@ func (c *Compiler) generatePostAgentCollectionAndUpload(yaml *strings.Builder, d
 	// Emit all GITHUB_STEP_SUMMARY log-parsing steps.
 	c.generateSummarySteps(yaml, data, engine)
 
-	// Run deterministic graders after trace data is available.
-	c.generateGradersStep(yaml, data)
-
-	// Re-scan grader output files for leaked secrets when custom grader scripts
-	// are present. Custom scripts evaluate trace data that may contain
-	// credential-bearing strings written after the initial workspace redaction.
-	c.generateGraderRedactionStep(yaml, yaml.String(), data)
-
 	// Write a minimal agent_output.json placeholder when the engine fails before
 	// producing any safe outputs, so downstream safe_outputs and conclusion jobs
 	// receive a valid (empty) JSON file instead of an ENOENT error.
 	// The placeholder is only written if the engine did not already write the file.
 	if data.SafeOutputs != nil {
-		c.generateAgentOutputPlaceholderStep(yaml)
+		c.generateAgentOutputPlaceholderStep(yaml, data)
 	}
 
 	// Add post-execution cleanup step for Copilot engine
@@ -278,7 +303,7 @@ func (c *Compiler) generatePostAgentCollectionAndUpload(yaml *strings.Builder, d
 	agentArtifactPrefix := artifactPrefixExprForDownstreamJob(data)
 	compilerYamlLog.Printf("Emitting unified agent artifact upload with %d path(s)", len(artifactPaths))
 	c.generateAgentOutputFallbackUpload(yaml, data, agentArtifactPrefix)
-	c.generateUnifiedArtifactUpload(yaml, artifactPaths, agentArtifactPrefix, hasSafeJobArtifactPaths(data))
+	c.generateUnifiedArtifactUpload(yaml, artifactPaths, agentArtifactPrefix, data)
 
 	// In dev mode the setup action is referenced via a local path (./actions/setup), so its files
 	// live in the workspace. When a checkout: entry targets an external repository without a path

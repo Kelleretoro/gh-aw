@@ -603,9 +603,7 @@ permissions:
   contents: read
 engine: copilot
 strict: false
-graders:
-  custom:
-    script: return 1
+graders: {}
 safe-outputs:
   create-issue:
 ---
@@ -631,7 +629,15 @@ Body.
 	}
 	lockYAML := string(lockContent)
 
+	agentJob := extractJobSection(lockYAML, string(constants.AgentJobName))
+	assert.Equal(t, 1, strings.Count(agentJob, "id: redact_secrets\n"))
+	redactionSection := extractWorkflowStepByName(t, lockYAML, "Redact secrets in logs")
+	assert.Contains(t, redactionSection, "id: redact_secrets")
+	assert.Equal(t, 1, strings.Count(redactionSection, "id: redact_secrets"))
+	assert.Less(t, strings.Index(lockYAML, "id: redact_secrets"), strings.Index(lockYAML, "- name: Upload agent output fallback artifact"))
+
 	uploadSection := extractWorkflowStepByName(t, lockYAML, "Upload agent output fallback artifact")
+	assert.Contains(t, uploadSection, "if: always() && steps.redact_secrets.outcome == 'success'")
 	for _, expected := range []string{
 		"name: agent-output-fallback\n",
 		"/tmp/gh-aw/agent_output.json",
@@ -640,10 +646,12 @@ Body.
 		"/tmp/gh-aw/agent_usage.jsonl",
 		"/tmp/gh-aw/agent_usage.json",
 		"/tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl",
+		"/tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/model-routing.jsonl",
 		"/tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl",
+		"/tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/model-routing.jsonl",
 		"/tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl",
-		"/tmp/gh-aw/agent/graders/grader_manifest.json",
-		"/tmp/gh-aw/agent/graders/grader_results.json",
+		"/tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/model-routing.jsonl",
+		constants.AWFResolvedConfigFilePath.String(),
 		"if-no-files-found: ignore",
 		"continue-on-error: true",
 	} {
@@ -651,9 +659,7 @@ Body.
 			t.Errorf("Expected %q in fallback upload step, got:\n%s", expected, uploadSection)
 		}
 	}
-	if strings.Contains(uploadSection, constants.OperationalValueEvaluatorFilename.String()) {
-		t.Errorf("Fallback upload must not include an operational-value evaluator for inline-only graders, got:\n%s", uploadSection)
-	}
+	assert.NotContains(t, uploadSection, "/graders/")
 
 	// The fallback artifact must be uploaded before the (large, failure-prone) agent artifact.
 	uploadIdx := strings.Index(lockYAML, "- name: Upload agent output fallback artifact")
@@ -686,9 +692,7 @@ engine: copilot
 strict: false
 runner:
   topology: arc-dind
-graders:
-  custom:
-    script: return 1
+graders: {}
 safe-outputs:
   create-issue:
 ---
@@ -714,8 +718,10 @@ safe-outputs:
 		"${{ runner.temp }}/gh-aw/agent_output.json",
 		"${{ runner.temp }}/gh-aw/agent_usage.jsonl",
 		"${{ runner.temp }}/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl",
+		"${{ runner.temp }}/gh-aw/sandbox/firewall/logs/api-proxy-logs/model-routing.jsonl",
 		"${{ runner.temp }}/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl",
-		"${{ runner.temp }}/gh-aw/agent/graders/grader_manifest.json",
+		"${{ runner.temp }}/gh-aw/sandbox/firewall/audit/api-proxy-logs/model-routing.jsonl",
+		"${{ runner.temp }}/gh-aw/awf-resolved-config.json",
 	} {
 		assert.Contains(t, uploadSection, expected)
 	}
@@ -759,6 +765,7 @@ safe-outputs:
 	assert.Contains(t, extractWorkflowStepByName(t, lockYAML, "Initialize agent execution evidence"), `"state":"not_started"`)
 	assert.NotContains(t, lockYAML, "Mark agent execution started")
 	assert.Contains(t, extractWorkflowStepByName(t, lockYAML, "Upload agent output fallback artifact"), agentExecutionEvidencePath)
+	assert.Contains(t, extractWorkflowStepByName(t, lockYAML, "Upload agent output fallback artifact"), agentExecutionExitCodePath)
 	assert.Contains(t, lockYAML, `pattern: "{agent,agent-output-fallback}"`)
 	assert.Contains(t, extractWorkflowStepByName(t, lockYAML, "Upload usage artifact"), "/tmp/gh-aw/usage/agent/execution.json")
 }
@@ -791,7 +798,14 @@ Body.
 	if err != nil {
 		t.Fatalf("Failed to read lock file: %v", err)
 	}
-	uploadSection := extractWorkflowStepByName(t, string(lockContent), "Upload agent artifacts")
+	lockYAML := string(lockContent)
+	agentJob := extractJobSection(lockYAML, string(constants.AgentJobName))
+	assert.Equal(t, 1, strings.Count(agentJob, "id: redact_secrets\n"))
+	redactionSection := extractWorkflowStepByName(t, lockYAML, "Redact secrets in logs")
+	assert.Contains(t, redactionSection, "id: redact_secrets")
+	assert.Less(t, strings.Index(lockYAML, "id: redact_secrets"), strings.Index(lockYAML, "- name: Upload agent artifacts"))
+	uploadSection := extractWorkflowStepByName(t, agentJob, "Upload agent artifacts")
+	assert.Contains(t, uploadSection, "if: always() && steps.redact_secrets.outcome == 'success'")
 
 	for _, expected := range []string{
 		constants.TmpMcpLogsDir,
@@ -799,6 +813,7 @@ Body.
 		constants.AgentStdioLogPath,
 		constants.AWFProxyLogsDir.String() + "/",
 		constants.AWFAuditDir.String() + "/",
+		constants.AWFResolvedConfigFilePath.String(),
 	} {
 		assert.Contains(t, uploadSection, expected)
 	}

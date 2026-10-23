@@ -27,7 +27,14 @@ pre-steps:
   - name: Mint checkout token
     id: checkout_app
     uses: actions/create-github-app-token@v2
+    with:
+      app-id: ${{ vars.APP_ID }}
+      private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      repositories: ${{ github.repository }}
+      permission-contents: read
 ```
+
+Set an explicit `repositories` input and `permission-*` inputs for every `actions/create-github-app-token` step; otherwise the installation token can inherit access across the App installation. To scope a token to the current repository, use `repositories: ${{ github.repository }}`. The action accepts the fully qualified `owner/repository` value from this trusted context. If you set `owner` to a different installation owner, explicitly list repositories belonging to that owner instead. The compiler warns when either is missing and rejects the workflow in strict mode. Job-level `permissions:` does not scope the App token.
 
 Use pre-steps when later checkout or setup must consume outputs from a step in the same job.
 
@@ -58,7 +65,7 @@ steps:
     run: npm ci
 ```
 
-Use custom steps to precompute data, filter triggers, or prepare context for AI agents. Steps can also short-circuit the agent by writing a `noop` entry to `$GH_AW_SAFE_OUTPUTS` — the harness detects this at startup and exits cleanly without incurring any AI inference cost. See [Skip the Agent from Steps Using `noop`](/gh-aw/reference/cost-management/#skip-the-agent-from-steps-using-noop) for details.
+Use custom steps to precompute data, filter triggers, or prepare context for AI agents. Steps can also short-circuit the agent by writing a `noop` entry to `$GH_AW_SAFE_OUTPUTS` — the harness detects this at startup and exits cleanly without incurring any AI inference cost. See [Skip the Agent When It Is Not Needed](/gh-aw/reference/cost-management/#skip-the-agent-when-it-is-not-needed) for details.
 
 ## Custom Pre-Agent Steps (`pre-agent-steps:`)
 
@@ -83,15 +90,19 @@ post-steps:
     uses: actions/upload-artifact@v4
     with:
       name: workflow-results
-      path: /tmp/gh-aw/
+      path: /tmp/gh-aw/agent/
       retention-days: 7
 ```
 
 Useful for artifact uploads, summaries, cleanup, or triggering downstream workflows.
+Post-steps must not create issues directly, read safe-output files, or expose secrets through a step-level `env` section. Avoid uploading the entire `/tmp/gh-aw/` directory, which can contain protected safe-output files.
+Use [`safe-outputs.create-issue`](/gh-aw/reference/safe-outputs/) to publish agent-generated issues instead.
 
 ## Custom Jobs (`jobs:`)
 
 Define custom jobs that run before agentic execution. The agentic execution job waits for all custom jobs to complete. Custom jobs can share data with the agent through artifacts or job outputs.
+
+To run a custom job after agentic execution, add `needs: [agent, detection]` (or `needs: detection` if agent outputs are not referenced directly). The compiler also recognizes transitive post-agent dependencies. When detection is enabled, every downstream custom job receives a direct detection dependency and a non-overridable success guard. Failed, cancelled, skipped, missing, or warn-mode flagged detection results block the custom job, including reusable workflow calls and jobs using `if: always()`. Custom jobs cannot run between agent and detection. Explicitly disabling detection removes this gate. See [Custom job detection gates](/gh-aw/reference/workflow-linters/#custom-job-detection-gates).
 
 ```yaml wrap
 jobs:
@@ -169,7 +180,8 @@ Set `jobs.<job-id>.restore-memory: true` to restore any configured `cache-memory
 | `activation` | `jobs.activation.setup-steps` is refused at compile time to prevent short-circuiting protections; use `jobs.activation.pre-steps` |
 | `agent` | `jobs.agent.setup-steps` → compiler setup checkout/setup → `jobs.agent.pre-steps` → runtime path setup → top-level `pre-steps` → checkout/token/runtime/custom/agent steps |
 | `safe_outputs` | `jobs.safe_outputs.setup-steps` → compiler setup checkout/setup → `jobs.safe_outputs.pre-steps` → safe-outputs downloads/prep → GitHub App token minting → safe-output handlers/finalization |
-| `conclusion` | `jobs.conclusion.setup-steps` → compiler setup checkout/setup → `jobs.conclusion.pre-steps` → built-in conclusion steps (including GitHub App token minting when configured) |
+| `conclusion` | Compiler-generated steps only; user `setup-steps`, `pre-steps`, and `steps` are rejected |
+| `graders` | Compiler-owned restricted job after conclusion, generated only for custom JavaScript graders; no job customization or inherited environment |
 | `detection` | `jobs.detection.setup-steps` → compiler setup checkout/setup → `jobs.detection.pre-steps` → built-in detection steps |
 | `unlock` | `jobs.unlock.setup-steps` → compiler setup checkout/setup → `jobs.unlock.pre-steps` → built-in unlock steps |
 

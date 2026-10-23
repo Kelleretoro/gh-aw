@@ -11,6 +11,7 @@ import (
 	"go/types"
 	"slices"
 	"strconv"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
@@ -37,17 +38,175 @@ func RhsExprForIndex(rhs []ast.Expr, idx int) (ast.Expr, bool) {
 	case len(rhs) == 0:
 		return nil, false
 	case len(rhs) == 1 && idx == 0:
-		return rhs[0], true
-	case idx < len(rhs):
-		return rhs[idx], true
+		for _, expr := range rhs {
+			return expr, true
+		}
+	case idx >= 0 && idx < len(rhs):
+		for i, expr := range rhs {
+			if i == idx {
+				return expr, true
+			}
+		}
 	default:
 		return nil, false
 	}
+	return nil, false
+}
+
+// MatchDiscardedErrorCall reports whether stmt discards the error result of a
+// package-qualified call and resolves the function to its imported package.
+func MatchDiscardedErrorCall(pass *analysis.Pass, stmt ast.Stmt) (call *ast.CallExpr, pkgPath, funcName string, ok bool) {
+	if pass == nil || pass.TypesInfo == nil || stmt == nil {
+		return nil, "", "", false
+	}
+
+	switch stmt := stmt.(type) {
+	case *ast.AssignStmt:
+		if len(stmt.Lhs) != 2 || len(stmt.Rhs) != 1 {
+			return nil, "", "", false
+		}
+		var blankExpr ast.Expr
+		for i, lhs := range stmt.Lhs {
+			if i == 1 {
+				blankExpr = lhs
+				break
+			}
+		}
+		blank, isBlank := blankExpr.(*ast.Ident)
+		if !isBlank || blank.Name != "_" {
+			return nil, "", "", false
+		}
+		for _, rhs := range stmt.Rhs {
+			call, ok = UnwrapParenExpr(rhs).(*ast.CallExpr)
+			break
+		}
+	case *ast.ExprStmt:
+		call, ok = UnwrapParenExpr(stmt.X).(*ast.CallExpr)
+	default:
+		return nil, "", "", false
+	}
+	if !ok {
+		return nil, "", "", false
+	}
+	pkgPath, funcName, ok = PackageCall(pass, call)
+	if !ok {
+		return nil, "", "", false
+	}
+	return call, pkgPath, funcName, true
+}
+
+// PackageCall resolves a package-qualified call, including calls through a
+// local function-value alias with no writes or address escapes, and returns its
+// import path and function name. Mutable aliases are conservatively unresolved,
+// even at calls before a later write.
+func PackageCall(pass *analysis.Pass, call *ast.CallExpr) (pkgPath, funcName string, ok bool) {
+	if pass == nil || pass.TypesInfo == nil || call == nil {
+		return "", "", false
+	}
+	return packageFunction(pass, call.Fun, nil)
+}
+
+func packageFunction(pass *analysis.Pass, expr ast.Expr, seen map[types.Object]bool) (pkgPath, funcName string, ok bool) {
+	switch expr := UnwrapParenExpr(expr).(type) {
+	case *ast.SelectorExpr:
+		ident, ok := expr.X.(*ast.Ident)
+		if !ok {
+			return "", "", false
+		}
+		pkgName, ok := pass.TypesInfo.Uses[ident].(*types.PkgName)
+		if !ok || pkgName.Imported() == nil {
+			return "", "", false
+		}
+		fn, ok := pass.TypesInfo.Uses[expr.Sel].(*types.Func)
+		if !ok || fn.Pkg() != pkgName.Imported() {
+			return "", "", false
+		}
+		return fn.Pkg().Path(), fn.Name(), true
+	case *ast.Ident:
+		if fn, ok := pass.TypesInfo.Uses[expr].(*types.Func); ok && fn.Pkg() != nil {
+			signature, ok := fn.Type().(*types.Signature)
+			if ok && signature.Recv() == nil {
+				return fn.Pkg().Path(), fn.Name(), true
+			}
+		}
+		return packageFunctionAlias(pass, pass.TypesInfo.Uses[expr], seen)
+	}
+	return "", "", false
+}
+
+func packageFunctionAlias(pass *analysis.Pass, obj types.Object, seen map[types.Object]bool) (string, string, bool) {
+	variable, ok := obj.(*types.Var)
+	if !ok || !IsLocalObject(variable) {
+		return "", "", false
+	}
+	if seen == nil {
+		seen = make(map[types.Object]bool)
+	}
+	if seen[obj] {
+		return "", "", false
+	}
+	seen[obj] = true
+	var initializer ast.Expr
+	mutable := false
+	for _, file := range pass.Files {
+		ast.Inspect(file, func(node ast.Node) bool {
+			if mutable {
+				return false
+			}
+			if value := packageFunctionAliasInitializer(pass, node, obj); value != nil {
+				initializer = value
+			}
+			switch node := node.(type) {
+			case *ast.AssignStmt:
+				for _, lhs := range node.Lhs {
+					if ident, ok := UnwrapParenExpr(lhs).(*ast.Ident); ok && pass.TypesInfo.Uses[ident] == obj {
+						mutable = true
+					}
+				}
+			case *ast.RangeStmt:
+				for _, lhs := range []ast.Expr{node.Key, node.Value} {
+					if ident, ok := UnwrapParenExpr(lhs).(*ast.Ident); ok && pass.TypesInfo.Uses[ident] == obj {
+						mutable = true
+					}
+				}
+			case *ast.UnaryExpr:
+				if ident, ok := UnwrapParenExpr(node.X).(*ast.Ident); ok && node.Op == token.AND && pass.TypesInfo.Uses[ident] == obj {
+					mutable = true
+				}
+			}
+			return true
+		})
+	}
+	if mutable || initializer == nil {
+		return "", "", false
+	}
+	return packageFunction(pass, initializer, seen)
+}
+
+func packageFunctionAliasInitializer(pass *analysis.Pass, node ast.Node, obj types.Object) ast.Expr {
+	switch node := node.(type) {
+	case *ast.ValueSpec:
+		for i, name := range node.Names {
+			if pass.TypesInfo.Defs[name] == obj {
+				value, _ := RhsExprForIndex(node.Values, i)
+				return value
+			}
+		}
+	case *ast.AssignStmt:
+		for i, lhs := range node.Lhs {
+			ident, ok := lhs.(*ast.Ident)
+			if ok && pass.TypesInfo.Defs[ident] == obj {
+				value, _ := RhsExprForIndex(node.Rhs, i)
+				return value
+			}
+		}
+	}
+	return nil
 }
 
 // IsStringLiteral reports whether expr is a string literal.
 func IsStringLiteral(expr ast.Expr) bool {
-	lit, ok := expr.(*ast.BasicLit)
+	lit, ok := UnwrapParenExpr(expr).(*ast.BasicLit)
 	return ok && lit.Kind == token.STRING
 }
 
@@ -303,11 +462,8 @@ func ImportedAs(file *ast.File, info *types.Info, importPath string) (string, bo
 		}
 		// Fallback: last segment of the path.
 		last := importPath
-		for j := len(importPath) - 1; j >= 0; j-- {
-			if importPath[j] == '/' {
-				last = importPath[j+1:]
-				break
-			}
+		if slash := strings.LastIndexByte(importPath, '/'); slash >= 0 {
+			last = importPath[slash+1:]
 		}
 		return last, true
 	}
@@ -476,7 +632,7 @@ func BuildParentMap(root ast.Node) map[ast.Node]ast.Node {
 			return false
 		}
 		if len(stack) > 0 {
-			parents[n] = stack[len(stack)-1]
+			parents[n] = stack[len(stack)-1] //nolint:uncheckedsliceindex // stack is non-empty
 		}
 		stack = append(stack, n)
 		return true
@@ -500,12 +656,12 @@ func TwoValueTypeAssertionOKIdent(typeAssert *ast.TypeAssertExpr, parents map[as
 	switch p := parent.(type) {
 	case *ast.AssignStmt:
 		if len(p.Lhs) == 2 && len(p.Rhs) == 1 {
-			okIdent, ok := p.Lhs[1].(*ast.Ident)
+			okIdent, ok := p.Lhs[1].(*ast.Ident) //nolint:uncheckedsliceindex // len(p.Lhs) is checked above
 			return okIdent, ok
 		}
 	case *ast.ValueSpec:
 		if len(p.Names) == 2 && len(p.Values) == 1 {
-			return p.Names[1], true
+			return p.Names[1], true //nolint:uncheckedsliceindex // len(p.Names) is checked above
 		}
 	}
 	return nil, false
@@ -588,7 +744,15 @@ func AddImportEdit(pass *analysis.Pass, file *ast.File, pkg string) (analysis.Te
 			if !ok || genDecl.Tok != token.IMPORT || genDecl.Lparen.IsValid() {
 				continue
 			}
-			specText := NodeText(pass.Fset, genDecl.Specs[0])
+			var spec ast.Spec
+			for _, candidate := range genDecl.Specs {
+				spec = candidate
+				break
+			}
+			if spec == nil {
+				continue
+			}
+			specText := NodeText(pass.Fset, spec)
 			if specText == "" {
 				continue
 			}
@@ -702,31 +866,6 @@ func SwapImportEdits(fset *token.FileSet, file *ast.File, addPkg, removePkg stri
 	}
 }
 
-// BuildContainsFix builds the suggested fix rewriting a comparison to
-// strings.Contains. fixMessage is used as the SuggestedFix.Message field so
-// callers can identify the rewritten function (e.g. "Index" vs "Count").
-func BuildContainsFix(files []*ast.File, expr *ast.BinaryExpr, pkgText, sText, subText string, negated bool, fixMessage string) []analysis.SuggestedFix {
-	if HasOverlappingComment(files, expr.Pos(), expr.End()) {
-		return nil
-	}
-
-	var replacement string
-	if negated {
-		replacement = "!" + pkgText + ".Contains(" + sText + ", " + subText + ")"
-	} else {
-		replacement = pkgText + ".Contains(" + sText + ", " + subText + ")"
-	}
-
-	return []analysis.SuggestedFix{{
-		Message: fixMessage,
-		TextEdits: []analysis.TextEdit{{
-			Pos:     expr.Pos(),
-			End:     expr.End(),
-			NewText: []byte(replacement),
-		}},
-	}}
-}
-
 // UniverseErrorInterface returns the built-in error interface type, or nil if
 // it cannot be resolved from types.Universe.
 func UniverseErrorInterface() *types.Interface {
@@ -743,7 +882,7 @@ func UniverseErrorInterface() *types.Interface {
 
 // StringLitValue returns the unquoted string value of a string-literal AST node.
 func StringLitValue(expr ast.Expr) (string, bool) {
-	lit, ok := expr.(*ast.BasicLit)
+	lit, ok := UnwrapParenExpr(expr).(*ast.BasicLit)
 	if !ok || lit.Kind != token.STRING {
 		return "", false
 	}

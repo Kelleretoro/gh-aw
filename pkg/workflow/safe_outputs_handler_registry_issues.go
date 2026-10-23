@@ -109,6 +109,8 @@ var issueHandlerRegistry = map[string]handlerBuilder{
 			AddStringSlice("allowed", c.Allowed).
 			AddBoolPtr("issue_intent", c.IssueIntent).
 			AddIfNotEmpty("target", c.Target).
+			AddStringSlice("required_labels", c.RequiredLabels).
+			AddIfNotEmpty("required_title_prefix", c.RequiredTitlePrefix).
 			AddIfNotEmpty("target-repo", c.TargetRepoSlug).
 			AddStringSlice("allowed_repos", c.AllowedRepos).
 			AddIfNotEmpty("github-token", resolveHandlerGitHubToken(c.GitHubApp, "set-issue-type", c.GitHubToken)).
@@ -149,6 +151,7 @@ var issueHandlerRegistry = map[string]handlerBuilder{
 		c := cfg.AddLabels
 		config := newHandlerConfigBuilder().
 			AddTemplatableInt("max", c.Max).
+			AddTemplatableInt("max_labels", c.MaxLabels).
 			AddStringSlice("allowed", c.Allowed).
 			AddStringSlice("blocked", c.Blocked).
 			AddBoolPtr("issue_intent", c.IssueIntent).

@@ -10,6 +10,12 @@ func awfSupportsExcludeEnv(firewallConfig *FirewallConfig) bool {
 	return awfVersionAtLeast(firewallConfig, constants.AWFExcludeEnvMinVersion)
 }
 
+// awfSupportsSessionStateDir returns true when the effective AWF version supports
+// --session-state-dir (introduced in AWF v0.25.15).
+func awfSupportsSessionStateDir(firewallConfig *FirewallConfig) bool {
+	return awfVersionAtLeast(firewallConfig, constants.AWFSessionStateDirMinVersion)
+}
+
 // awfVersionAtLeast returns true when the effective AWF version is at or above minVersion.
 //
 // If firewallConfig has no version set, DefaultFirewallVersion is used. "latest" always
@@ -44,6 +50,13 @@ func awfSupportsDockerHostPathPrefix(firewallConfig *FirewallConfig) bool {
 // apiProxy.enableTokenSteering.
 func awfSupportsTokenSteering(firewallConfig *FirewallConfig) bool {
 	return awfVersionAtLeast(firewallConfig, constants.AWFTokenSteeringMinVersion)
+}
+
+// awfSupportsAgentTimeoutSteering returns true when the effective AWF version
+// sends runtime steering notices from container.agentTimeout, so the compiler
+// can emit agentTimeout for every container runtime.
+func awfSupportsAgentTimeoutSteering(firewallConfig *FirewallConfig) bool {
+	return awfVersionAtLeast(firewallConfig, constants.AWFAgentTimeoutSteeringMinVersion)
 }
 
 // awfSupportsChrootConfig returns true when the effective AWF version supports
@@ -87,6 +100,12 @@ func awfSupportsContainerImages(firewallConfig *FirewallConfig) bool {
 // supports the "router" role in the container.images manifest.
 func awfSupportsRouterImageRole(firewallConfig *FirewallConfig) bool {
 	return awfVersionAtLeast(firewallConfig, constants.AWFRouterImageRoleMinVersion)
+}
+
+// awfSupportsRouterReleaseImage returns true when AWF publishes its router image
+// in the versioned gh-aw-firewall registry.
+func awfSupportsRouterReleaseImage(firewallConfig *FirewallConfig) bool {
+	return awfVersionAtLeast(firewallConfig, constants.AWFRouterReleaseImageMinVersion)
 }
 
 // awfSupportsCloudHypervisorFilesystemAllowWrite returns true when the effective

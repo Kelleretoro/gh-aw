@@ -72,6 +72,9 @@ metadata:
 Keys must be 1–64 characters; values are string-only, up to 1024 characters.
 `metadata.docs`, when present, must be an absolute HTTPS URL. The compiler preserves
 it in generated lock-file metadata without fetching it or changing workflow execution.
+To explicitly reuse a metadata value in OTLP custom span or resource attributes, use
+a whole-value `${{ github.aw.metadata.<key> }}` reference; it resolves against this
+root workflow's metadata at compile time. Metadata is not exported automatically.
 
 ### Trigger Events (`on:`)
 
@@ -122,6 +125,18 @@ Supported scalar types are `string`, `number`, `boolean`, `choice`, and `array`.
 Add deterministic steps before or after agentic execution, or define full custom GitHub Actions jobs that run before the agent. See [Custom Steps and Jobs](/gh-aw/reference/steps-jobs/) for complete documentation.
 
 The `jobs:` map can also target compiler-generated built-in jobs such as `agent`, `activation`, and `safe_outputs` for additive customization. In particular, `jobs.agent.needs` and `jobs.agent.if` let you gate the generated agent job on a custom setup job while preserving compiler-managed dependencies.
+
+### Pre-start Docker Image Pull Policy (`docker-image-pull-policy:`)
+
+By default, the generated agent and detection jobs pre-pull their Docker images (`docker-image-pull-policy: always`). Set `docker-image-pull-policy: never` to require those images to be present locally instead:
+
+```yaml
+docker-image-pull-policy: never
+```
+
+In `never` mode, every pre-start image must be a registry-qualified `repository[:tag]@sha256:<64 lowercase hex>` reference. The download helper checks that Docker can inspect each exact reference and that its `RepoDigests` contains the exact `repository@sha256:...` entry. It validates **all** images before tagging their requested local aliases and never falls back to a pull. A versioned reference creates only its versioned alias, not `:latest`; ensure downstream consumers use that alias. Missing metadata, unpinned images, conflicting aliases, or failed inspections stop the job.
+
+Use `jobs.agent.pre-steps` and `jobs.detection.pre-steps` to restore independently verified image content on each isolated consumer runner **before** its download step; if a job depends on a separate acquisition job, configure its `needs` accordingly. Preloading with `docker save/load` is not necessarily sufficient: that transport may discard registry `RepoDigests`, which this mode refuses to fabricate. This setting only checks local Docker metadata; it does not independently verify image bytes, provenance, or scanner policy, or prevent other startup components from contacting registries. Use an isolated disposable Docker daemon and verify the full handoff and startup path separately.
 
 ### Cache Configuration (`cache:`)
 
@@ -209,9 +224,13 @@ engine:
 
 See [Harness Retry and Post-result Watchdog Policy](/gh-aw/reference/engines/#harness-retry-and-post-result-watchdog-policy) for defaults, units, and the equivalent `GH_AW_HARNESS_*` environment variables.
 
+### Model Routing (`engine.model-routing:`)
+
+Enables experimental per-run model and reasoning-effort selection for the Copilot, Claude, Codex, and pi engines when they use GitHub Copilot inference, with the AWF firewall. Requires `goal` (`cost` or `cost-speed`) and `mode` (`economy`, `balanced`, `robust`, or `auto`). The optional `allowed-models` list takes exact model names and limits the router's candidates for the main agent; it is not a request policy. Put patterns such as `gpt-*` in [`models.allowed` or `models.blocked`](/gh-aw/reference/glossary/#model-policy-modelsallowed-modelsblocked) instead. Overrides the fixed `engine.model` and effort settings. See [Model Routing](/gh-aw/reference/model-routing/) for value meanings, requirements, sub-agent constraints, known limitations, and logs.
+
 ### Engine Driver (`engine.driver:`)
 
-Overrides the built-in engine runtime driver for engines that support driver mode. For Copilot, setting `engine.driver` also enables SDK mode. `engine.driver` accepts either a string path/command or an inline source object with exactly one of `node:`, `python:`, `go:`, or `java:`. See [AI Engines](/gh-aw/reference/engines/#copilot-sdk-support) for driver requirements and supported formats.
+Overrides the built-in engine runtime driver for engines that support driver mode. For Copilot, setting `engine.driver` also enables SDK mode. `engine.driver` accepts either a string path/command or an inline source object with exactly one of `node:`, `python:`, `go:`, or `java:`. See [AI Engines](/gh-aw/reference/engines/copilot/#copilot-sdk-support) for driver requirements and supported formats.
 
 ```yaml wrap
 engine:
@@ -223,7 +242,7 @@ engine:
 
 ### Engine Extensions (`engine.extensions:`)
 
-Lists engine-specific plugins to install before the agent runs. Only the Pi engine reads this field; each entry is an npm package name passed to `pi install <extension>`. Other engines ignore it. See [Pi Extensions](/gh-aw/reference/engines/#pi-extensions-extensions) for details.
+Lists engine-specific plugins to install before the agent runs. Only the Pi engine reads this field; each entry is an npm package name passed to `pi install <extension>`. Other engines ignore it. See [Pi Extensions](/gh-aw/reference/engines/pi/#pi-extensions-extensions) for details.
 
 ```yaml wrap
 engine:
@@ -310,7 +329,7 @@ plugins:
 
 Entries use `owner/repository[/path]@ref` syntax. The ref is required and may be a branch, tag, or full 40-character lowercase commit SHA. During compilation, gh-aw resolves every branch or tag to a commit SHA. Compilation fails if a reference cannot be resolved, so generated workflows never install a plugin from a moving ref.
 
-The agent job checks out each pinned plugin immediately after installing the engine, then makes it available the way the engine expects: GitHub Copilot CLI runs `copilot plugin install`, Claude Code loads each plugin directory through `--plugin-dir`, and OpenAI Codex CLI registers a local, single-plugin marketplace for each checkout (reading the plugin's declared name from its `plugin.json` manifest) and runs `codex plugin marketplace add` followed by `codex plugin add`. Imported engine definitions declare their own handling with a `behaviors.plugins` block, so the shared Cursor and Kiro engines stage plugins in the folder their CLI scans. Using `plugins:` with an engine that has no Agent Plugins support is a compile-time error.
+The agent job checks out each pinned plugin immediately after installing the engine, then makes it available the way the engine expects: GitHub Copilot CLI runs `copilot plugin install`, Claude Code loads each plugin directory through `--plugin-dir`, and OpenAI Codex CLI registers a local, single-plugin marketplace for each checkout (reading the plugin's declared name from its `plugin.json` manifest) and runs `codex plugin marketplace add` followed by `codex plugin add`. Imported engine definitions declare their own handling with a `behaviors.plugins` block, so the shared Cursor engine stages plugins in the folder its CLI scans. The Kiro sample selects V2 and does not support V3-only Powers plugins. Using `plugins:` with an engine that has no Agent Plugins support is a compile-time error.
 
 Shared agentic workflows may also declare plugins. When the same plugin path is declared more than once, identical refs are deduplicated and compatible semantic versions are merged to the highest version. Incompatible major versions or conflicting non-semver refs fail compilation.
 
@@ -503,7 +522,13 @@ max-daily-ai-credits:
     private-key: ${{ secrets.APP_PRIVATE_KEY }}
 ```
 
-By default, the activation job fails when the guardrail cannot determine the complete 24-hour AI Credits total. Set `continue-on-error: true` to report the unknown total as a warning and allow the workflow to continue:
+Accounting reads retry transient server and network/timeout failures up to three total attempts with short backoff. If a historical run's accounting remains unavailable, a positive `max-ai-credits` value supplies a conservative per-run estimate, reported separately from measured usage. Later scans reinspect estimates. Permission failures, rate limiting, quota-reserve stops, and explicit server retry restrictions do not use this fallback.
+
+Scan snapshots from matching default-branch `issues` and `issue_comment` runs can be reused after repository, workflow, and producer validation. A fresh, complete run listing still determines which observations count toward the 24-hour total.
+
+Activation logs report retry delays, recovery or stop reasons, and snapshot-producer validation or missing-data decisions. These diagnostics omit credentials, signed download URLs, and response bodies.
+
+By default, the activation job fails when the guardrail cannot determine the complete 24-hour AI Credits total, including when authoritative run history remains unreadable or no positive per-run fallback is available. Set `continue-on-error: true` to report the unknown total as a warning and allow the workflow to continue:
 
 ```yaml wrap
 max-daily-ai-credits:
@@ -639,7 +664,7 @@ Each runtime takes a required `version` string plus optional `action-repo` and `
 |---------|----------------|---------------------|
 | `node` | 24 | `actions/setup-node@v7` |
 | `python` | 3.12 | `actions/setup-python@v5` |
-| `go` | 1.25 | `actions/setup-go@v5` |
+| `go` | Root `go.mod`, or 1.26 if absent | `actions/setup-go@v7` |
 | `uv` | latest | `astral-sh/setup-uv@v5` |
 | `bun` | 1.1 | `oven-sh/setup-bun@v2` |
 | `deno` | 2.x | `denoland/setup-deno@v2` |
@@ -654,7 +679,7 @@ Override one or more runtimes, optionally with a custom setup action:
 ```yaml wrap
 runtimes:
   node:
-    version: "20"
+    version: "24"
   python:
     version: "3.12"
     action-repo: "actions/setup-python"
@@ -662,6 +687,8 @@ runtimes:
 ```
 
 Omitted runtimes use the defaults above. Runtimes from imported shared workflows are merged with your workflow's configuration.
+
+When Go is required and `runtimes.go.version` is omitted, the generated setup step uses `go-version-file: go.mod` if the repository root contains that file and the workflow checks out the same repository at workspace root before setup without an explicit ref. Sparse checkouts qualify when they retain root files (cone mode) or include `go.mod` (non-cone mode). Unverified checkout refs, repositories, or layouts use the default version. An explicit `runtimes.go.version` takes precedence.
 
 ### `run-install-scripts`
 
@@ -745,6 +772,8 @@ Enable experimental or optional compiler and runtime behaviors as key-value pair
 ### Strict Mode (`strict:`)
 
 Enables enhanced security validation for production workflows. Default: `true`.
+
+For `pull_request_target` workflows, the `on.pull_request_target` options documented in [Explicit Trusted Checkout Policy](/gh-aw/reference/checkout/#explicit-trusted-checkout-policy) can declare fixed trusted checkout pairs and acknowledge the trigger-specific warning without disabling strict mode.
 
 ```yaml wrap
 strict: false  # Disable enhanced security validation for development/testing

@@ -25,6 +25,7 @@ const {
   fetchModelsFromUrl,
   waitForProviderListenerReady,
   getCatalogModelEntry,
+  hasAzureOIDCProviderEndpoint,
   hasAPIProxyLocalhostAlias,
   inferProviderTypeForModel,
   inferWireApiForModel,
@@ -36,10 +37,20 @@ const {
 } = require("./awf_reflect.cjs");
 
 describe("awf_reflect.cjs", () => {
+  describe("hasAzureOIDCProviderEndpoint", () => {
+    it("requires a configured resolved endpoint using Azure OIDC", () => {
+      const endpoint = { provider: "openai", configured: true, auth_type: "github-oidc/azure", port: 10000 };
+      expect(hasAzureOIDCProviderEndpoint({ endpoints: [endpoint] }, "openai")).toBe(true);
+      expect(hasAzureOIDCProviderEndpoint({ endpoints: [{ ...endpoint, auth_type: "static-key" }] }, "openai")).toBe(false);
+      expect(hasAzureOIDCProviderEndpoint({ endpoints: [{ ...endpoint, configured: false }] }, "openai")).toBe(false);
+      expect(hasAzureOIDCProviderEndpoint({ endpoints: [endpoint] }, "anthropic")).toBe(false);
+    });
+  });
+
   describe("constants", () => {
     it("exports expected default values", () => {
       expect(AWF_API_PROXY_REFLECT_URL).toBe("http://api-proxy:10000/reflect");
-      expect(AWF_REFLECT_OUTPUT_PATH).toBe(path.join(process.env.RUNNER_TEMP || os.tmpdir(), "awf-reflect.json"));
+      expect(AWF_REFLECT_OUTPUT_PATH).toBe("/tmp/gh-aw/agent/awf-reflect.json");
       expect(AWF_REFLECT_TIMEOUT_MS).toBe(60000);
       expect(AWF_MODELS_URL_TIMEOUT_MS).toBe(3000);
       expect(AWF_MODELS_URL_MAX_ATTEMPTS).toBe(5);
@@ -880,6 +891,22 @@ describe("awf_reflect.cjs", () => {
       expect(entry).toEqual({ provider_type: "openai", wire_api: "responses", cost: {} });
     });
 
+    it("looks up utility variants through their base model after exact matches", () => {
+      const modelsJson = {
+        providers: {
+          "github-copilot": {
+            models: {
+              "gpt-5.6-luna": { wire_api: "responses" },
+              "gpt-5.6-luna-utility": { wire_api: "completions" },
+            },
+          },
+        },
+      };
+      expect(getCatalogModelEntry(modelsJson, "gpt-5.6-luna-utility?effort=high", "github-copilot")).toEqual({ wire_api: "completions" });
+      delete modelsJson.providers["github-copilot"].models["gpt-5.6-luna-utility"];
+      expect(getCatalogModelEntry(modelsJson, "gpt-5.6-luna-utility", "github-copilot")).toEqual({ wire_api: "responses" });
+    });
+
     it("uses the requested provider when duplicate model names exist", () => {
       const modelsJson = {
         providers: {
@@ -927,13 +954,90 @@ describe("awf_reflect.cjs", () => {
       expect(inferWireApiForModel("anthropic", "claude-opus-5", { wire_api: "responses" })).toBeUndefined();
     });
 
-    it("falls back to completions when the catalog value is invalid or absent", () => {
-      expect(inferWireApiForModel("openai", "gpt-5.5", { wire_api: "grpc" })).toBe("completions");
-      expect(inferWireApiForModel("openai", "gpt-5.5", null)).toBe("completions");
+    it("defaults GPT-5+ models to Responses when the catalog value is invalid or absent", () => {
+      expect(inferWireApiForModel("openai", "gpt-5.5", { wire_api: "grpc" })).toBe("responses");
+      expect(inferWireApiForModel("openai", "gpt-5.5", null)).toBe("responses");
+      expect(inferWireApiForModel("openai", "gpt-7-preview", null)).toBe("responses");
+      expect(inferWireApiForModel("openai", "gpt-4.1", null)).toBe("completions");
+    });
+
+    it.each(["gpt-5-mini", "gpt-6-luna"])("uses the bundled Responses API metadata for %s", model => {
+      const modelsJson = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, "models.json"), "utf8"));
+      const catalogEntry = getCatalogModelEntry(modelsJson, model, "openai");
+      expect(catalogEntry.wire_api).toBe("responses");
+      expect(inferWireApiForModel("openai", model, catalogEntry)).toBe("responses");
     });
   });
 
   describe("resolveMultiProviderFromReflect", () => {
+    const splitEndpoint = {
+      provider: "copilot",
+      configured: true,
+      port: 10002,
+      models: ["claude-haiku-4.5", "gpt-5.6-luna", "gpt-5-mini", "gpt-4o", "unsupported"],
+      routing_models: [
+        { model_id: "claude-haiku-4.5", supported_endpoints: ["/chat/completions", "/v1/messages"] },
+        { model_id: "gpt-5.6-luna", supported_endpoints: ["/responses", "ws:/responses"] },
+        { model_id: "gpt-5-mini", supported_endpoints: ["/chat/completions", "/responses", "ws:/responses"] },
+        { model_id: "gpt-4o", supported_endpoints: ["/chat/completions", "/responses"] },
+        { model_id: "unsupported", supported_endpoints: ["/v1/messages"] },
+      ],
+    };
+
+    it("splits Copilot models using HTTP endpoint support and per-model inference", () => {
+      const result = resolveMultiProviderFromReflect({ reflectData: { endpoints: [splitEndpoint] }, model: "gpt-5.6-luna" });
+      expect(result.providers).toEqual([
+        { name: "copilot-responses", type: "openai", baseUrl: "http://api-proxy:10002", wireApi: "responses" },
+        { name: "copilot-completions", type: "openai", baseUrl: "http://api-proxy:10002", wireApi: "completions" },
+      ]);
+      expect(result.models).toEqual([
+        { id: "claude-haiku-4.5", provider: "copilot-completions" },
+        { id: "gpt-5.6-luna", provider: "copilot-responses" },
+        { id: "gpt-5-mini", provider: "copilot-responses" },
+        { id: "gpt-4o", provider: "copilot-completions" },
+      ]);
+      expect(result.model).toBe("copilot-responses/gpt-5.6-luna");
+    });
+
+    it.each(["gpt-5.6-luna", "copilot/gpt-5.6-luna", "copilot-responses/gpt-5.6-luna"])("rejects an unsupported endpoint override for %s", model => {
+      expect(() => resolveMultiProviderFromReflect({ reflectData: { endpoints: [splitEndpoint] }, model, wireApi: "completions" })).toThrow(
+        'Model endpoint mismatch: model "gpt-5.6-luna" with COPILOT_PROVIDER_WIRE_API=completions requires /chat/completions; supported endpoints: /responses, ws:/responses'
+      );
+    });
+
+    it("routes a compatible override only for the selected model, not its siblings", () => {
+      const model = "gpt-5-mini";
+      const result = resolveMultiProviderFromReflect({ reflectData: { endpoints: [splitEndpoint] }, model, wireApi: "completions" });
+      expect(result.model).toBe("copilot-completions/gpt-5-mini");
+      expect(result.models.find(entry => entry.id === "gpt-5.6-luna").provider).toBe("copilot-responses");
+      expect(result.models.find(entry => entry.id === "claude-haiku-4.5").provider).toBe("copilot-completions");
+      expect(result.providers[0].wireApi).toBe("responses");
+    });
+
+    it("uses top-level routing model metadata when an endpoint does not have it", () => {
+      const result = resolveMultiProviderFromReflect({
+        reflectData: {
+          endpoints: [{ provider: "github", configured: true, port: 10002, models: ["gpt-5.6-luna"] }],
+          routing_models: [{ model_id: "gpt-5.6-luna", supported_endpoints: ["/chat/completions"] }],
+        },
+      });
+      expect(result.model).toBe("copilot-completions/gpt-5.6-luna");
+    });
+
+    it("preserves a qualified API preference for a both-supported model instead of selecting the first model", () => {
+      const reflectData = { endpoints: [splitEndpoint] };
+      expect(resolveMultiProviderFromReflect({ reflectData, model: "copilot-responses/gpt-4o" }).model).toBe("copilot-responses/gpt-4o");
+      expect(resolveMultiProviderFromReflect({ reflectData, model: "copilot-completions/gpt-5-mini" }).model).toBe("copilot-completions/gpt-5-mini");
+      expect(resolveMultiProviderFromReflect({ reflectData, model: "copilot-responses/gpt-4o", wireApi: "completions" }).model).toBe("copilot-completions/gpt-4o");
+    });
+
+    it("qualifies a fallback and preserves valid endpoint-qualified selections", () => {
+      const reflectData = { endpoints: [splitEndpoint, { ...splitEndpoint, port: 10003 }] };
+      expect(resolveMultiProviderFromReflect({ reflectData }).model).toBe("copilot-completions/claude-haiku-4.5");
+      expect(resolveMultiProviderFromReflect({ reflectData, model: "unknown" }).model).toBe("");
+      expect(resolveMultiProviderFromReflect({ reflectData, model: "copilot-responses-1/gpt-5-mini" }).model).toBe("copilot-responses-1/gpt-5-mini");
+    });
+
     it("returns null when reflectData is null", () => {
       const logs = [];
       const result = resolveMultiProviderFromReflect({ reflectData: null, logger: msg => logs.push(msg) });
@@ -946,8 +1050,8 @@ describe("awf_reflect.cjs", () => {
         reflectData: { endpoints: [{ provider: "copilot", port: 10002, configured: true, models: ["gpt-5.4"] }] },
       });
       expect(result).not.toBeNull();
-      expect(result.providers).toHaveLength(1);
-      expect(result.model).toBe("gpt-5.4");
+      expect(result.providers).toHaveLength(2);
+      expect(result.model).toBe("copilot-responses/gpt-5.4");
     });
 
     it("rewrites provider baseUrl to the host bridge in sbx HOSTALIASES mode", () => {
@@ -1008,7 +1112,7 @@ describe("awf_reflect.cjs", () => {
         ],
       };
       const result = resolveMultiProviderFromReflect({ reflectData });
-      expect(result.model).toBe("gpt-5.4");
+      expect(result.model).toBe("openai/gpt-5.4");
     });
 
     it("prefers the configured model when it appears in model list", () => {
@@ -1019,10 +1123,12 @@ describe("awf_reflect.cjs", () => {
         ],
       };
       const result = resolveMultiProviderFromReflect({ reflectData, model: "claude-sonnet-4.6" });
-      expect(result.model).toBe("claude-sonnet-4.6");
+      expect(result.model).toBe("anthropic/claude-sonnet-4.6");
     });
 
-    it("falls back to first model when configured model is not found in list", () => {
+    // Previously asserted a silent fallback to the first model (gh-aw#70317): a configured
+    // model that is not found must never be replaced by a different model.
+    it("does not fall back to another model when the configured model is not found in list", () => {
       const reflectData = {
         endpoints: [
           { provider: "openai", port: 10001, configured: true, models: ["gpt-5.4"] },
@@ -1030,7 +1136,58 @@ describe("awf_reflect.cjs", () => {
         ],
       };
       const result = resolveMultiProviderFromReflect({ reflectData, model: "nonexistent-model" });
-      expect(result.model).toBe("gpt-5.4");
+      expect(result.model).toBe("");
+      expect(result.configuredModelNotFound).toBe(true);
+    });
+
+    describe("recorded /reflect from run 39191157830 (claude-opus-4.8 retired)", () => {
+      // Agent artifact sandbox/firewall/awf-reflect.json of
+      // https://github.com/github/gh-aw/actions/runs/39191157830: models_fetch_complete true,
+      // 40 Copilot models (claude-haiku-4.5 first), no claude-opus-4.8.
+      const recordedReflect = () => JSON.parse(JSON.stringify(require("./fixtures/awf-reflect-sdk-39191157830.json")));
+      const resolve = (model, reflectData = recordedReflect()) => resolveMultiProviderFromReflect({ reflectData, model, logger: () => {} });
+
+      it("case 1: configured claude-opus-4.8 chooses no primary model", () => {
+        const result = resolve("claude-opus-4.8");
+        expect(result.model).toBe("");
+        expect(result.configuredModelNotFound).toBe(true);
+      });
+
+      it("case 2: configured copilot/claude-opus-4.8 chooses no primary model", () => {
+        const result = resolve("copilot/claude-opus-4.8");
+        expect(result.model).toBe("");
+        expect(result.configuredModelNotFound).toBe(true);
+      });
+
+      it("case 3: no configured model chooses the first model", () => {
+        const result = resolve("");
+        expect(result.model).toBe("copilot-completions/claude-haiku-4.5");
+        expect(result.configuredModelNotFound).toBeUndefined();
+      });
+
+      it("case 4: configured live copilot/gpt-5.4 is unchanged", () => {
+        expect(resolve("copilot/gpt-5.4").model).toBe("copilot-responses/gpt-5.4");
+      });
+
+      it("case 5: configured qualified live copilot-completions/gpt-5.4 keeps its wire API", () => {
+        const result = resolve("copilot-completions/gpt-5.4");
+        expect(result.model).toBe("copilot-completions/gpt-5.4");
+        expect(result.models).toContainEqual({ id: "gpt-5.4", provider: "copilot-completions" });
+        expect(result.providers.find(provider => provider.name === "copilot-completions")).toMatchObject({ wireApi: "completions" });
+      });
+
+      // Derived: the recording's unconfigured openai endpoint is configured with a model list
+      // (no recorded run with this shape exists).
+      it("case 8: a model live only on a non-Copilot configured endpoint is unchanged", () => {
+        const reflectData = recordedReflect();
+        Object.assign(
+          reflectData.endpoints.find(endpoint => endpoint.provider === "openai"),
+          { configured: true, models: ["gpt-6.1-pro"] }
+        );
+        const result = resolve("gpt-6.1-pro", reflectData);
+        expect(result.model).toBe("openai/gpt-6.1-pro");
+        expect(result.configuredModelNotFound).toBeUndefined();
+      });
     });
 
     it("derives provider baseUrl from models_url origin when available", () => {
@@ -1058,9 +1215,105 @@ describe("awf_reflect.cjs", () => {
         },
       };
       const result = resolveMultiProviderFromReflect({ reflectData, modelsJson });
-      expect(result.providers[0]).toMatchObject({ name: "copilot", type: "openai", wireApi: "responses" });
-      expect(result.providers[1]).toMatchObject({ name: "anthropic", type: "anthropic" });
-      expect(result.providers[1]).not.toHaveProperty("wireApi");
+      expect(result.providers[0]).toMatchObject({ name: "copilot-responses", type: "openai", wireApi: "responses" });
+      expect(result.providers[2]).toMatchObject({ name: "anthropic", type: "anthropic" });
+      expect(result.providers[2]).not.toHaveProperty("wireApi");
+    });
+
+    it("infers wireApi from the base catalog model for a Copilot utility variant", () => {
+      const reflectData = {
+        endpoints: [{ provider: "copilot", port: 10002, configured: true, models: ["gpt-5.6-luna-utility"] }],
+      };
+      const modelsJson = {
+        providers: {
+          "github-copilot": { models: { "gpt-5.6-luna": { provider_type: "openai", wire_api: "responses", cost: {} } } },
+        },
+      };
+      const result = resolveMultiProviderFromReflect({
+        model: "gpt-5.6-luna-utility",
+        reflectData,
+        modelsJson,
+      });
+      expect(result.providers[0]).toMatchObject({ name: "copilot-responses", type: "openai", wireApi: "responses" });
+    });
+
+    it.each([null, { providers: { "github-copilot": { models: { "gpt-6-luna": { wire_api: "completions" } } } } }])("honors an explicit Responses API for gpt-6-luna with a missing or stale catalog", modelsJson => {
+      const result = resolveMultiProviderFromReflect({
+        model: "gpt-6-luna",
+        wireApi: "responses",
+        reflectData: { endpoints: [{ provider: "copilot", port: 10002, configured: true, models: ["gpt-6-luna"] }] },
+        modelsJson,
+      });
+      expect(result.model).toBe("copilot-responses/gpt-6-luna");
+      expect(result.providers[0]).toMatchObject({ name: "copilot-responses", type: "openai", wireApi: "responses" });
+    });
+
+    it("applies the wire API override only to the selected provider", () => {
+      const result = resolveMultiProviderFromReflect({
+        model: "gpt-6-luna",
+        wireApi: "responses",
+        reflectData: {
+          endpoints: [
+            { provider: "copilot", port: 10001, configured: true, models: ["gpt-4o"] },
+            { provider: "copilot", port: 10002, configured: true, models: ["gpt-6-luna"] },
+          ],
+        },
+      });
+      expect(result.models[0].provider).toBe("copilot-completions");
+      expect(result.models[1].provider).toBe("copilot-responses-1");
+    });
+
+    it("honors an explicit Completions API over catalog inference", () => {
+      const result = resolveMultiProviderFromReflect({
+        model: "gpt-6-luna",
+        wireApi: "completions",
+        reflectData: { endpoints: [{ provider: "copilot", port: 10002, configured: true, models: ["gpt-6-luna"] }] },
+        modelsJson: { providers: { "github-copilot": { models: { "gpt-6-luna": { wire_api: "responses" } } } } },
+      });
+      expect(result.model).toBe("copilot-completions/gpt-6-luna");
+    });
+
+    it.each(["Responses", " responses "])("normalizes explicit wire API overrides (%s)", wireApi => {
+      const result = resolveMultiProviderFromReflect({
+        model: "gpt-6-luna",
+        wireApi,
+        reflectData: { endpoints: [{ provider: "copilot", port: 10002, configured: true, models: ["gpt-6-luna"] }] },
+      });
+      expect(result.providers[0].wireApi).toBe("responses");
+    });
+
+    it("does not apply a wire API override to the fallback primary model or select it for an unmatched model", () => {
+      const reflectData = { endpoints: [{ provider: "copilot", port: 10002, configured: true, models: ["gpt-4o"] }] };
+      expect(resolveMultiProviderFromReflect({ wireApi: "responses", reflectData }).model).toBe("copilot-completions/gpt-4o");
+      expect(resolveMultiProviderFromReflect({ model: "nonexistent-model", wireApi: "responses", reflectData }).model).toBe("");
+    });
+
+    it("infers the fallback primary model wire API instead of inheriting an automatic GPT default", () => {
+      const result = resolveMultiProviderFromReflect({
+        reflectData: { endpoints: [{ provider: "openai", port: 10002, configured: true, models: ["gpt-4.1"] }] },
+        modelsJson: { providers: { openai: { models: { "gpt-4.1": { wire_api: "completions" } } } } },
+      });
+      expect(result.model).toBe("openai/gpt-4.1");
+      expect(result.providers[0].wireApi).toBe("completions");
+    });
+
+    it("ignores wire API overrides for Anthropic providers", () => {
+      const result = resolveMultiProviderFromReflect({
+        model: "claude-opus-5",
+        wireApi: "responses",
+        reflectData: { endpoints: [{ provider: "anthropic", port: 10002, configured: true, models: ["claude-opus-5"] }] },
+      });
+      expect(result.providers[0]).not.toHaveProperty("wireApi");
+    });
+
+    it.each(["", "grpc", undefined])("keeps catalog inference for an invalid or absent wire API override (%s)", wireApi => {
+      const result = resolveMultiProviderFromReflect({
+        model: "gpt-6-luna",
+        wireApi,
+        reflectData: { endpoints: [{ provider: "copilot", port: 10002, configured: true, models: ["gpt-6-luna"] }] },
+        modelsJson: { providers: { "github-copilot": { models: { "gpt-6-luna": { wire_api: "responses" } } } } },
+      });
+      expect(result.providers[0].wireApi).toBe("responses");
     });
 
     it("handles duplicate provider names by appending a numeric suffix", () => {
@@ -1071,10 +1324,9 @@ describe("awf_reflect.cjs", () => {
         ],
       };
       const result = resolveMultiProviderFromReflect({ reflectData });
-      expect(result.providers[0].name).toBe("copilot");
-      expect(result.providers[1].name).toBe("copilot-1");
-      expect(result.models[0]).toEqual({ id: "gpt-5.4", provider: "copilot" });
-      expect(result.models[1]).toEqual({ id: "gpt-5.5", provider: "copilot-1" });
+      expect(result.providers.map(provider => provider.name)).toEqual(["copilot-responses", "copilot-completions", "copilot-responses-1", "copilot-completions-1"]);
+      expect(result.models[0]).toEqual({ id: "gpt-5.4", provider: "copilot-responses" });
+      expect(result.models[1]).toEqual({ id: "gpt-5.5", provider: "copilot-responses-1" });
     });
 
     it("skips endpoints with no resolvable baseUrl", () => {

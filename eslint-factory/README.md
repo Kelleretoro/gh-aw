@@ -14,10 +14,33 @@ This project hosts custom ESLint linters for `/actions/setup/js`.
 - `npm run lint:setup-js` — build and lint all `../actions/setup/js/**/*.cjs` files.
 - `npm run lint:setup-js:changed` — build and lint `../actions/setup/js/*.cjs` files.
 
+## Factory lifecycle and formal validation
+
+The [bounded TLA+ model and executable code comparison](../specs/eslint-factory/README.md)
+cover the dispatcher and miner/refiner/monster Claim lifecycle. Queue policy,
+authorized producers and worker profiles are provisioned externally; these
+workflows do not install an automatic miner → refiner → monster DAG. Issue
+creation is not queue admission. Workers use authenticated version-3 assignments
+with immutable original membership; permitted homogeneous batches require each
+output to retain its originating Claim scope. Completion alone is neither
+verified delivery nor a Result, and output count contracts are per Claim rather
+than automatically run-wide.
+
+The JS/TS mining goals above do not describe current scan coverage: configured
+rules apply to non-test CJS files. Most rules warn; the HTTP response-error-listener
+and ad hoc JSONL parser rules are errors. Monster's precheck marks a scan clean on ESLint exit zero,
+**including warning-only diagnostics**. Installation/build/tool failures are not
+evidence of defect-free source. Build/test/quality bars and the prompt's three
+total Copilot assignments are agent obligations, not guarantees proved by the
+finite model. The linked checker records assumptions, source/tool identities,
+negative controls and validated readable traces without live effects.
+
 ## Rules
 
 | Rule | Description |
 |---|---|
+| [`no-ad-hoc-jsonl-parser`](#no-ad-hoc-jsonl-parser) | Require shared JSONL iterators instead of manual line decoding or per-record parser restarts |
+| [`no-async-foreach-callback`](#no-async-foreach-callback) | Disallow `async` callbacks passed to `Array.prototype.forEach()`, which ignores returned promises |
 | [`no-core-exportvariable-non-string`](#no-core-exportvariable-non-string) | Require explicit string values for `core.exportVariable` calls |
 | [`no-core-setoutput-non-string`](#no-core-setoutput-non-string) | Require explicit string values for `core.setOutput` calls |
 | [`no-empty-catch-block`](#no-empty-catch-block) | Disallow undocumented empty `catch` blocks |
@@ -28,7 +51,11 @@ This project hosts custom ESLint linters for `/actions/setup/js`.
 | [`no-json-stringify-equality`](#no-json-stringify-equality) | Disallow comparing two `JSON.stringify()` results for equality |
 | [`no-json-stringify-set-or-map`](#no-json-stringify-set-or-map) | Disallow `JSON.stringify()` directly on `Set` or `Map` instances |
 | [`no-math-minmax-array-spread`](#no-math-minmax-array-spread) | Disallow spreading a non-literal array into `Math.min(...)` / `Math.max(...)` |
+| [`no-map-parseint-callback`](#no-map-parseint-callback) | Disallow passing `parseInt` directly as an array callback, because the element index is used as the radix |
 | [`no-misplaced-error-code-definition`](#no-misplaced-error-code-definition) | Require exported error-code constants to be defined in `error_codes.cjs` |
+| [`no-single-char-string-replace`](#no-single-char-string-replace) | Disallow `String.prototype.replace()` with a single-character string pattern, which replaces only the first occurrence |
+| [`no-split-filter-trim-without-trim-map`](#no-split-filter-trim-without-trim-map) | Require split values to be trimmed before filtering out empty entries |
+| [`no-string-fallback-for-non-string-message`](#no-string-fallback-for-non-string-message) | Disallow stringifying a container object instead of its non-string `.message` value in a fallback |
 | [`no-throw-plain-object`](#no-throw-plain-object) | Disallow throwing plain object literals |
 | [`no-unsafe-catch-error-property`](#no-unsafe-catch-error-property) | Disallow unsafe property access on `catch` error bindings |
 | [`no-unsafe-promise-catch-error-property`](#no-unsafe-promise-catch-error-property) | Disallow unsafe property access in promise rejection handlers |
@@ -49,6 +76,7 @@ This project hosts custom ESLint linters for `/actions/setup/js`.
 | [`require-fs-close-sync`](#require-fs-close-sync) | Require `fs.openSync(...)` file descriptors to be closed with `fs.closeSync(fd)` in the same function |
 | [`require-fs-io-try-catch`](#require-fs-io-try-catch) | Require try/catch around `fs.statSync`, `readdirSync`, `copyFileSync`, `unlinkSync`, and `renameSync` |
 | [`require-fs-sync-try-catch`](#require-fs-sync-try-catch) | Require try/catch around `fs.readFileSync`, `writeFileSync`, and `appendFileSync` |
+| [`require-http-response-error-listener`](#require-http-response-error-listener) | Require an `'error'` listener on response objects in `http` / `https` request and get callbacks |
 | [`require-json-parse-try-catch`](#require-json-parse-try-catch) | Require try/catch around `JSON.parse(...)` calls |
 | [`require-mkdirsync-try-catch`](#require-mkdirsync-try-catch) | Require try/catch around `fs.mkdirSync` calls |
 | [`require-mkdtempsync-try-catch`](#require-mkdtempsync-try-catch) | Require try/catch around `fs.mkdtempSync` calls |
@@ -78,6 +106,27 @@ This project hosts custom ESLint linters for `/actions/setup/js`.
 | [`require-page-counter-increment-in-while-true-loop`](#require-page-counter-increment-in-while-true-loop) | Require page counters to advance in manual `while (true)` pagination loops |
 | [`require-getexecoutput-exitcode-check`](#require-getexecoutput-exitcode-check) | Require `exitCode` / returned exit code to be read after `getExecOutput()` or `exec()` with `{ ignoreReturnCode: true }` |
 | [`prefer-actions-exec-over-child-process`](#prefer-actions-exec-over-child-process) | Prefer `@actions/exec` over `child_process` to spawn processes that run to completion |
+| [`no-unguarded-async-timer-callback`](#no-unguarded-async-timer-callback) | Require async timer callbacks to wrap their entire body in try/catch |
+| [`require-finite-check-before-date-toisostring`](#require-finite-check-before-date-toisostring) | Validate dynamic dates before calling `toISOString()` or `toJSON()` |
+
+### `no-ad-hoc-jsonl-parser`
+
+Reject `JSON.parse` on records obtained from newline splitting, shared raw-line
+readers, `LineFramer`, or `readline`. Detect inline and named array callbacks,
+`"line"` event handlers, indexed line-array access, simple local aliases, and
+local helper calls receiving those records.
+Also reject restarting a shared JSONL parser inside those per-line contexts.
+CommonJS and ESM helper imports, including aliases, are resolved by binding.
+
+Pass the complete text to `iterateJsonl` or `iterateJsonlEvents`, use
+`readJsonlFile` for files, or consume `streamJsonl` for chunk streams. Callback
+protocols keep one `JsonlParser` instance per stream. Iterating parsed records
+normally and reading independent files in an outer loop are allowed.
+
+The central `jsonl_helpers.cjs` implementation is exempt. Whole-document JSON
+parsing, unrelated delimiters, shadowed bindings, and unknown input sources are
+not reported. The rule does not perform whole-program data-flow analysis or
+automatically rewrite parsing policies.
 
 ### `no-empty-catch-block`
 
@@ -114,7 +163,7 @@ Using an interpolated route bypasses Octokit's typed route dispatch, can silentl
 
 **Out of scope:**
 - `this.github.request(...)` — `this`-based member expressions are not resolved.
-- `github.request(route, ...)` — variable indirection for the route argument is not resolved.
+- `github.request(route, ...)` when `route` cannot be resolved to a write-once local initializer or a top-level `const` initializer. Top-level `let`/`var`, reassigned bindings, and enclosing-function locals are not resolved.
 - `github.request("GET /repos/".concat(owner), ...)` — `.concat()`-built routes are not inspected.
 - `github.request("GET /repos" + "/{owner}/{repo}", ...)` — compile-time constant concatenations are accepted.
 
@@ -184,6 +233,14 @@ Disallow spreading an array of unknown size into `Math.min(...)` / `Math.max(...
 
 **Safe alternative:**
 - `values.reduce((a, b) => Math.max(a, b), -Infinity)` / `values.reduce((a, b) => Math.min(a, b), Infinity)` — folds the array without expanding it into arguments, using the same identity value `Math.max()` / `Math.min()` return on an empty array so the empty-input result matches the spread form instead of throwing.
+
+### `no-map-parseint-callback`
+
+Disallow passing global `parseInt` or `Number.parseInt` directly to `.map()`, because `.map()` passes the element index as the second callback argument and `parseInt` interprets it as the radix. Use `.map(value => parseInt(value, 10))` or `.map(Number)` instead.
+
+### `no-split-filter-trim-without-trim-map`
+
+Disallow filtering delimiter-separated `.split()` results by whether `value.trim()` is nonempty without trimming the retained values. For example, `.split(",").filter(value => value.trim())` removes blank entries but preserves whitespace in the others. Use `.split(",").map(value => value.trim()).filter(Boolean)` instead.
 
 ### `no-misplaced-error-code-definition`
 
@@ -855,6 +912,8 @@ Disallow passing an interpolated template literal or dynamic string concatenatio
 - Static command strings, including string concatenation of only static expressions and chained string-normalizing methods on them.
 - Arguments passed correctly via the `args` array.
 
+Write-once local initializers and top-level `const` initializers are inspected, including aliases and precisely resolvable destructuring. Top-level `let`/`var`, reassigned bindings, and enclosing-function locals are not resolved.
+
 ### `no-setfailed-then-exit-zero`
 
 Disallow resetting the exit code to success (`process.exit(0)` or `process.exitCode = 0`) after `core.setFailed()`.
@@ -1186,3 +1245,49 @@ const branch = stdout.trim();
 - `child_process.spawn()` and `child_process.spawnSync()` — used for long-running, detached, or interactively-streamed processes (background servers, sidecars, and similar) for which `@actions/exec` has no equivalent, since `exec()` / `getExecOutput()` always wait for the command to finish before resolving
 - `exec()` / `execFile()` calls that retain the returned `ChildProcess` handle (used as a value: assigned, returned, member-accessed, passed to another call, ...) — those callers can write to `child.stdin`, stream `child.stdout`, or manage the process lifecycle, which `@actions/exec` cannot express; only calls whose result is discarded (pure callback style) are flagged
 - Calls to `exec`/`execSync`/`execFile`/`execFileSync` from any module other than `child_process` (or `node:child_process`)
+
+### `no-async-foreach-callback`
+
+Disallow `async` callbacks passed to `Array.prototype.forEach()`. `forEach()` ignores each callback's returned promise, so the work is not sequenced and rejections can go unhandled.
+
+Calls using `.forEach(...)`, `["forEach"](...)`, or a no-substitution template literal (`` [`forEach`](...) ``) are checked, including escaped spellings whose cooked value is `forEach`. Named callbacks are resolved when bound to a single, unreassigned function declaration or a `const` initialized with a function expression or arrow function. Parameters, imports, mutable bindings, and dynamically computed property names are not resolved.
+
+Callback references are resolved across any number of enclosing function scopes, respecting shadowing. Unlike the command initializer resolution used by the exec, child-process, and GitHub request rules, enclosing-function locals are included here because these unreassigned callback bindings retain their async function identity.
+
+**Flagged form:**
+```js
+items.forEach(async item => {
+  await processItem(item);
+});
+```
+
+**Safe alternatives:**
+```js
+for (const item of items) {
+  await processItem(item);
+}
+
+await Promise.all(items.map(async item => processItem(item)));
+```
+
+### `no-single-char-string-replace`
+
+Disallow `String.prototype.replace()` with a single-character string pattern, which only replaces the first occurrence. Use `replaceAll()` or a global regular expression when every occurrence should be replaced.
+
+**Flagged form:**
+```js
+const normalized = value.replace("_", "-");
+```
+
+**Safe alternative:**
+```js
+const normalized = value.replaceAll("_", "-");
+```
+
+### `no-unguarded-async-timer-callback`
+
+Disallow async callbacks passed to `setTimeout()`, `setInterval()`, or `setImmediate()` unless the entire callback body is wrapped in `try/catch`. These timer functions discard the callback's returned promise, so uncaught errors become unhandled rejections.
+
+### `require-finite-check-before-date-toisostring`
+
+Require validation of dynamic values passed to `new Date(...)` before calling `toISOString()` or `toJSON()`, since invalid dates throw a `RangeError`. Validate the input with `Number.isFinite()` / `Number.isNaN()` or wrap the serialization in `try/catch`.

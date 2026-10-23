@@ -90,7 +90,7 @@ func (c *Compiler) buildPreActivationPermissions(data *WorkflowData, setupAction
 
 	// Pre-activation job doesn't need project support (no safe outputs processed here).
 	// Pre-activation generates the root trace ID; activation will reuse it via setup-trace-id output.
-	steps = append(steps, c.generateSetupStep(data, setupActionRef, SetupActionDestination, false, "", "")...)
+	steps = append(steps, c.generateSetupStepForJob("pre_activation", data, setupActionRef, SetupActionDestination, false, "", "", "")...)
 
 	var perms *Permissions
 	if needsContentsRead {
@@ -134,7 +134,7 @@ func (c *Compiler) buildPreActivationCheckSteps(data *WorkflowData, steps []stri
 	if len(data.Command) > 0 {
 		steps = c.appendPreActivationCommandPositionStep(data, steps)
 	}
-	if needsPermissionCheck {
+	if needsPermissionCheck && len(data.WebhookSubscriptions) == 0 {
 		steps = c.generateMembershipCheck(data, steps)
 	}
 	if data.RateLimit != nil {
@@ -415,7 +415,14 @@ func buildPreActivationActivatedConditions(data *WorkflowData, needsPermissionCh
 }
 
 func buildPreActivationMembershipAndTimeConditions(data *WorkflowData, needsPermissionCheck bool) []ConditionNode {
-	conditions := appendPreActivationCondition(nil, needsPermissionCheck, constants.CheckMembershipStepID, constants.IsTeamMemberOutput)
+	conditions := appendPreActivationCondition(nil, needsPermissionCheck && len(data.WebhookSubscriptions) == 0, constants.CheckMembershipStepID, constants.IsTeamMemberOutput)
+	if len(data.WebhookSubscriptions) > 0 {
+		conditions = append(conditions, BuildComparison(
+			BuildPropertyAccess("needs."+gatewayProvenanceJobName+".outputs.verified"),
+			"==",
+			BuildStringLiteral("true"),
+		))
+	}
 	conditions = appendPreActivationCondition(conditions, data.StopTime != "", constants.CheckStopTimeStepID, constants.StopTimeOkOutput)
 	conditions = appendPreActivationCondition(conditions, data.RateLimit != nil, constants.CheckRateLimitStepID, constants.RateLimitOkOutput)
 	return appendPreActivationCondition(conditions, data.Cooldown > 0, constants.CheckCooldownStepID, constants.CooldownOkOutput)
@@ -774,45 +781,19 @@ func extractPreActivationJobOutputs(jobName string, configMap map[string]any) (m
 // by all skip-if checks in the pre-activation job. The step ID is "pre-activation-app-token".
 // Auth configuration comes from the top-level on.github-app field.
 func (c *Compiler) buildPreActivationAppTokenMintStep(app *GitHubAppConfig) []string {
-	var steps []string
-	tokenStepID := constants.PreActivationAppTokenStepID
-
-	steps = append(steps, "      - name: Generate GitHub App token for skip-if checks\n")
-	steps = append(steps, fmt.Sprintf("        id: %s\n", tokenStepID))
-	if app.shouldIgnoreMissingKey() {
-		guard := buildIgnoreIfMissingCondition(app)
-		steps = appendStepEnvAssignments(steps, guard.EnvAssignments)
-		if guard.Condition != "" {
-			steps = append(steps, fmt.Sprintf("        if: %s\n", guard.Condition))
-		}
-	}
-	steps = append(steps, fmt.Sprintf("        uses: %s\n", getActionPin("actions/create-github-app-token")))
-	steps = append(steps, "        with:\n")
-	steps = append(steps, fmt.Sprintf("          client-id: %s\n", app.AppID))
-	steps = append(steps, fmt.Sprintf("          private-key: %s\n", app.PrivateKey))
-
-	owner := app.Owner
-	if owner == "" {
-		owner = "${{ github.repository_owner }}"
-	}
-	steps = append(steps, fmt.Sprintf("          owner: %s\n", owner))
-
-	if len(app.Repositories) == 1 && app.Repositories[0] == "*" {
-		// Org-wide access: omit repositories field entirely
-	} else if len(app.Repositories) == 1 {
-		steps = append(steps, fmt.Sprintf("          repositories: %s\n", app.Repositories[0]))
-	} else if len(app.Repositories) > 1 {
-		steps = append(steps, "          repositories: |-\n")
-		for _, repo := range app.Repositories {
-			steps = append(steps, fmt.Sprintf("            %s\n", repo))
-		}
-	} else {
-		steps = append(steps, "          repositories: ${{ github.event.repository.name }}\n")
-	}
-
-	steps = append(steps, "          github-api-url: ${{ github.api_url }}\n")
-
-	return steps
+	permissions := NewPermissionsFromMap(map[PermissionScope]PermissionLevel{
+		PermissionIssues:       PermissionRead,
+		PermissionPullRequests: PermissionRead,
+	})
+	return c.buildGitHubAppTokenMintStepForJob(
+		"pre_activation",
+		app,
+		permissions,
+		"",
+		"",
+		"Generate GitHub App token for skip-if checks",
+		string(constants.PreActivationAppTokenStepID),
+	)
 }
 
 // resolvePreActivationSkipIfToken returns the GitHub token expression to use for skip-if check

@@ -6,6 +6,124 @@ import (
 	"testing"
 )
 
+func TestMainWorkflowSchema_CreateIssueOptOut(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		value any
+		valid bool
+	}{
+		{"disabled", false, true},
+		{"null", nil, true},
+		{"empty", map[string]any{}, true},
+		{"configured", map[string]any{"max": 1}, true},
+		{"true", true, false},
+		{"string", "false", false},
+		{"zero-max", map[string]any{"max": 0}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			frontmatter := map[string]any{
+				"on": "push",
+				"safe-outputs": map[string]any{
+					"create-issue": tc.value,
+				},
+			}
+			err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "/tmp/gh-aw/create-issue-opt-out.md")
+			if (err == nil) != tc.valid {
+				t.Fatalf("schema validity = %v, want %v: %v", err == nil, tc.valid, err)
+			}
+		})
+	}
+}
+
+func TestMainWorkflowSchema_AllowFullHistoryFetch(t *testing.T) {
+	t.Parallel()
+	for _, handler := range []string{"create-pull-request", "push-to-pull-request-branch"} {
+		for _, tc := range []struct {
+			name  string
+			value any
+			valid bool
+		}{
+			{"enabled", true, true},
+			{"disabled", false, true},
+			{"string", "true", false},
+			{"expression", "${{ inputs.allow-history }}", false},
+		} {
+			t.Run(handler+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				frontmatter := map[string]any{
+					"on":     "push",
+					"engine": "copilot",
+					"safe-outputs": map[string]any{
+						handler: map[string]any{"allow-full-history-fetch": tc.value},
+					},
+				}
+				err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "/tmp/gh-aw/history-fetch-test.md")
+				if (err == nil) != tc.valid {
+					t.Fatalf("schema validity = %v, want %v: %v", err == nil, tc.valid, err)
+				}
+			})
+		}
+	}
+	t.Run("reject-global-option", func(t *testing.T) {
+		t.Parallel()
+		frontmatter := map[string]any{
+			"on":     "push",
+			"engine": "copilot",
+			"safe-outputs": map[string]any{
+				"create-pull-request":      map[string]any{},
+				"allow-full-history-fetch": true,
+			},
+		}
+		if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "/tmp/gh-aw/history-fetch-test.md"); err == nil {
+			t.Fatal("expected global history-fetch option to fail schema validation")
+		}
+	})
+}
+
+func TestMainWorkflowSchema_AllowMergedBaseBaseline(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		value any
+		valid bool
+	}{
+		{"enabled", true, true},
+		{"disabled", false, true},
+		{"string", "true", false},
+		{"expression", "${{ inputs.allow-merged-base-baseline }}", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			frontmatter := map[string]any{
+				"on":     "push",
+				"engine": "copilot",
+				"safe-outputs": map[string]any{
+					"push-to-pull-request-branch": map[string]any{"allow-merged-base-baseline": tc.value},
+				},
+			}
+			err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "/tmp/gh-aw/merged-base-baseline-test.md")
+			if (err == nil) != tc.valid {
+				t.Fatalf("schema validity = %v, want %v: %v", err == nil, tc.valid, err)
+			}
+		})
+	}
+	t.Run("handler-scoped", func(t *testing.T) {
+		t.Parallel()
+		frontmatter := map[string]any{
+			"on":     "push",
+			"engine": "copilot",
+			"safe-outputs": map[string]any{
+				"create-pull-request": map[string]any{"allow-merged-base-baseline": true},
+			},
+		}
+		if err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter, "/tmp/gh-aw/merged-base-baseline-test.md"); err == nil {
+			t.Fatal("expected merged-base baseline option on create-pull-request to fail schema validation")
+		}
+	})
+}
+
 func TestMainWorkflowSchema_SafeOutputConfigCoverage(t *testing.T) {
 	t.Parallel()
 

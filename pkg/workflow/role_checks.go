@@ -49,6 +49,9 @@ func (c *Compiler) generateMembershipCheck(data *WorkflowData, steps []string) [
 	steps = append(steps, fmt.Sprintf("          GH_AW_REQUIRED_ROLES: %q\n", strings.Join(data.Roles, ",")))
 	if len(data.Bots) > 0 {
 		steps = append(steps, fmt.Sprintf("          GH_AW_ALLOWED_BOTS: %q\n", strings.Join(data.Bots, ",")))
+		if hasCopilotBotName(data.Bots) {
+			steps = append(steps, fmt.Sprintf("          GH_AW_COPILOT_BOT_NAMES: %q\n", strings.Join(constants.CopilotBotNames, ",")))
+		}
 	}
 	if data.AllowBotAuthoredTriggerComment {
 		steps = append(steps, "          GH_AW_ALLOW_BOT_AUTHORED_TRIGGER_COMMENT: \"true\"\n")
@@ -356,6 +359,13 @@ func rolesAreAll(roles []string) bool {
 
 // needsRoleCheck determines if the workflow needs permission checks with full context
 func (c *Compiler) needsRoleCheck(data *WorkflowData, frontmatter map[string]any) bool {
+	if data.DryRun {
+		return true
+	}
+	if len(data.WebhookSubscriptions) > 0 {
+		roleLog.Print("Role check needed: hosted webhook trigger")
+		return true
+	}
 	// If user explicitly specified "roles: all", no permission checks needed
 	if rolesAreAll(data.Roles) {
 		roleLog.Print("Role check not needed: roles set to 'all'")

@@ -14,6 +14,8 @@ type MCPRendererOptions struct {
 	IsLast bool
 	// ActionMode indicates the action mode for workflow compilation (dev, release, script)
 	ActionMode ActionMode
+	// AllowAgenticWorkflowWrites is the operator's explicit startup capability.
+	AllowAgenticWorkflowWrites bool
 	// WriteSinkGuardPolicies contains the write-sink guard policies to apply to non-GitHub MCP servers.
 	// These are derived from the GitHub guard-policy configuration and applied as a default write-sink
 	// to ensure that as guard policies are rolled out, only GitHub inputs are filtered while outputs
@@ -21,8 +23,8 @@ type MCPRendererOptions struct {
 	WriteSinkGuardPolicies map[string]any
 	// ContainerPinMappings maps source container image references to their SHA-pinned
 	// replacements from aw.json container_pins. When set, built-in MCP server container
-	// references are redirected to the mapped private registry mirror (digest stripped for
-	// MCP Gateway compatibility). Nil when no container_pins are configured.
+	// references are redirected to the mapped private registry mirror, preserving the digest.
+	// Nil when no container_pins are configured.
 	ContainerPinMappings map[string]string
 }
 
@@ -41,6 +43,8 @@ type MCPToolRenderers struct {
 	RenderCacheMemory      func(yaml *strings.Builder, isLast bool, workflowData *WorkflowData)
 	RenderAgenticWorkflows func(yaml *strings.Builder, isLast bool)
 	RenderSafeOutputs      func(yaml *strings.Builder, isLast bool, workflowData *WorkflowData)
+	RenderLedger           func(yaml *strings.Builder, isLast bool, workflowData *WorkflowData)
+	RenderWorkQueue        func(yaml *strings.Builder, isLast bool, workflowData *WorkflowData)
 	RenderMCPScripts       func(yaml *strings.Builder, mcpScripts *MCPScriptsConfig, isLast bool)
 	RenderEnclave          func(yaml *strings.Builder, workflowData *WorkflowData, isLast bool)
 	RenderCustomMCPConfig  RenderCustomMCPToolConfigHandler
@@ -95,7 +99,7 @@ type GitHubMCPDockerOptions struct {
 	EmitRequiredFalse bool
 	// ContainerPinMappings maps source container image references to their SHA-pinned replacements.
 	// When set, the GitHub MCP server container reference is redirected to the mapped private
-	// registry mirror (digest stripped for MCP Gateway compatibility). Nil → no redirect.
+	// registry mirror, preserving the digest. Nil → no redirect.
 	ContainerPinMappings map[string]string
 }
 

@@ -22,6 +22,7 @@ Design and create new workflow files under `.github/workflows/` using the instal
 Load these topic files only when relevant:
 
 - [maintainer.md](maintainer.md) for recurring repository maintenance, backlog triage, owned-PR upkeep, or long-term code health
+- [documentation-workflows.md](documentation-workflows.md) for documentation agents, required docs checks, and post-merge page/index upkeep
 - [campaign.md](campaign.md) for campaign, KPI, pacing, cadence, or `stop-after`
 - [experiments.md](experiments.md) for experiments, A/B tests, variants, or prompt comparisons
 - [visual-regression.md](visual-regression.md) for screenshot comparison workflows
@@ -32,6 +33,21 @@ Load these topic files only when relevant:
 - [linter-workflows.md](linter-workflows.md) for mining, refining, or applying custom linter rules
 - [agent-runtime-instructions.md](agent-runtime-instructions.md) when choosing or debugging Docker, Cloud Hypervisor, ARC DinD, or self-hosted runners
 - [skills.md](skills.md) when the user asks for specific skills or agent plugins
+- [operational-value-designer](../skills/operational-value-designer/SKILL.md) when deriving or configuring graders over the in-memory unified session
+
+## Graders
+
+Ten fast built-ins are enabled by default; configure thresholds or disable
+irrelevant defaults instead of recreating their implementations. Custom metrics
+use `graders.<distinct-id>.script`: synchronous JavaScript over `session`,
+`config`, and `helpers.createSessionLookups(session)`, returning a finite number,
+`null`, or an object with `value`. The compiler generates an isolated downstream
+`graders` job. Repository-owned Bash may instead use `graders.operational-value.run`,
+reading unified-session JSONL from `$1` / `GH_AW_SESSION_FILE` and config from
+`GH_AW_GRADER_CONFIG`, preserving metric-array output. Detected file writes are
+rejected; shell remains trusted code until future microVM isolation. Never add
+user code or steps in conclusion. See the linked skill for
+the full syntax, evidence rules, and fixture checks.
 
 ## Skills and Plugins
 
@@ -49,40 +65,16 @@ When the user has not already stated an automation goal, start with exactly:
 
 > What do you want to automate today?
 
-When the request already states a goal, infer its intent and ask only for information that is still needed. Then follow a progressive interview — ask one question at a time, advance only when the current phase is clear:
+When the request already states a goal, skip the opening question and continue with only the design decisions it leaves unanswered.
 
-1. **Goal and intent** — confirm the workflow name, description, and a concise outcome-oriented `intent:`. Derive activation, required-effect, no-op, success, and uncertainty conditions before choosing implementation; see [intent.md](intent.md).
-2. **Repository survey and intent mining** — only for maintenance or underspecified automation requests, inspect bounded repository evidence using [maintainer.md](maintainer.md). Summarize observed signals, propose evidence-backed candidate intents, then select and augment one before choosing a portfolio or cadence.
-3. **Architecture and trigger** — compare feasible architectures against the augmented intent's coverage, timeliness, attention cost, safety, boundedness, determinism, state, complexity, and evidence. Then ask "When should this run?" and map the selected architecture to an `on:` block. For scheduled workflows that create issues or pull requests, also choose how previous results are handled using [Choose the previous-result strategy](#choose-the-previous-result-strategy).
-4. **Scope** — ask what it reads and what it creates or updates; map to `permissions:`, `tools:`, and `safe-outputs:`.
-5. **Data strategy** — ask whether GitHub data should be pre-fetched with `gh` + `jq` (DataOps default); map to `steps:`.
-6. **Guardrails** — ask whether it should block, advise, or silently log; guide toward `noop` and safe-output behavior.
-7. **Context & network** — ask about external APIs, MCP servers, and required secrets; map to `network.allowed` and `env:`.
-8. **Engine** — preserve explicit engine hints. With no engine preference or
-   engine-specific requirement, omit `engine:` and let the configured default
-   apply. If an explicit model requirement forces engine selection, try Copilot
-   first.
-9. **Confirmation** — present a structured summary before generating:
+Run the structured interview in [designer.md#interview-framework](designer.md#interview-framework) — it covers goal/intent, repository survey, architecture/trigger, scope, data strategy, guardrails, context/network, engine, and confirmation, plus the progressive-disclosure rules and the confirmation summary format. This file covers generation, compile, and PR mechanics once the design is confirmed.
 
-   ```text
-   Proposed workflow:
-   - Name: <workflow-id>
-   - Trigger: <event + key options>
-   - Engine: <explicit engine or default (omitted)>
-   - Tools: <tool summary>
-   - Safe outputs: <list or none>
-   - Network: <allowed summary>
-   - Integrations/Auth: <service/mcp + required secrets/env vars>
-   - Repository signals: <maintenance workflows only>
-   - Initial maintenance portfolio: <maintenance workflows only>
-   - Intent: <one-sentence task>
-   ```
+Two additions used only here:
 
-   Ask: **"Ready to generate, or want to adjust anything?"**
+- For scheduled workflows that create issues or pull requests, choose how previous results are handled using [Choose the previous-result strategy](#choose-the-previous-result-strategy) during the architecture/trigger phase.
+- For maintenance workflows, add `Repository signals` and `Initial maintenance portfolio` fields to the confirmation summary, in addition to the fields in [designer.md#confirmation-format](designer.md#confirmation-format).
 
-Skip phases when the answer is already clear from earlier statements. Apply progressive disclosure: at most 5 questions before presenting the confirmation summary; then ask "anything else?" if needed. Detect done signals (`that's it`, `looks good`, `generate it`) and proceed to generation.
-
-For detailed trigger/safe-output/network/tool decision heuristics and integration auth setup patterns, load [designer-mappings.md](designer-mappings.md). For token-optimization defaults, load [designer.md](designer.md).
+For detailed trigger/safe-output/network/tool decision heuristics and integration auth setup patterns, load [designer-mappings.md](designer-mappings.md).
 
 ### Issue-form mode
 
@@ -91,6 +83,7 @@ When triggered from a workflow-creation issue form, read the form fields and gen
 ## Conversation Rules
 
 - Keep the conversation short and iterative.
+- When the request already states a goal, proceed with the relevant mode and ask only about missing details that would change the workflow design.
 - Translate user intent into workflow structure.
 - When the user asks for exploration, evaluation, or scenario design rather than file creation, stay in ad hoc evaluation mode.
 - In ad hoc evaluation mode, do not create `.github/workflows/*.md`.
@@ -103,6 +96,7 @@ Use this mode for exploratory testing, persona walkthroughs, and "what workflow 
 
 - Do not create or edit workflow files.
 - Return a compact recommendation covering trigger, any scoped `paths:` filters for file-event triggers, read tools, safe outputs, permissions, and explicit `noop` criteria.
+- Before finalizing trigger or safe-output recommendations, check whether terms that affect scope or matching are ambiguous (for example, whether "completed" means closed issues or merged PRs, or where a coverage threshold comes from). Ask 1-2 targeted clarifying questions when the answer would change the recommendation. If the request needs an immediate recommendation, state the assumption and the relevant alternative rather than silently choosing.
 - For recurring reports or digests, always include the report window, grouping dimensions, and deduplication key. See [triggers.md](triggers.md) for key-format examples.
 - Exit ad hoc evaluation mode only when the user explicitly asks to create, implement, or write the workflow file.
 - End by offering to turn the recommendation into `.github/workflows/<workflow-id>.md` if the user wants to proceed.
@@ -130,9 +124,9 @@ Expected comparison output: return one combined table with one row per scenario 
 
 | Scenario | Trigger | Scope | Read tools | Safe outputs | Permissions | Noop condition |
 |---|---|---|---|---|---|---|
-| Information Worker — weekly digest | `schedule` + `workflow_dispatch` | 7-day window, grouped by assignee | `github` (`gh-proxy`, default toolset) | `create-issue` with `close-older-issues: true` | `contents: read`, `issues: write` | window has no assigned issues/PRs |
-| Product Manager — backlog triage | `schedule` + `workflow_dispatch` | recurring window, grouped by staleness bucket | `github` (`gh-proxy`, default toolset) | `create-issue` with `close-older-issues: true` | `contents: read`, `issues: write` | no items cross the staleness threshold |
-| Backend Engineer — API contract review | `pull_request` with `paths:` scoped to API/schema files | per-PR, no window | `github` (`gh-proxy`, default toolset) | `add-comment` on the PR | `contents: read`, `pull-requests: write` | no API contract files changed in the PR |
+| Information Worker — weekly digest | `schedule` + `workflow_dispatch` | 7-day window, grouped by assignee | `github` (`gh-proxy`, default toolset) | `create-issue` with `close-older-issues: true` | `contents: read`, `issues: read` | window has no assigned issues/PRs |
+| Product Manager — backlog triage | `schedule` + `workflow_dispatch` | recurring window, grouped by staleness bucket | `github` (`gh-proxy`, default toolset) | `create-issue` with `close-older-issues: true` | `contents: read`, `issues: read` | no items cross the staleness threshold |
+| Backend Engineer — API contract review | `pull_request` with `paths:` scoped to API/schema files | per-PR, no window | `github` (`gh-proxy`, default toolset) | `add-comment` on the PR | `contents: read`, `pull-requests: read` | no API contract files changed in the PR |
 
 This is the same invocation surface as [Single-Scenario Evaluation Example](#single-scenario-evaluation-example) above — reached only by addressing the `agentic-workflows` custom agent directly in conversation, never via a CLI/MCP tool parameter. After the comparison table, call out any scenario that shares a trigger or write path with another (for example two digests that could share a schedule) before offering to generate files.
 
@@ -173,13 +167,13 @@ Use [triggers.md](triggers.md), [workflow-patterns.md](workflow-patterns.md), an
 
 #### Choose the previous-result strategy
 
-For every daily or scheduled workflow that creates issues or pull requests, choose the strategy that best matches the workflow's goal:
+For recurring or PR-reactive workflows that create visible outputs, choose the strategy that best matches the workflow's goal:
 
-- **Wait for the previous result** when only one active result should exist. Configure `on.skip-if-match` to skip the entire agent execution while the issue or pull request created by an earlier run remains open. The workflow resumes after that item is closed or merged.
-- **Replace previous results** when the newest result supersedes older reports. For issues, configure `safe-outputs.create-issue.close-older-issues: true` and use `close-older-key` when an explicit matching key is needed.
-- **Keep previous results** when each run should produce a distinct item or preserve a history of work. Instruct the agent to search for and review existing issues or pull requests before acting, then select a materially different scope so it does not repeat previous work. Treat those existing items as the workflow's memory.
+- **Wait for the previous result** when a recurring workflow should have only one active issue or pull request. Configure `on.skip-if-match` to skip the entire agent execution while the item created by an earlier run remains open. The workflow resumes after that item is closed or merged.
+- **Replace previous results** when the newest result supersedes older reports. For issues, configure `safe-outputs.create-issue.close-older-issues: true` and use `close-older-key` when an explicit matching key is needed. For PR comments, configure `safe-outputs.add-comment.hide-older-comments: true` for rolling updates.
+- **Keep previous results** when each run should produce a distinct issue, pull request, or comment, or when an intentional history is needed. Instruct the agent to review prior outputs and ensure each new result has a distinct purpose.
 
-Do not default every scheduled workflow to the same strategy. Base the choice on whether the workflow needs a single active item, a latest-only result, or a continuing series of distinct results, and include the selected behavior in the generated workflow.
+Do not default every recurring or PR-reactive workflow to the same strategy. Base the choice on whether the workflow needs a single active item, a latest-only result, or a continuing series of distinct results, and include the selected behavior in the generated workflow.
 
 ### 3. Keep permissions read-only
 
@@ -192,6 +186,7 @@ See [workflow-constraints.md](workflow-constraints.md) for the read-only securit
 ### 4. Select tools
 
 - `bash` and `edit` are enabled by default in sandboxed workflows; do not add them unless you are restricting them.
+- When selecting Codex, do not configure a non-empty per-command `tools.bash` allowlist: Codex cannot enforce it. Set `tools.bash: false` to disable shell execution or select an engine that supports command allowlists.
 - For GitHub reads, prefer `tools.github.mode: gh-proxy` and instruct the agent to use `gh` commands.
 - For non-GitHub MCP servers, prefer `tools.cli-proxy: true` and instruct the agent to use the mounted `mcp-clis` commands.
 - Combined configuration example for GitHub reads plus non-GitHub MCP CLI access:
@@ -212,6 +207,13 @@ See [workflow-constraints.md](workflow-constraints.md) for the read-only securit
 ### 5. Infer network access from repository files
 
 Do not ask for the ecosystem if it can be inferred from the repository. See [network.md#inferring-ecosystem-from-repository-files](network.md#inferring-ecosystem-from-repository-files) for the manifest-to-ecosystem mapping. Never use `network: defaults` alone for workflows that build, test, or install packages.
+
+For policy/compliance audits that only inspect repository files and/or read GitHub via `gh-proxy`, enforce a "never probe externally" requirement structurally with `network.allowed: []`, rather than relying on prompt wording. Omit external web and MCP tools; for Claude or Codex, an explicit `network` setting also disables provider-hosted web tools unless enabled separately (see [network.md#hosted-web-policy-networkhosted-web](network.md#hosted-web-policy-networkhosted-web)).
+
+```yaml
+network:
+  allowed: []
+```
 
 ### 6. Configure safe outputs
 
@@ -237,6 +239,7 @@ Rules:
 
 - Default behavior is team-only triggering.
 - For community-facing issue triage or other public entrypoints, recommend `roles: all`.
+- Prefer `pull_request` over `pull_request_target`. Use `pull_request_target` only when base-repository context is necessary; it may have access to secrets and write permissions. Set `checkout: false` unless a trusted checkout is needed, and never check out or execute the pull request's head code. See the [`pull_request_target` checkout guidance](https://github.github.com/gh-aw/reference/checkout/#pull_request_target-checkout).
 
 ### 8. Add cost-aware triage and context flow
 
@@ -334,6 +337,7 @@ Before finalizing any newly generated workflow, verify:
 - [ ] **Maintenance baseline**: recurring maintenance strategies are derived from a bounded repository survey, with observed signals separated from recommendations
 - [ ] **Tool fit**: enabled tools are the minimal set needed for reads/analysis (prefer `gh-proxy`; add `playwright`/`cache-memory` only when required)
 - [ ] **Safe outputs**: all visible writes route through `safe-outputs:` and include `noop` for explicit no-op outcomes
+- [ ] **Recurring audit/monitor dedup**: define a stable signature from the scope and finding (for example workflow, job, and normalized error signature), check for an existing open issue before creating one, and choose `close-older-issues`/`close-older-key` when newer findings supersede older ones
 - [ ] **Permissions**: agent job remains read-only; no direct write scopes granted
 - [ ] **Network**: access is inferred from repository ecosystem and avoids `network: defaults` alone for install/build/test workflows
 - [ ] **Prompt clarity**: prompt is concise, context-aware, and clearly states expected outputs and stop/no-op behavior

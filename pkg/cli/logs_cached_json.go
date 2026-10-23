@@ -21,7 +21,7 @@ import (
 
 type cachedLogsRuns map[int64]cachedLogsJSONLRunData
 
-const cachedLogsJSONLSchemaVersion = 2
+const cachedLogsJSONLSchemaVersion = 5
 
 const (
 	cachedLogsJSONLKindRun          = "run"
@@ -490,9 +490,7 @@ func (w *cachedLogsJSONLWriter) appendRun(run ProcessedRun, includeAudit bool) e
 				runData.SafeOutputs = audit.CreatedItems
 			}
 		}
-		if awInfo, err := parseAwInfo(filepath.Join(run.Run.LogsPath, "aw_info.json"), false); err == nil {
-			runData.AwInfo = awInfo
-		}
+		runData.AwInfo = mergeSessionModelRoutingAwInfo(run.Run.LogsPath, loadAwInfoForEngineConfig(run.Run.LogsPath))
 	}
 	record, err := json.Marshal(cachedLogsJSONLRecord{
 		SchemaVersion: cachedLogsJSONLSchemaVersion,
@@ -539,16 +537,22 @@ func (w *cachedLogsJSONLWriter) appendSafeOutputItems(runID int64, items []Creat
 func buildCachedLogsJSONLRunData(run ProcessedRun, runData RunData) *cachedLogsJSONLRunData {
 	data := &cachedLogsJSONLRunData{
 		RunData:      runData,
+		Model:        runData.Model,
 		JobDetails:   projectCachedLogsJSONLJobs(run.JobDetails),
 		MCPToolUsage: projectCachedLogsJSONLMCPToolUsage(run.MCPToolUsage),
 	}
 	if info := runData.awInfo; info != nil {
+		attribution := resolveEffectiveModelAttribution(run.Run.LogsPath, info, run.ModelRouting, run.TokenUsage)
 		data.EngineVersion = info.Version
-		data.Model = info.Model
+		data.Model = attribution.Model
 		data.GhAwVersion = info.CLIVersion
 		data.AgentRuntime = info.AgentRuntime
 		data.FirewallVersion = info.GetFirewallVersion()
 		data.GatewayVersion = info.AwmgVersion
+		data.RunData.Model = attribution.Model
+		data.ModelEffort = attribution.Effort
+		data.ModelRoutingStatus = attribution.RoutingStatus
+		data.RequestedModel = attribution.RequestedModel
 	}
 	return data
 }
@@ -635,7 +639,7 @@ func (w *cachedLogsJSONLWriter) AppendRateLimit(report GitHubAPIRateLimitReport)
 	return w.appendRecord(record)
 }
 
-func (w *cachedLogsJSONLWriter) appendRecord(record []byte) error {
+func (w *cachedLogsJSONLWriter) appendRecord(record []byte) (err error) {
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, record); err != nil {
 		return fmt.Errorf("failed to encode cached logs JSONL record: %w", err)
@@ -651,7 +655,11 @@ func (w *cachedLogsJSONLWriter) appendRecord(record []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to open cached logs JSONL: %w", err)
 	}
-	defer func() { _ = file.Close() }()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to close cached logs JSONL: %w", closeErr))
+		}
+	}()
 	if _, err := file.Write(record); err != nil {
 		return fmt.Errorf("failed to append cached logs JSONL: %w", err)
 	}
@@ -782,6 +790,9 @@ func (runs cachedLogsRuns) lookup(run WorkflowRun, filters runFilterOpts) (RunDa
 	if cached.Repository == "" || run.Repository == "" || !strings.EqualFold(cached.Repository, run.Repository) {
 		return RunData{}, false
 	}
+	if run.Event == "pull_request" && isClusterFailureConclusion(run.Conclusion) && cached.JobCount == nil {
+		return RunData{}, false
+	}
 	if filters.engine != "" &&
 		!strings.EqualFold(filters.engine, cached.EngineID) &&
 		!strings.EqualFold(filters.engine, cached.Engine) &&
@@ -790,7 +801,7 @@ func (runs cachedLogsRuns) lookup(run WorkflowRun, filters runFilterOpts) (RunDa
 	}
 	// Compact logs JSON does not retain enough per-run evidence to safely
 	// re-evaluate these artifact-dependent filters.
-	if filters.runtime != "" || filters.noStaged || filters.firewallOnly || filters.noFirewall ||
+	if filters.runtime != "" || filters.noStaged || filters.dryRun || filters.noDryRun || filters.firewallOnly || filters.noFirewall ||
 		filters.safeOutputType != "" || filters.filteredIntegrity || filters.evalsOnly || filters.gradersOnly {
 		return RunData{}, false
 	}
@@ -853,6 +864,8 @@ func processedRunFromCachedData(data RunData, audit *AuditData, outputDir string
 		AgenticAssessments:  data.AgenticAssessments,
 		TokenUsage:          data.TokenUsageSummary,
 		WorkingSet:          data.WorkingSet,
+		Ledger:              data.Ledger,
+		WorkQueue:           data.WorkQueue,
 		Friction:            data.Friction,
 		cachedData:          &data,
 		cachedAudit:         audit,

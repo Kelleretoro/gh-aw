@@ -25,6 +25,80 @@ const require = createRequire(import.meta.url);
 // Import module once – globals are resolved at call time, not import time.
 const { pushSignedCommits, unquoteCPath } = require("./push_signed_commits.cjs");
 const { resolveExperimentStateRebaseConflict } = require("./push_experiment_state.cjs");
+const { withGitClaimEffects } = require("./work_queue_git_effects.cjs");
+const { withClaimExecution, currentClaimResourceEffects } = require("./work_queue_claim_scope.cjs");
+const { wrapClaimEffectClient } = require("./work_queue_effect_client.cjs");
+const { authorizeWorkerClaim } = require("./finish_work_queue_claim.cjs");
+const { queueFixture, REPOSITORY, WORKFLOW, REF } = require("./work_queue_lifecycle.test_helpers.cjs");
+
+function signedClaimFixture(resources) {
+  const queue = queueFixture({
+    bound: true,
+    count: 1,
+    configureWork(work) {
+      work.payload = { effect_contract: { version: 1, outputs: [{ type: "create_issue", min: 0, max: 1 }] }, resource_scope: { version: 1, resources } };
+    },
+  });
+  const assignment = queue.assignment;
+  const member = assignment.claims[0];
+  queue.append("finish", { dispatch_id: assignment.dispatch_id, claim_handle: member.handle, outcome: "completed" }, { ...queue.workerActor, dispatch_id: assignment.dispatch_id, claim_handle: member.handle });
+  const authorize = vi.fn(request =>
+    authorizeWorkerClaim({
+      ...request,
+      context: queue.workerContext,
+      githubClient: queue.githubClient,
+      workflowRef: `${REPOSITORY}/${WORKFLOW}@${REF}`,
+      readWorkQueueLog: queue.readWorkQueueLog,
+    })
+  );
+  return { assignment, claim_handle: member.handle, authorize };
+}
+
+describe("withGitClaimEffects signed replay bindings", () => {
+  const repository = { repository: REPOSITORY, host: "github.com", repository_id: "7" };
+
+  it("deduplicates added/deleted paths, resolves metadata once, and preserves the branch audit field", async () => {
+    const scope = signedClaimFixture([repository]);
+    const github = { rest: { repos: { get: vi.fn(async () => ({ data: { id: 7, full_name: REPOSITORY } })) } } };
+    const additions = [{ path: "new.ts" }, { path: "shared.ts" }];
+    const deletions = [{ path: "old.ts" }, { path: "shared.ts" }];
+    await withClaimExecution(scope, () =>
+      withGitClaimEffects({ github, repository: REPOSITORY, branch: "signed-paths", paths: [...additions, ...deletions].map(file => file.path) }, () => {
+        expect(currentClaimResourceEffects("rest.git.createRef")).toEqual(["new.ts", "shared.ts", "old.ts"].map(path => ({ ...repository, ref: "refs/heads/signed-paths", path })));
+      })
+    );
+    expect(github.rest.repos.get).toHaveBeenCalledExactlyOnceWith({ owner: "owner", repo: "repo" });
+    expect(scope.authorize.mock.calls.filter(([request]) => request.resource).map(([request]) => request.resource.path)).toEqual(["new.ts", "shared.ts", "old.ts"]);
+    expect(scope.authorize.mock.calls[0][0].message).toMatchObject({ type: "work_queue_git_effect", repo: REPOSITORY, branch_name: "signed-paths", claim_handle: scope.claim_handle });
+  });
+
+  it.each([undefined, []])("retains repository/ref binding when paths are %j", async paths => {
+    const scope = signedClaimFixture([repository]);
+    const github = { rest: { repos: { get: vi.fn(async () => ({ data: { id: 7, full_name: REPOSITORY } })) } } };
+    await withClaimExecution(scope, () =>
+      withGitClaimEffects({ github, repository: REPOSITORY, branch: "signed-paths", paths }, () => {
+        expect(currentClaimResourceEffects("git.push")).toEqual([{ ...repository, ref: "refs/heads/signed-paths" }]);
+      })
+    );
+    expect(github.rest.repos.get).toHaveBeenCalledOnce();
+  });
+
+  it("accepts 4096 concrete paths but rejects 4097 before the callback", async () => {
+    const fixture = signedClaimFixture([repository]);
+    const authorize = vi.fn(async request => ({ authorized: true, claim_handle: request.claim_handle }));
+    const scope = { ...fixture, authorize };
+    const github = { rest: { repos: { get: vi.fn(async () => ({ data: { id: 7, full_name: REPOSITORY } })) } } };
+    const callback = vi.fn();
+    const paths = Array.from({ length: 4096 }, (_, index) => `file-${index}.ts`);
+    await withClaimExecution(scope, async () => {
+      await withGitClaimEffects({ github, repository: REPOSITORY, branch: "large", paths }, () => {
+        expect(currentClaimResourceEffects("git.push")).toHaveLength(4096);
+      });
+      await expect(withGitClaimEffects({ github, repository: REPOSITORY, branch: "large", paths: [...paths, "overflow.ts"] }, callback)).rejects.toThrow("bounded concrete targets");
+    });
+    expect(callback).not.toHaveBeenCalled();
+  });
+});
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Unit tests for unquoteCPath
@@ -272,7 +346,128 @@ describe("push_signed_commits integration tests", () => {
   // Happy path – GraphQL succeeds
   // ──────────────────────────────────────────────────────
 
+  describe("Claim-scoped signed replay", () => {
+    const repository = { repository: REPOSITORY, host: "github.com", repository_id: "7" };
+
+    it.each([true, false])("binds new branch creation to first-commit paths (matching selector: %s)", async matching => {
+      const branch = "claim-new-branch";
+      execGit(["checkout", "-b", branch], { cwd: workDir });
+      fs.mkdirSync(path.join(workDir, "eslint-factory"));
+      fs.writeFileSync(path.join(workDir, "eslint-factory/rule.ts"), "export {};\n");
+      execGit(["add", "."], { cwd: workDir });
+      execGit(["commit", "-m", "Add permitted rule"], { cwd: workDir });
+      global.exec = makeRealExec(workDir);
+      const source = makeMockGithubClient();
+      source.rest.repos = { get: vi.fn(async () => ({ data: { id: 7, full_name: REPOSITORY } })) };
+      const scope = signedClaimFixture([{ ...repository, ref: `refs/heads/${branch}`, path: matching ? "eslint-factory/rule.ts" : "eslint-factory/other.ts" }]);
+      const replay = () =>
+        withClaimExecution(scope, () =>
+          pushSignedCommits({ githubClient: wrapClaimEffectClient(source, { claim_handle: scope.claim_handle }), owner: "owner", repo: "repo", branch, baseRef: "origin/main", cwd: workDir, allowGitPushFallback: false })
+        );
+      if (matching) {
+        await expect(replay()).resolves.toBe("signed-oid-abc123");
+        expect(source.rest.git.createRef).toHaveBeenCalledOnce();
+        expect(source.graphql).toHaveBeenCalledOnce();
+        expect(source.rest.repos.get).toHaveBeenCalledTimes(4);
+      } else {
+        await expect(replay()).rejects.toThrow("immutable Work");
+        expect(source.rest.git.createRef).not.toHaveBeenCalled();
+        expect(source.graphql).not.toHaveBeenCalled();
+      }
+    });
+
+    it.each([1, 2])("signs a 129-file commit in a %i-commit replay without unsigned fallback", async commitCount => {
+      const branch = "claim-large-replay";
+      execGit(["checkout", "-b", branch], { cwd: workDir });
+      execGit(["push", "-u", "origin", branch], { cwd: workDir });
+      for (let commit = 0; commit < commitCount; commit++) {
+        const count = commit === commitCount - 1 ? 129 : 1;
+        for (let index = 0; index < count; index++) fs.writeFileSync(path.join(workDir, `file-${index}.ts`), `export const revision = ${commit};\n`);
+        execGit(["add", "."], { cwd: workDir });
+        execGit(["commit", "-m", `Replay commit ${commit + 1}`], { cwd: workDir });
+      }
+      global.exec = makeRealExec(workDir);
+      const source = makeMockGithubClient();
+      source.graphql.mockImplementation(async () => ({ createCommitOnBranch: { commit: { oid: `signed-oid-${source.graphql.mock.calls.length}` } } }));
+      source.rest.repos = { get: vi.fn(async () => ({ data: { id: 7, full_name: REPOSITORY } })) };
+      const scope = signedClaimFixture([repository]);
+      const initialRemote = execGit(["rev-parse", `refs/heads/${branch}`], { cwd: bareDir }).stdout.trim();
+      await expect(
+        withClaimExecution(scope, () =>
+          pushSignedCommits({
+            githubClient: wrapClaimEffectClient(source, { claim_handle: scope.claim_handle }),
+            owner: "owner",
+            repo: "repo",
+            branch,
+            baseRef: "origin/main",
+            cwd: workDir,
+            validationConfig: { max_patch_files: 200 },
+          })
+        )
+      ).resolves.toBe(`signed-oid-${commitCount}`);
+      expect(source.graphql).toHaveBeenCalledTimes(commitCount);
+      expect(source.graphql.mock.calls[commitCount - 1][1].input.fileChanges.additions).toHaveLength(129);
+      if (commitCount === 2) expect(source.graphql.mock.calls[1][1].input.expectedHeadOid).toBe("signed-oid-1");
+      expect(source.rest.repos.get).toHaveBeenCalledTimes(2 * commitCount);
+      const authorizedPaths = scope.authorize.mock.calls.filter(([request]) => request.resource?.path).map(([request]) => request.resource.path);
+      for (let index = 0; index < 129; index++) expect(authorizedPaths).toContain(`file-${index}.ts`);
+      expect(execGit(["rev-parse", `refs/heads/${branch}`], { cwd: bareDir }).stdout.trim()).toBe(initialRemote);
+      expect(mockCore.warning).not.toHaveBeenCalledWith(expect.stringContaining("falling back to git push"));
+    });
+
+    it.each([0, 1])("preflights an oversized native payload after %i valid commits without writes or fallback", async validCommits => {
+      const branch = "claim-oversized-replay";
+      execGit(["checkout", "-b", branch], { cwd: workDir });
+      for (let index = 0; index <= validCommits; index++) {
+        fs.writeFileSync(path.join(workDir, "file.ts"), `revision ${index}\n`);
+        execGit(["add", "."], { cwd: workDir });
+        execGit(["commit", "-m", `Replay commit ${index + 1}`], { cwd: workDir });
+      }
+      const oversizedSha = execGit(["rev-parse", "HEAD"], { cwd: workDir }).stdout.trim();
+      const realExec = makeRealExec(workDir);
+      global.exec = {
+        ...realExec,
+        getExecOutput: async (program, args, options) => {
+          if (args[0] === "diff-tree" && args.includes(oversizedSha)) {
+            const lines = Array.from({ length: 4097 }, (_, index) => `:100644 000000 ${"a".repeat(40)} ${"0".repeat(40)} D\tfile-${index}.ts`);
+            return { exitCode: 0, stdout: lines.join("\n"), stderr: "" };
+          }
+          return realExec.getExecOutput(program, args, options);
+        },
+      };
+      const source = makeMockGithubClient();
+      await expect(pushSignedCommits({ githubClient: source, owner: "test-owner", repo: "test-repo", branch, baseRef: "origin/main", cwd: workDir })).rejects.toThrow("4096 native file-change bound");
+      expect(source.rest.git.createRef).not.toHaveBeenCalled();
+      expect(source.graphql).not.toHaveBeenCalled();
+      expect(execGit(["ls-remote", bareDir, `refs/heads/${branch}`], { cwd: workDir }).stdout.trim()).toBe("");
+      expect(mockCore.warning).not.toHaveBeenCalledWith(expect.stringContaining("falling back to git push"));
+    });
+  });
+
   describe("GraphQL signed commits (happy path)", () => {
+    it("refuses a ledger mutation against a remote head newer than the validated base", async () => {
+      execGit(["checkout", "-b", "ledger-branch"], { cwd: workDir });
+      fs.writeFileSync(path.join(workDir, "ledger.jsonl"), "{}\n");
+      execGit(["add", "ledger.jsonl"], { cwd: workDir });
+      execGit(["commit", "-m", "Concurrent writer"], { cwd: workDir });
+      execGit(["push", "-u", "origin", "ledger-branch"], { cwd: workDir });
+      global.exec = makeRealExec(workDir);
+      const githubClient = makeMockGithubClient();
+      await expect(
+        pushSignedCommits({
+          githubClient,
+          owner: "test-owner",
+          repo: "test-repo",
+          branch: "ledger-branch",
+          baseRef: "origin/main",
+          cwd: workDir,
+          allowGitPushFallback: false,
+          requireBaseRefMatch: true,
+        })
+      ).rejects.toThrow(/ledger branch moved/);
+      expect(githubClient.graphql).not.toHaveBeenCalled();
+    });
+
     it("should call GraphQL for a single new commit", async () => {
       // Create a feature branch with one new file
       execGit(["checkout", "-b", "feature-branch"], { cwd: workDir });
@@ -282,7 +477,18 @@ describe("push_signed_commits integration tests", () => {
       // Push the branch so ls-remote can resolve its OID
       execGit(["push", "-u", "origin", "feature-branch"], { cwd: workDir });
 
-      global.exec = makeRealExec(workDir);
+      const realExec = makeRealExec(workDir);
+      const execOptions = [];
+      global.exec = {
+        getExecOutput: async (...args) => {
+          execOptions.push(args[2]);
+          return realExec.getExecOutput(...args);
+        },
+        exec: async (...args) => {
+          execOptions.push(args[2]);
+          return realExec.exec(...args);
+        },
+      };
       const githubClient = makeMockGithubClient();
 
       await pushSignedCommits({
@@ -295,6 +501,7 @@ describe("push_signed_commits integration tests", () => {
       });
 
       expect(githubClient.graphql).toHaveBeenCalledTimes(1);
+      expect(execOptions.every(options => options.silent)).toBe(true);
       // Verify the mutation query targets createCommitOnBranch
       const [query, variables] = githubClient.graphql.mock.calls[0];
       expect(query).toContain("createCommitOnBranch");
@@ -560,6 +767,59 @@ describe("push_signed_commits integration tests", () => {
   // ──────────────────────────────────────────────────────
 
   describe("new branch (does not exist on remote)", () => {
+    it("uses a lease so deletion after the unsigned existence probe cannot recreate a PR branch", async () => {
+      execGit(["checkout", "-b", "leased-pr"], { cwd: workDir });
+      execGit(["push", "origin", "leased-pr"], { cwd: workDir });
+      fs.writeFileSync(path.join(workDir, "change.txt"), "change\n");
+      execGit(["add", "change.txt"], { cwd: workDir });
+      execGit(["commit", "-m", "PR change"], { cwd: workDir });
+      const realExec = makeRealExec(workDir);
+      global.exec = {
+        ...realExec,
+        getExecOutput: async (program, args, options) => {
+          if (program === "git" && args[0] === "push") execGit(["update-ref", "-d", "refs/heads/leased-pr"], { cwd: bareDir });
+          return realExec.getExecOutput(program, args, options);
+        },
+      };
+      await expect(
+        pushSignedCommits({
+          githubClient: makeMockGithubClient(),
+          owner: "test-owner",
+          repo: "test-repo",
+          branch: "leased-pr",
+          baseRef: "origin/main",
+          cwd: workDir,
+          signedCommits: false,
+          requireExistingBranch: true,
+        })
+      ).rejects.toThrow("git push failed");
+      expect(execGit(["ls-remote", "origin", "refs/heads/leased-pr"], { cwd: workDir }).stdout.trim()).toBe("");
+    });
+
+    it.each([true, false])("does not recreate a deleted PR branch (signed: %s)", async signedCommits => {
+      execGit(["checkout", "-b", "deleted-pr-branch"], { cwd: workDir });
+      fs.writeFileSync(path.join(workDir, "change.txt"), "change\n");
+      execGit(["add", "change.txt"], { cwd: workDir });
+      execGit(["commit", "-m", "PR change"], { cwd: workDir });
+      global.exec = makeRealExec(workDir);
+      const githubClient = makeMockGithubClient();
+      await expect(
+        pushSignedCommits({
+          githubClient,
+          owner: "test-owner",
+          repo: "test-repo",
+          branch: "deleted-pr-branch",
+          baseRef: "origin/main",
+          cwd: workDir,
+          signedCommits,
+          requireExistingBranch: true,
+        })
+      ).rejects.toThrow("refusing to recreate");
+      expect(githubClient.rest.git.createRef).not.toHaveBeenCalled();
+      expect(githubClient.graphql).not.toHaveBeenCalled();
+      expect(execGit(["ls-remote", "origin", "refs/heads/deleted-pr-branch"], { cwd: workDir }).stdout.trim()).toBe("");
+    });
+
     it("should create remote branch via REST and use parent OID for first commit (single commit)", async () => {
       // Create a local branch with one commit but do NOT push it
       execGit(["checkout", "-b", "new-unpushed-branch"], { cwd: workDir });
@@ -955,6 +1215,44 @@ describe("push_signed_commits integration tests", () => {
   // ──────────────────────────────────────────────────────
 
   describe("git push fallback when GraphQL fails", () => {
+    it("preserves git stderr when the exec wrapper only reports the exit code", async () => {
+      const realExec = global.exec;
+      global.exec = {
+        ...realExec,
+        getExecOutput: vi.fn().mockResolvedValue({
+          exitCode: 1,
+          stdout: "",
+          stderr: "remote: error: GH013: Repository rule violations\n! [rejected] memory/test -> memory/test (non-fast-forward)",
+        }),
+      };
+      try {
+        await expect(pushSignedCommits({ githubClient: {}, owner: "owner", repo: "repo", branch: "memory/test", baseRef: "", cwd: workDir, signedCommits: false })).rejects.toThrow("GH013: Repository rule violations");
+      } finally {
+        global.exec = realExec;
+      }
+    });
+
+    it("redacts credentials from captured git push errors", async () => {
+      const realExec = global.exec;
+      vi.stubEnv("GH_TOKEN", "test-push-secret");
+      global.exec = {
+        ...realExec,
+        getExecOutput: vi.fn().mockResolvedValue({
+          exitCode: 128,
+          stdout: "",
+          stderr: `fatal: https://${["user", "password"].join(":")}@example.com/repo rejected test-push-secret\nAuthorization: Basic encoded-value`,
+        }),
+      };
+      try {
+        const error = await pushSignedCommits({ githubClient: {}, owner: "owner", repo: "repo", branch: "memory/test", baseRef: "", cwd: workDir, signedCommits: false }).catch(error => error);
+        expect(error.message).toContain("fatal:");
+        expect(error.message).not.toMatch(/test-push-secret|password|encoded-value/);
+      } finally {
+        global.exec = realExec;
+        vi.unstubAllEnvs();
+      }
+    });
+
     it("should fall back to git push when GraphQL throws", async () => {
       execGit(["checkout", "-b", "fallback-branch"], { cwd: workDir });
       fs.writeFileSync(path.join(workDir, "fallback.txt"), "Fallback content\n");
@@ -1024,7 +1322,7 @@ describe("push_signed_commits integration tests", () => {
   });
 
   describe("git auth environment propagation", () => {
-    it("should pass gitAuthEnv to ls-remote in the signed-commit path", async () => {
+    it("should pass gitAuthEnv to ls-remote and the partial-clone ancestry probe", async () => {
       const gitAuthEnv = {
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
@@ -1036,6 +1334,9 @@ describe("push_signed_commits integration tests", () => {
       process.env[sentinelKey] = sentinelValue;
 
       const getExecOutput = vi.fn(async (_program, args) => {
+        if (args[0] === "merge-base") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
         if (args[0] === "rev-list") {
           return {
             exitCode: 0,
@@ -1099,6 +1400,17 @@ describe("push_signed_commits integration tests", () => {
       const lsRemoteCall = getExecOutput.mock.calls.find(call => call[1][0] === "ls-remote");
       expect(lsRemoteCall).toBeDefined();
       expect(lsRemoteCall[2]).toEqual(
+        expect.objectContaining({
+          cwd: workDir,
+          env: expect.objectContaining({
+            ...gitAuthEnv,
+            [sentinelKey]: sentinelValue,
+          }),
+        })
+      );
+      const ancestryCall = getExecOutput.mock.calls.find(call => call[1][0] === "merge-base");
+      expect(ancestryCall).toBeDefined();
+      expect(ancestryCall[2]).toEqual(
         expect.objectContaining({
           cwd: workDir,
           env: expect.objectContaining({
@@ -1924,6 +2236,54 @@ describe("push_signed_commits integration tests", () => {
   });
 
   describe("stale-base and synthesized payload safety", () => {
+    it("keeps the rebased branch attached when signing fails and git push fallback is enabled", async () => {
+      const branch = "stale-base-delivery";
+      execGit(["checkout", "-b", branch], { cwd: workDir });
+      fs.writeFileSync(path.join(workDir, "agent.txt"), "agent change\n");
+      execGit(["add", "agent.txt"], { cwd: workDir });
+      execGit(["commit", "-m", "Agent change"], { cwd: workDir });
+      const originalTip = execGit(["rev-parse", "HEAD"], { cwd: workDir }).stdout.trim();
+
+      execGit(["checkout", "main"], { cwd: workDir });
+      fs.writeFileSync(path.join(workDir, "upstream.txt"), "upstream change\n");
+      execGit(["add", "upstream.txt"], { cwd: workDir });
+      execGit(["commit", "-m", "Advance base"], { cwd: workDir });
+      execGit(["push", "origin", "main"], { cwd: workDir });
+      const baseTip = execGit(["rev-parse", "HEAD"], { cwd: workDir }).stdout.trim();
+      execGit(["checkout", branch], { cwd: workDir });
+
+      global.exec = makeRealExec(workDir);
+      const githubClient = makeMockGithubClient({ failWithError: new Error("Resource not accessible by integration") });
+      githubClient.rest.git.createRef.mockImplementation(async ({ ref, sha }) => {
+        execGit(["update-ref", ref, sha], { cwd: bareDir });
+        return { data: {} };
+      });
+
+      const pushedSha = await pushSignedCommits({
+        githubClient,
+        owner: "test-owner",
+        repo: "test-repo",
+        branch,
+        baseRef: "origin/main",
+        cwd: workDir,
+        allowGitPushFallback: true,
+      });
+
+      const rebasedTip = execGit(["rev-parse", "HEAD"], { cwd: workDir }).stdout.trim();
+      expect(execGit(["symbolic-ref", "--short", "HEAD"], { cwd: workDir }).stdout.trim()).toBe(branch);
+      expect(execGit(["rev-parse", branch], { cwd: workDir }).stdout.trim()).toBe(rebasedTip);
+      expect(rebasedTip).not.toBe(originalTip);
+      expect(execGit(["rev-parse", "HEAD^"], { cwd: workDir }).stdout.trim()).toBe(baseTip);
+      expect(githubClient.graphql).toHaveBeenCalledOnce();
+      expect(githubClient.rest.git.createRef).toHaveBeenCalledWith({ owner: "test-owner", repo: "test-repo", ref: `refs/heads/${branch}`, sha: baseTip });
+
+      const remoteTip = execGit(["rev-parse", `refs/heads/${branch}`], { cwd: bareDir }).stdout.trim();
+      expect(pushedSha).toBe(rebasedTip);
+      expect(remoteTip).toBe(rebasedTip);
+      expect(execGit(["show", `${remoteTip}:agent.txt`], { cwd: bareDir }).stdout).toBe("agent change\n");
+      expect(execGit(["show", `${remoteTip}:upstream.txt`], { cwd: bareDir }).stdout).toBe("upstream change\n");
+    });
+
     it("should fail signed replay when rebasing stale commits onto current base conflicts", async () => {
       // Base branch starts with shared file.
       fs.writeFileSync(path.join(workDir, "shared.txt"), "base\n");

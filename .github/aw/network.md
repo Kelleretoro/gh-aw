@@ -86,13 +86,15 @@ Keywords expanding to curated domain lists:
 | `lean` | Lean theorem prover | `lean-lang.org`, `elan.lean-lang.org`, `reservoir.lean-lang.org` |
 | `python-native` | Python native build deps | Native toolchain mirrors for building Python packages from source |
 | `copilot-vendor` | Copilot plan-specific APIs / telemetry | `api.business.githubcopilot.com`, `api.enterprise.githubcopilot.com`, `api.individual.githubcopilot.com`, `telemetry.enterprise.githubcopilot.com` |
+| `codex-vendor` | Optional Codex authentication / telemetry (explicit opt-in) | `auth.openai.com`, `ab.chatgpt.com` |
 | `copilot` | Copilot engine transport | `api.githubcopilot.com`, GitHub API/web, `host.docker.internal`, `raw.githubusercontent.com` |
-| `claude` | Claude engine transport | Anthropic APIs, GitHub transport, certificate/OCSP services, Ubuntu package metadata, Playwright downloads |
-| `codex` | Codex engine transport | `api.openai.com`, `chatgpt.com`, GitHub API/web, `host.docker.internal` |
-| `gemini` | Gemini engine transport | `generativelanguage.googleapis.com`, `*.googleapis.com`, GitHub web, `host.docker.internal` |
+| `claude` | Claude engine transport | `api.github.com`, `github.com`, `host.docker.internal`, `raw.githubusercontent.com`; direct Anthropic API is added only when the effective target is Anthropic |
+| `codex` | Codex engine transport | `172.30.0.1`, `api.openai.com`, GitHub API/web, `host.docker.internal` |
+| `gemini` | Gemini engine transport (deprecated, prefer `agy`) | `generativelanguage.googleapis.com`, GitHub web, `host.docker.internal`, `raw.githubusercontent.com` |
+| `agy` | Agy (Antigravity CLI) engine transport (experimental) | `github.com`, `api.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `host.docker.internal` |
 | `pi` | Pi engine transport | `api.githubcopilot.com`, GitHub web, `host.docker.internal`, `raw.githubusercontent.com` |
 | `pi-base` | Pi provider-independent baseline | `github.com`, `host.docker.internal`, `raw.githubusercontent.com` |
-| `threat-detection` | Compatibility alias for Copilot threat detection | Copilot API/telemetry hosts, GitHub API/web, `host.docker.internal`, `registry.npmjs.org` |
+| `threat-detection` | Compatibility alias for Copilot threat detection | Copilot API hosts, GitHub API/web, `host.docker.internal`, `registry.npmjs.org` |
 
 ## Engine Domain Sets
 
@@ -105,12 +107,19 @@ API proxy.
 | Engine set | Included domains |
 |---|---|
 | `copilot` | `api.github.com`, `api.githubcopilot.com`, `github.com`, `host.docker.internal`, `raw.githubusercontent.com` |
-| `claude` | Anthropic APIs, GitHub transport, certificate/OCSP services, Ubuntu package metadata, Playwright downloads, and `host.docker.internal` |
-| `codex` | `172.30.0.1`, `api.github.com`, `api.openai.com`, `chatgpt.com`, `github.com`, `host.docker.internal`, `openai.com` |
-| `gemini` | `*.googleapis.com`, `generativelanguage.googleapis.com`, `github.com`, `host.docker.internal`, `raw.githubusercontent.com` |
+| `claude` | `api.github.com`, `github.com`, `host.docker.internal`, `raw.githubusercontent.com`; `api.anthropic.com` is added only for the default Anthropic target |
+| `codex` | `172.30.0.1`, `api.github.com`, `api.openai.com`, `github.com`, `host.docker.internal` |
+| `codex-vendor` | Optional authentication/telemetry: `auth.openai.com`, `ab.chatgpt.com` |
+| `gemini` | `generativelanguage.googleapis.com`, `github.com`, `host.docker.internal`, `raw.githubusercontent.com` |
 | `pi` | `api.githubcopilot.com`, `github.com`, `host.docker.internal`, `raw.githubusercontent.com`; provider-scoped models replace the API host with the selected provider endpoint |
 | `pi-base` | `github.com`, `host.docker.internal`, `raw.githubusercontent.com`; applied as the provider-independent baseline before a provider prefix is resolved |
-| `threat-detection` | Applied automatically only to Copilot threat-detection runs and available as a compatibility alias: Copilot API and telemetry hosts, `api.github.com`, `github.com`, `host.docker.internal`, and `registry.npmjs.org` for read-only lockfile validation. |
+| `threat-detection` | Applied automatically only to Copilot threat-detection runs and available as a compatibility alias: Copilot API hosts, `api.github.com`, `github.com`, `host.docker.internal`, and `registry.npmjs.org` for read-only lockfile validation. Vendor telemetry is available only when `copilot-vendor` is explicitly added to `network.allowed`. |
+
+The `codex` set excludes the broad `openai.com` and `chatgpt.com` suffixes. Add `codex-vendor` explicitly for the listed authentication/telemetry hosts; any other required vendor host needs its own explicit domain. GitHub-hosted Codex detection uses Copilot transport without direct `api.openai.com` access. The `gemini` set excludes `*.googleapis.com`; package downloads such as `storage.googleapis.com` require an ecosystem opt-in such as `dart`, or an explicit domain.
+
+The `claude` set excludes certificate/OCSP services, package metadata, telemetry, and Playwright downloads. Add the required domain or ecosystem explicitly; configuring the Playwright tool also enables its download domains.
+
+AWF treats bare domains as suffix rules, not exact-host rules. Retaining `github.com` for repository access also permits GitHub Packages subdomains. Set `network.blocked: [pkg.github.com]` to exclude them while preserving repository access; blocked domains take precedence.
 
 ## Invalid Shorthands
 
@@ -161,6 +170,7 @@ network:
 - **Deny-by-default**: if a Claude or Codex workflow sets `network` explicitly without a `hosted-web` policy, hosted web tools compile to disabled for that engine.
 - Setting `hosted-web` on any engine other than Claude or Codex is a compile error.
 - On import merge, allowed/blocked lists from imported files combine with the main workflow's, but only when both policies are enabled; the main workflow's scalar settings (such as `max-uses`) and an explicit `hosted-web: false` on either side win — see [syntax-tools-imports.md](syntax-tools-imports.md).
+- Copilot has no `hosted-web` policy. Its native web tools are unavailable in offline BYOK mode, so `tools.web-search` and CLI-mode `tools.web-fetch` are compile errors regardless of network restrictions. Use a web MCP server, a supported engine, or SDK mode for custom proxy-aware `web-fetch`.
 
 ## Inferring Ecosystem From Repository Files
 
@@ -180,6 +190,8 @@ For workflows that build, test, or install packages, add the matching ecosystem 
 | `pubspec.yaml` | `dart` | `pub.dev` |
 
 > ⚠️ **`network: defaults` alone is never sufficient for code workflows** — `defaults` covers basic infrastructure (CAs, Ubuntu verification) but not package registries. Always add the language ecosystem.
+
+For artifact-first workflows, include `github-actions` when downloading Actions artifacts. If a missing artifact triggers recomputation, also infer the ecosystem from the manifests needed by the fallback build or tests and allow it alongside `defaults`. Artifact storage and package-registry access are separate needs.
 
 ## Common Patterns
 

@@ -12,8 +12,8 @@ permissions:
   copilot-requests: write
 engine:
   id: codex
-  model-provider: openai
-model: openai/gpt-5.3-codex
+  model-provider: github
+model: copilot/gpt-6.1-sol
 strict: true
 imports:
   - shared/trending-charts-simple.md
@@ -35,7 +35,7 @@ steps:
     run: |
       # Download usage artifacts for the last 30 days in parallel so the main
       # forecast step reads from the local cache and produces output quickly.
-      DEBUG='*' "$GITHUB_WORKSPACE/gh-aw" forecast \
+      "$GITHUB_WORKSPACE/gh-aw" forecast \
         --repo "$REPOSITORY" \
         --days 30 \
         --sample 100 \
@@ -55,7 +55,7 @@ steps:
       mkdir -p "$output_dir"
 
       set +e
-      DEBUG='*' "$GITHUB_WORKSPACE/gh-aw" forecast \
+      "$GITHUB_WORKSPACE/gh-aw" forecast \
         --repo "$REPOSITORY" \
         --days 30 \
         --period month \
@@ -77,7 +77,7 @@ steps:
 post-steps:
   - name: Upload spending forecast report
     if: always()
-    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+    uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
     with:
       name: spending-forecast-${{ github.run_id }}
       path: /tmp/gh-aw/agent/spending-forecast/

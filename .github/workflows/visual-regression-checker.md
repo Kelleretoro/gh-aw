@@ -15,7 +15,9 @@ on:
 permissions:
   contents: read
   pull-requests: read
-engine: copilot
+engine:
+  id: copilot
+  copilot-sdk: true
 imports:
   - shared/otlp.md
   - shared/reporting.md
@@ -34,6 +36,7 @@ network:
     - playwright
     - local
     - node
+    - host.docker.internal
 jobs:
   agent:
     timeout-minutes: 15
@@ -49,7 +52,7 @@ steps:
       persist-credentials: false
 
   - name: Setup Node.js
-    uses: actions/setup-node@v7.0.0
+    uses: actions/setup-node@v7.1.0
     with:
       node-version: '24'
       cache: 'npm'

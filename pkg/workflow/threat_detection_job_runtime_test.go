@@ -10,6 +10,50 @@ import (
 	"github.com/github/gh-aw/pkg/constants"
 )
 
+func TestDockerImagePullPolicySteps(t *testing.T) {
+	var step strings.Builder
+	generateDownloadDockerImagesStep(&step, []string{"registry.example.com/app:v1"}, "never")
+	if !strings.Contains(step.String(), "GH_AW_DOCKER_IMAGE_PULL_POLICY: never") {
+		t.Fatalf("agent download step missing local-only policy: %s", step.String())
+	}
+	step.Reset()
+	generateDownloadDockerImagesStep(&step, []string{"registry.example.com/app:v1"}, "always")
+	if !strings.Contains(step.String(), "GH_AW_DOCKER_IMAGE_PULL_POLICY: always") {
+		t.Fatalf("agent download step missing explicit pull policy: %s", step.String())
+	}
+	step.Reset()
+	generateDownloadDockerImagesStep(&step, []string{"registry.example.com/app:v1"}, "")
+	if strings.Contains(step.String(), "GH_AW_DOCKER_IMAGE_PULL_POLICY") {
+		t.Fatalf("default download step must not override policy: %s", step.String())
+	}
+
+	data := &WorkflowData{
+		AI:             "codex",
+		RawFrontmatter: map[string]any{"docker-image-pull-policy": "never"},
+		SafeOutputs:    &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{}},
+		Features:       map[string]any{string(constants.GHAWDetectionFeatureFlag): true},
+		SandboxConfig:  &SandboxConfig{Agent: &AgentSandboxConfig{Type: SandboxTypeAWF}},
+	}
+	steps := strings.Join(NewCompiler().buildDetectionJobSteps(data), "")
+	if !strings.Contains(steps, "GH_AW_DOCKER_IMAGE_PULL_POLICY: never") {
+		t.Fatalf("detection download step missing local-only policy: %s", steps)
+	}
+	data.Features[string(constants.GHAWDetectionFeatureFlag)] = false
+	steps = strings.Join(NewCompiler().buildDetectionJobSteps(data), "")
+	if !strings.Contains(steps, "GH_AW_DOCKER_IMAGE_PULL_POLICY: never") {
+		t.Fatalf("inline detection download step missing local-only policy: %s", steps)
+	}
+
+	data.RawFrontmatter["docker-image-pull-policy"] = "always"
+	for _, featureEnabled := range []bool{true, false} {
+		data.Features[string(constants.GHAWDetectionFeatureFlag)] = featureEnabled
+		steps = strings.Join(NewCompiler().buildDetectionJobSteps(data), "")
+		if !strings.Contains(steps, "GH_AW_DOCKER_IMAGE_PULL_POLICY: always") {
+			t.Fatalf("detection download step missing explicit pull policy with feature enabled=%v: %s", featureEnabled, steps)
+		}
+	}
+}
+
 func TestBuildDetectionJobStepsCodexAvoidsDuplicateContainerPullStep(t *testing.T) {
 	compiler := NewCompiler()
 
@@ -100,6 +144,8 @@ func TestBuildInstallDetectionEngineForExternalDetectorStepIncludesNodeRuntime(t
 		wantInstallStep      string
 		wantArcDindSetup     bool
 		wantCopilotInstalled bool
+		wantNodeActionRef    string
+		wantNodeVersion      string
 	}{
 		{
 			name: "copilot on standard topology",
@@ -158,14 +204,66 @@ func TestBuildInstallDetectionEngineForExternalDetectorStepIncludesNodeRuntime(t
 			},
 			wantInstallStep: "Install Codex CLI",
 		},
+		{
+			name: "copilot injected node setup honors runtimes.node action override",
+			data: &WorkflowData{
+				AI:          "copilot",
+				Runtimes:    map[string]any{"node": map[string]any{"action-repo": "myorg/myrepo/.github/actions/setup-node", "action-version": "main"}},
+				SafeOutputs: &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{}},
+			},
+			wantInstallStep:      "Install GitHub Copilot CLI",
+			wantCopilotInstalled: true,
+			wantNodeActionRef:    "myorg/myrepo/.github/actions/setup-node@main",
+		},
+		{
+			name: "claude bundled node setup honors runtimes.node action override",
+			data: &WorkflowData{
+				AI:          "claude",
+				Runtimes:    map[string]any{"node": map[string]any{"action-repo": "myorg/myrepo/.github/actions/setup-node", "action-version": "main"}},
+				SafeOutputs: &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{}},
+			},
+			wantInstallStep:   "Install Claude Code CLI",
+			wantNodeActionRef: "myorg/myrepo/.github/actions/setup-node@main",
+		},
+		{
+			name: "codex bundled node setup honors runtimes.node action override",
+			data: &WorkflowData{
+				AI:          "codex",
+				Runtimes:    map[string]any{"node": map[string]any{"action-repo": "myorg/myrepo/.github/actions/setup-node", "action-version": "main"}},
+				SafeOutputs: &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{}},
+			},
+			wantInstallStep:   "Install Codex CLI",
+			wantNodeActionRef: "myorg/myrepo/.github/actions/setup-node@main",
+		},
+		{
+			name: "external detector honors pinned node version",
+			data: &WorkflowData{
+				AI:          "claude",
+				Runtimes:    map[string]any{"node": map[string]any{"version": "24.21.0"}},
+				SafeOutputs: &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{}},
+			},
+			wantInstallStep: "Install Claude Code CLI",
+			wantNodeVersion: "24.21.0",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			steps := strings.Join(compiler.buildInstallDetectionEngineForExternalDetectorStep(tt.data), "")
 
+			wantNodeActionRef := tt.wantNodeActionRef
+			if wantNodeActionRef == "" {
+				wantNodeActionRef = getActionPin("actions/setup-node")
+			}
+			if !strings.Contains(steps, "uses: "+wantNodeActionRef+"\n") {
+				t.Errorf("expected Setup Node.js to use %q:\n%s", wantNodeActionRef, steps)
+			}
+
 			if count := strings.Count(steps, "- name: Setup Node.js"); count != 1 {
 				t.Fatalf("expected exactly one Setup Node.js step, got %d:\n%s", count, steps)
+			}
+			if tt.wantNodeVersion != "" && !strings.Contains(steps, "node-version: '"+tt.wantNodeVersion+"'") {
+				t.Errorf("expected Node version %q:\n%s", tt.wantNodeVersion, steps)
 			}
 			if tt.wantInstallStep != "" {
 				nodeIndex := strings.Index(steps, "- name: Setup Node.js")
@@ -198,17 +296,20 @@ func TestBuildInstallDetectionEngineForExternalDetectorStepIncludesNodeRuntime(t
 	}
 }
 
-func TestBuildPullAWFContainersStepPropagatesFeatures(t *testing.T) {
+func TestBuildPullAWFContainersStepPropagatesGitHubCLIMode(t *testing.T) {
 	compiler := NewCompiler()
 
-	t.Run("cli-proxy image included when feature flag is enabled", func(t *testing.T) {
+	t.Run("cli-proxy image included when GitHub gh-proxy mode is enabled", func(t *testing.T) {
 		data := &WorkflowData{
 			AI: "copilot",
 			SafeOutputs: &SafeOutputsConfig{
 				ThreatDetection: &ThreatDetectionConfig{},
 			},
-			Features: map[string]any{
-				string(constants.CliProxyFeatureFlag): true,
+			Tools: map[string]any{
+				"github": map[string]any{"mode": "gh-proxy"},
+			},
+			NetworkPermissions: &NetworkPermissions{
+				Firewall: &FirewallConfig{Enabled: true, Version: "v0.26.0"},
 			},
 			SandboxConfig: &SandboxConfig{
 				Agent: &AgentSandboxConfig{
@@ -221,7 +322,7 @@ func TestBuildPullAWFContainersStepPropagatesFeatures(t *testing.T) {
 		stepsString := strings.Join(steps, "")
 
 		if !strings.Contains(stepsString, "cli-proxy") {
-			t.Error("Expected cli-proxy image in pull step when cli-proxy feature flag is enabled")
+			t.Error("Expected cli-proxy image in pull step when GitHub gh-proxy mode is enabled")
 		}
 	})
 
@@ -243,7 +344,183 @@ func TestBuildPullAWFContainersStepPropagatesFeatures(t *testing.T) {
 		stepsString := strings.Join(steps, "")
 
 		if strings.Contains(stepsString, "cli-proxy") {
-			t.Error("Expected no cli-proxy image in pull step when cli-proxy feature flag is not set")
+			t.Error("Expected no cli-proxy image in pull step when GitHub gh-proxy mode is not enabled")
+		}
+	})
+}
+
+func TestBuildThreatDetectionAWFConfigCACert(t *testing.T) {
+	tests := []struct {
+		name            string
+		sandbox         *SandboxConfig
+		safe            *SafeOutputsConfig
+		detectionEngine string
+		want            string
+	}{
+		{name: "no sandbox or safe outputs"},
+		{name: "no agent sandbox", sandbox: &SandboxConfig{}},
+		{name: "no certificate", sandbox: &SandboxConfig{Agent: &AgentSandboxConfig{}}},
+		{
+			name:    "inherits agent certificate",
+			sandbox: &SandboxConfig{Agent: &AgentSandboxConfig{CACert: "/tmp/agent-ca.pem"}},
+			want:    "/tmp/agent-ca.pem",
+		},
+		{
+			name:    "inherits with default detection settings",
+			sandbox: &SandboxConfig{Agent: &AgentSandboxConfig{CACert: "/tmp/agent-ca.pem"}},
+			safe:    &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{}},
+			want:    "/tmp/agent-ca.pem",
+		},
+		{
+			name:    "inherits without detection config",
+			sandbox: &SandboxConfig{Agent: &AgentSandboxConfig{CACert: "/tmp/agent-ca.pem"}},
+			safe:    &SafeOutputsConfig{},
+			want:    "/tmp/agent-ca.pem",
+		},
+		{
+			name:    "detection override",
+			sandbox: &SandboxConfig{Agent: &AgentSandboxConfig{CACert: "/tmp/agent-ca.pem"}},
+			safe:    &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{CACert: "/tmp/detection-ca.pem"}},
+			want:    "/tmp/detection-ca.pem",
+		},
+		{
+			name:    "explicitly disables inheritance",
+			sandbox: &SandboxConfig{Agent: &AgentSandboxConfig{CACert: "/tmp/agent-ca.pem"}},
+			safe:    &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{DisableCACert: true}},
+		},
+		{
+			name:            "different detection engine does not inherit",
+			sandbox:         &SandboxConfig{Agent: &AgentSandboxConfig{CACert: "/tmp/agent-ca.pem"}},
+			safe:            &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{EngineConfig: &EngineConfig{ID: "copilot"}}},
+			detectionEngine: "copilot",
+		},
+		{
+			name: "detection certificate without agent sandbox",
+			safe: &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{CACert: "/tmp/detection-ca.pem"}},
+			want: "/tmp/detection-ca.pem",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := &WorkflowData{AI: "claude", SandboxConfig: tt.sandbox, SafeOutputs: tt.safe}
+			originalCACert := extractAPIProxyCACert(data)
+			detectionData := buildThreatDetectionWorkflowData(data, tt.detectionEngine)
+			engineName := tt.detectionEngine
+			if engineName == "" {
+				engineName = "claude"
+			}
+			if got := detectionData.SandboxConfig.Agent.CACert; got != tt.want {
+				t.Fatalf("detection CA certificate = %q, want %q", got, tt.want)
+			}
+			configJSON, err := BuildAWFConfigJSON(AWFCommandConfig{
+				EngineName:   engineName,
+				WorkflowData: detectionData,
+			})
+			if err != nil {
+				t.Fatalf("BuildAWFConfigJSON() error = %v", err)
+			}
+			var config struct {
+				APIProxy struct {
+					CACert string `json:"caCert"`
+				} `json:"apiProxy"`
+			}
+			if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+				t.Fatalf("unmarshal AWF config: %v", err)
+			}
+			if config.APIProxy.CACert != tt.want {
+				t.Errorf("apiProxy.caCert = %q, want %q", config.APIProxy.CACert, tt.want)
+			}
+			if tt.want == "" && strings.Contains(configJSON, `"caCert"`) {
+				t.Error("apiProxy.caCert must be omitted when not configured")
+			}
+			detectionData.SandboxConfig.Agent.CACert = "/tmp/changed.pem"
+			if extractAPIProxyCACert(data) != originalCACert {
+				t.Error("detection sandbox must not mutate the agent sandbox")
+			}
+		})
+	}
+}
+
+func TestDetectionExecutionStepsCACert(t *testing.T) {
+	compiler := NewCompiler()
+	for _, engine := range []string{"claude", "codex", "copilot"} {
+		for _, override := range []string{"", "/tmp/detection-ca.pem"} {
+			data := &WorkflowData{
+				AI:            engine,
+				SandboxConfig: &SandboxConfig{Agent: &AgentSandboxConfig{CACert: "/tmp/agent-ca.pem"}},
+				SafeOutputs:   &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{CACert: override}},
+			}
+			want := "/tmp/agent-ca.pem"
+			if override != "" {
+				want = override
+			}
+			for name, build := range map[string]func(*WorkflowData) []string{
+				"external": compiler.buildExternalDetectorExecutionStep,
+				"inline":   compiler.buildDetectionEngineExecutionStep,
+			} {
+				t.Run(engine+"/"+name+"/"+want, func(t *testing.T) {
+					steps := strings.ReplaceAll(strings.Join(build(data), ""), `\"`, `"`)
+					if !strings.Contains(steps, `"caCert":"`+want+`"`) {
+						t.Errorf("detection execution steps missing apiProxy.caCert %q", want)
+					}
+					if override != "" && strings.Contains(steps, "/tmp/agent-ca.pem") {
+						t.Error("detection execution steps must not use the overridden agent certificate")
+					}
+				})
+			}
+		}
+	}
+
+	t.Run("different detection engine does not inherit", func(t *testing.T) {
+		data := &WorkflowData{
+			AI:            "claude",
+			SandboxConfig: &SandboxConfig{Agent: &AgentSandboxConfig{CACert: "/tmp/agent-ca.pem"}},
+			SafeOutputs: &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{
+				EngineConfig: &EngineConfig{ID: "copilot"},
+			}},
+		}
+		for name, build := range map[string]func(*WorkflowData) []string{
+			"external": compiler.buildExternalDetectorExecutionStep,
+			"inline":   compiler.buildDetectionEngineExecutionStep,
+		} {
+			t.Run(name, func(t *testing.T) {
+				steps := strings.Join(build(data), "")
+				if strings.Contains(steps, `"caCert":`) || strings.Contains(steps, "/tmp/agent-ca.pem") {
+					t.Errorf("different-engine detection must not inherit the agent CA: %s", steps)
+				}
+			})
+		}
+	})
+
+	t.Run("public endpoint override can disable inherited CA", func(t *testing.T) {
+		data := &WorkflowData{
+			AI: "claude",
+			EngineConfig: &EngineConfig{
+				ID:        "claude",
+				APITarget: "private-upstream.example.com",
+			},
+			SandboxConfig: &SandboxConfig{Agent: &AgentSandboxConfig{CACert: "/tmp/agent-ca.pem"}},
+			SafeOutputs: &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{
+				DisableCACert: true,
+				EngineConfig: &EngineConfig{
+					ID:        "claude",
+					APITarget: "public-upstream.example.com",
+				},
+			}},
+		}
+		for name, build := range map[string]func(*WorkflowData) []string{
+			"external": compiler.buildExternalDetectorExecutionStep,
+			"inline":   compiler.buildDetectionEngineExecutionStep,
+		} {
+			t.Run(name, func(t *testing.T) {
+				steps := strings.Join(build(data), "")
+				if strings.Contains(steps, `"caCert":`) || strings.Contains(steps, "/tmp/agent-ca.pem") {
+					t.Errorf("public-upstream detection must not inherit the agent CA: %s", steps)
+				}
+				if !strings.Contains(steps, "public-upstream.example.com") {
+					t.Errorf("expected detection to use its public endpoint override: %s", steps)
+				}
+			})
 		}
 	})
 }

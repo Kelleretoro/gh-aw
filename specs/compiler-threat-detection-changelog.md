@@ -16,6 +16,34 @@ This changelog records the version history and the dated mapping audits for `spe
 
 | Version | Change |
 |---|---|
+| 1.0.68 | Specified the supporting runtime privacy contract for CLI proxy and MCP gateway startup diagnostics: name-only proxy forwarding, redaction of all six runner proxy variables and late mask registrations, coalesced credential overlaps, private capture, withheld gateway configuration stdout, and bounded fail-closed CLI publication. Mapped concrete regression suites and added proxy-bearing upstream-failure and gateway late-mask coverage. Does not claim arbitrary-log confidentiality or additional CTR-017 static analysis; no new compiler rejection, threat identifier, permission grant, or lock-file schema change. |
+| 1.0.67 | Audit-only clarification of retained PR-head checkout after source-branch deletion. Maps same-repository `pull_request` ref isolation and actual checked-out baseline export to RS-05a, preserves fatal checkout errors and independent safe-output lifecycle checks, and leaves CTR-008/028/030 unchanged. No new threat identifier, permission grant, or lock-file schema change. |
+| 1.0.66 | Extended CTR-005 with custom-job ordering and detection gates. The compiler checks the final graph, rejects unordered and pre-detection downstream jobs, and adds non-overridable successful-job and clean-output guards to downstream custom jobs, including reusable workflow calls. Failure, cancellation, skips, missing results, and warn-mode findings block execution; disabled detection remains exempt. Mapped the transitive Actions/AW `custom-job-detection` subset, registry metadata, graph/condition regressions, and regenerated lock files. No new threat identifier or lock-file schema change. |
+| 1.0.65 | Added `otlp-secret-leak`, an Actions/AW AST lint subset of CTR-017 that detects secret-tainted OTLP span/resource attributes and modeled Actions environment flows with value-free diagnostics. Documented that the check is advisory and cannot identify hard-coded credentials, arbitrary runtime values, or collector trust. No new threat identifier or lock-file schema change. |
+| 1.0.64 | Adds the compromised-intermediate-CA threat and maps bootstrap/runtime controls to security architecture §6.8: independently authenticated AWF/Copilot checksum manifests, literal frontmatter manifest-pin overrides bound to explicit versions, compiler-pinned Compose bytes, authenticated apt signing key, HTTPS-only redirects, actual Go release-toolchain verification and bounded runtime inventory. Overrides propagate through matching detection/eval installations; Copilot overrides bypass toolcache activation. Preserves CTR-011 destination authorization as a separate boundary and records broader download enforcement as a candidate. Unreviewed release downloads without a supplied pin fail closed; no new threat identifier or lock-file schema change. |
+| 1.0.63 | Audit-only clarification of the Copilot SDK runtime boundary: explicit staged-only skill registration with ambient discovery disabled, hard rejection of file and symlink roots, and unchanged permission-denial counting and termination. Separates prompt recovery guidance from authorization and preserves CTR-023 engine-capability checks and CTR-028/030 generated provenance requirements. No new threat identifier or lock-file schema change. |
+| 1.0.62 | Added authored `pull-request-target-checkout` (CTR-008 subset) and `prompt-expression` (CTR-010 subset) rules, bringing the AST registry to 23 rules. Shared existing base-ref and literal-pair trust predicates with compiler checkout validation and reused the Actions expression visitor for prompt checks. Preserved authored strict/non-strict checkout policy, import uncertainty, exact allowlist matching, value-free prompt diagnostics, and native Actions evidence boundaries. Prompt checks reject multiline/malformed interpolations and blocked property traversal without claiming the full context allowlist. Added registry, CLI, compiler-policy, cancellation, and repository-workflow regressions. No new threat identifier or lock-file schema change. |
+| 1.0.61 | Added known compiler threat IDs to every built-in AST rule, propagated registry-owned references through text/JSON diagnostics and rule listings, and moved detailed lint reference content out of the CLI page. Unmapped extension rules can omit the reference. Checks URL-filter SSL prerequisites in compiler-accepted non-strict `sandbox.agent.args`; legacy `network.firewall` blocks require migration rather than an invalid SSL-setting remedy. Added mapping, output, and source-to-compiler regressions without changing the compiler schema. No new threat identifier or lock-file schema change. |
+| 1.0.60 | Reviewed the threat catalog against the 18-rule Actions/AW registry and added three authored-AW checks: privileged PR-target role admission (CTR-008 subset), safe-output shell expansion (CTR-009), and URL-filter SSL prerequisites (CTR-011 subset), bringing the registry to 21 rules. Shared the existing lexical shell detector with compiler validation without changing its policy. Preserved strict/non-strict role severity and scoped warning suppression, import uncertainty, value-free diagnostics, and native Actions evidence boundaries. Added registry contracts, CLI regressions, shared-detector tests, and repository-workflow coverage. No new threat identifier or lock-file schema change. |
+| 1.0.59 | Required registry-wide positive/negative contracts across supported ASTs and strict/non-strict AW. Added debug-only CLI visibility for secret-leak coverage warnings while preserving internal diagnostics, error findings, analysis failures, and other rules' warnings. Corrected JavaScript object-rest member provenance without filtering genuine secret-derived values. No new threat identifier or lock-file schema change. |
+| 1.0.58 | Added AST-only observable subsets for tool scope (CTR-003), sandbox configuration (CTR-004), image argument injection (CTR-013), explicit checkout expansion (CTR-033), and fork author-association values (CTR-034), bringing the registry to 18 rules. Preserved import uncertainty and authored strict policy without inferring runtime provenance, capabilities, visibility, or authorization. Refined opt-in JavaScript masking/public-metadata semantics while retaining unresolved-flow warnings. No new threat identifier or lock-file schema change. |
+| 1.0.57 | Converted further compiler policies into AST linters: bare network allowances (CTR-011 subset), unconstrained wildcard PR-branch push targets (CTR-012 subset), enabled Node install hooks (CTR-014), and bare label allowlists (CTR-015). Rules declare AW/Actions AST targets; the CLI accepts `.md`, `.yml`, and `.yaml` without compilation. AW-only checks visit explicit execution nodes and report unavailable generated-flow coverage. Preserved source strict-policy severities, always-warning push findings, deprecated constraint aliases, import uncertainty, and valid domain/label patterns. No new threat identifier or lock-file schema change. |
+| 1.0.56 | Added independently observable explicit permission-scope and invalid OIDC-read checks (CTR-001 subset), plus authored AW source checks for disabled version checking (CTR-018), conditional imports (CTR-020), and private-to-public flow opt-outs (CTR-031). Extended the CTR-017 subset with opt-in native Go TypeScript compiler-backed JavaScript analysis. Documented strict-policy severities, native Actions/source-evidence boundaries, explicit JavaScript compiler/source configuration, and deferred authorization/import-resolution obligations. No new threat identifier or lock-file schema change. |
+| 1.0.55 | Mapped independent Actions/AW AST lint checks for immutable action references (CTR-002), direct template injection (CTR-006), modeled secret disclosure (CTR-017), workflow-run scope (CTR-021), and literal job timeouts (CTR-026). Documented observable subsets, concrete implementation/test evidence, and candidates requiring source policy, semantic analysis, or runtime evidence. No new `CTR-*` identifier, replacement of existing conformance requirements, or lock-file schema change. |
+| 1.0.54 | Added MCP-COMPILE-001–006 for the host-side compilation boundary: startup-only write capability, dedicated read-only mode plus `--no-emit --no-check-update`, early rejection of writing/scanner options, filesystem and Docker image-store preservation, cached-only remote imports and nested includes rooted at the repository, generated-YAML validation independent of stale locks, and write-enabled authorization/emission. Preserved trusted CLI no-emit import population. Mapped concrete regression tests and a bounded TLA+ model with synthetic negative controls and reachability witnesses. No new generated-workflow `CTR-*` rule or lock-file schema change. |
+| 1.0.53 | Audit-only clarification that same-repository bot checkout on `pull_request` and `pull_request_target` `ready_for_review` and `reopened` events is a runtime trust control governed by Security Architecture Specification RS-05a, not a new compiler threat rule. |
+| 1.0.52 | Audit-only clarification of the safe-output patch/bundle runtime integrity boundary (PTI-001–007 and bounded TLA+ evidence), plus CTR-033 / T-CTR-048 for explicit `checkout.multi: true`, single-repository expression validation in agent and safe-output jobs, mode-preserving merges, and bounded TLA+ negative controls and reachability witnesses. No new generated-workflow compatibility change beyond CTR-033. |
+| 1.0.51 | Extends CTR-008 to reject `pull_request_target` with `on.roles` containing `read` or `all` in strict mode; in non-strict mode, the dangerous feature flag suppresses only the roles warning. |
+| 1.0.50 | Extended CTR-032 with creating-run traceability for every issue comment, PR description, and PR review comment from first publication. Specified HTML execution markers except percent-encoded Markdown anchor markers for review comments and replies, independent of visible footers, with forged-marker and destination API filtering coverage required. |
+| 1.0.49 | Added CTR-032 for step-scoped safe-output publishing identity, replacement of forged execution-provenance comments, and fail-closed runtime metadata validation. |
+| 1.0.48 | Audit-only clarification that same-repository checkout for allow-listed App comments and reviews is a runtime trust control governed by Security Architecture Specification RS-05a, not a new compiler threat rule. |
+| 1.0.47 | Audit-only clarification that same-repository checkout for allow-listed App comments is a runtime trust control governed by Security Architecture Specification RS-05a, not a new compiler threat rule. |
+| 1.0.46 | Extended CTR-017 OTLP exclusions to evals AWF sandboxes and mapped evals-enabled/disabled regression coverage. |
+| 1.0.45 | Extended CTR-017 with OTLP collector endpoint/header exclusions for agent and inline/external threat-detection AWF sandboxes when `--exclude-env` is supported; retained host-side exporter access and mapped OTLP-enabled/disabled regression coverage. |
+| 1.0.44 | Clarified CTR-001: the `id-token: write` audience/trust-policy reminder is informational and does not increment compiler warnings or block warnings-as-errors validation; OIDC permission enforcement remains unchanged. |
+| 1.0.43 | Clarified CTR-008 for the scoped `pull_request_target` checkout policy: exact literal allowlist matching, warning-only risk acknowledgment, and rejection of configured `fetch` values. |
+| 1.0.42 | Audit-only clarification that same-repository bot PR checkout authorization is a runtime trust control governed by Security Architecture Specification RS-05a, not a new compiler threat rule. |
+| 1.0.41 | Added CTR-031 for strict rejection and non-strict warning of `tools.github.private-to-public-flows`, which can expose private data through public logs or destinations. |
 | 1.0.40 | Added CTR-030 for PR-base provenance of activation sparse checkout before loading imports or skills; preserves non-PR refs and the `GITHUB_TOKEN` same-repo fallback guard. |
 | 1.0.39 | Added CTR-029 for fail-closed authorization of allowlisted GitHub Apps that send `repository_dispatch`; a conclusive absent collaborator lookup is accepted only for the allowlisted App on that trigger. |
 | 1.0.38 | Audit-only review of the safe-outputs workspace checkout discovery path; the agent-writable workspace trust boundary is a runtime control recorded in the safe-outputs (Threat T7, RCR1–RCR7) and checkout-behavior (§3.5, T-CHK-016) specifications, and is not a new compiler threat class. |
@@ -35,6 +63,119 @@ This changelog records the version history and the dated mapping audits for `spe
 | 1.0.7–1.0.0 | Established CTR-001–015, conformance model, and daily reconciliation. |
 
 ## Mapping Audits
+
+### Mapping Audit (2026-10-22)
+
+Reviewed the shared PR checkout change in
+[`PR #71210`](https://github.com/github/gh-aw/pull/71210),
+`actions/setup/js/checkout_pr_branch.cjs`, its regression suite, and Security
+Architecture Specification RS-05a. The same-repository `pull_request` fast path
+now fetches `+refs/pull/<number>/head:refs/remotes/origin/pr-head` and resets the
+local source-named branch from that fetched ref, matching the existing
+fork/other-event path. A deleted source branch no longer prevents checkout of
+the retained PR head; stale local branches and event SHAs cannot select the
+baseline. This is runtime ref isolation, not a new compiler-detectable threat.
+
+The real-Git regressions in `actions/setup/js/checkout_pr_branch.test.cjs`
+first reproduce the missing-source-branch fetch failure, then verify exact PR
+content, local branch, fetched ref, actual checked-out baseline, and unchanged
+shallow/full-clone status for open and closed payloads. They also verify that
+the deleted remote branch is not recreated. These isolated local tests do not
+prove GitHub's ref-retention policy, live API behavior, or atomicity between
+PR-state checks and later effects.
+
+Existing missing-retained-ref and error regressions preserve the distinction
+between live-state-confirmed lifecycle invalidation and authentication,
+permission, network, or unknown failures. Failed checkout still stops the
+agent rather than continuing on base content. Successful retained-head
+checkout does not bypass the safe-output manager's live-state checks;
+intentional closed-event workflows remain supported. Actor trust, CTR-008
+trusted checkout policy, CTR-028/030 configuration provenance, permissions,
+conformance test identifiers, and generated lock formats are unchanged.
+
+### Mapping Audit (2026-10-19)
+
+Reviewed staged skill registration in `actions/setup/js/copilot_sdk_session.cjs`,
+the permission handler in `copilot_sdk_permissions.cjs`, the mocked session and
+driver regressions, SDK driver §3.5/§4.5, and Copilot Opt's recovery guidance.
+
+The driver registers the explicit staged root without ambient discovery in
+normal and bare sessions. Absent roots remain empty; files, symlinks, and dangling
+symlinks fail before SDK session creation. This is a root-type check, not
+recursive entry validation or proof of staged instruction provenance. CTR-028
+and CTR-030 continue to govern the compiler-generated provenance controls.
+
+The permission handler rejects shell chains containing unauthorized segments
+unless the full command is explicitly allowed. Its rejection callback, not
+generic tool errors such as a missing skill, increments the denial budget.
+Copilot Opt retains its three-denial threshold and reads staged phase files
+directly; prompt guidance does not broaden permissions or bypass enforcement.
+CTR-023 still concerns compiler-side engine capability, not a promise that
+agent-generated commands will be permitted.
+
+Evidence is in `actions/setup/js/copilot_sdk_session.test.cjs` (staging in
+normal/bare sessions, ambient exclusion, and invalid roots) and
+`actions/setup/js/copilot_sdk_driver.test.cjs` (permission matching and denial
+guard termination). These mocked regressions do not establish native SDK skill
+discovery, filesystem integrity, or live workflow recovery. No new `CTR-*` rule,
+conformance test ID, permission, suppression, or lock-file schema is introduced.
+
+### Mapping Audit (2026-10-16)
+
+Reviewed the same-repository bot checkout exception for `pull_request` and
+`pull_request_target` `ready_for_review` and `reopened` events in
+`actions/setup/js/checkout_pr_branch.cjs`, the regression tests, RS-05a, and the
+bounded checkout authorization model.
+
+The bot exception still requires a Bot sender whose login exactly matches the
+runtime actor and positive runtime, PR-head, and PR-base repository IDs that all
+match. Forks, unsupported actions, inconsistent provenance, and non-bot actors
+retain the collaborator permission floor. This is a runtime trust clarification,
+not a compiler-generated construct or a new `CTR-*` rule.
+
+### Mapping Audit (2026-10-14)
+
+Reviewed `transport_integrity.cjs`, both PR handlers, publication retry callbacks,
+and the transport regression tests. Captured validation bytes are consumed
+through private snapshots; nonregular files fail promptly, integrity errors
+remain permanent, and only registered local Git cleanup may proceed after failure.
+Full byte checks remain mandatory at trust boundaries, without full artifact
+scans around unrelated local commands. Filesystem causes and safe diagnostics
+remain available without publishing artifact contents.
+
+The controls are runtime obligations in Safe Outputs PTI-001–007, with bounded
+state-machine evidence in `workflow-security/SafeOutputTransport.tla`. They
+complement artifact provenance, detection, authorization, and CTR-005 routing
+rather than adding a compiler-detectable construct or a new `CTR-*` rule.
+
+### Mapping Audit (2026-10-12)
+
+Reviewed the allow-listed GitHub App checkout exception for `pull_request_review`
+in `actions/setup/js/checkout_pr_branch.cjs`, together with its regression tests,
+RS-05a requirements and validation mapping, and the comment/review checkout TLA+
+model.
+
+Findings and disposition:
+
+- The review exception requires a Bot sender whose login exactly matches the
+  review author and canonically matches the runtime actor, an explicit `on.bots`
+  allow-list entry, and a positive runtime repository ID equal to the API-verified
+  PR head and base repository IDs.
+- Fork PRs, unlisted bots, identity mismatches, missing repository provenance,
+  and other actors retain the collaborator-permission floor.
+- The compiler emits no generated-workflow construct for this runtime trust
+  decision. No `CTR-*` rule is warranted; RS-05a and its formal model specify
+  the authorization boundary.
+
+### Mapping Audit (2026-10-09)
+
+Reviewed the allow-listed GitHub App checkout exception for `issue_comment` and `pull_request_review_comment` in `actions/setup/js/checkout_pr_branch.cjs`, together with its regression tests and RS-05a validation evidence.
+
+Findings and disposition:
+
+- The exception requires a Bot sender whose login exactly matches the comment author and canonically matches the runtime actor, an explicit `on.bots` allow-list entry, and a positive runtime repository ID equal to the API-verified PR head and base repository IDs.
+- Fork PRs, unlisted bots, identity mismatches, missing repository provenance, and other actors retain the collaborator-permission floor. App slug and `[bot]` identities are treated as equivalent only for comparison with the runtime actor.
+- No compiler-generated construct or active CTR rule changed. This is a runtime checkout authorization control governed by Security Architecture Specification RS-05a; no new `CTR-*` rule is warranted.
 
 ### Mapping Audit (2026-09-23)
 

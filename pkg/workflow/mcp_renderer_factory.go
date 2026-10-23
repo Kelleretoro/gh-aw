@@ -149,14 +149,19 @@ func renderStandardJSONMCPConfig(
 func buildMCPRendererFactory(workflowData *WorkflowData, format string, includeCopilotFields, inlineArgs bool) func(bool) *MCPConfigRendererUnified {
 	mcpRenderingLog.Printf("Building MCP renderer factory: format=%s, copilotFields=%t, inlineArgs=%t", format, includeCopilotFields, inlineArgs)
 	return func(isLast bool) *MCPConfigRendererUnified {
+		allowWrites := false
+		if workflowData != nil {
+			allowWrites = parseAgenticWorkflowsTool(workflowData.Tools["agentic-workflows"]).AllowWriteTools
+		}
 		return NewMCPConfigRenderer(MCPRendererOptions{
-			IncludeCopilotFields:   includeCopilotFields,
-			InlineArgs:             inlineArgs,
-			Format:                 format,
-			IsLast:                 isLast,
-			ActionMode:             GetActionModeFromWorkflowData(workflowData),
-			WriteSinkGuardPolicies: deriveWriteSinkGuardPolicyFromWorkflow(workflowData),
-			ContainerPinMappings:   workflowData.getContainerPinMappings(),
+			AllowAgenticWorkflowWrites: allowWrites,
+			IncludeCopilotFields:       includeCopilotFields,
+			InlineArgs:                 inlineArgs,
+			Format:                     format,
+			IsLast:                     isLast,
+			ActionMode:                 GetActionModeFromWorkflowData(workflowData),
+			WriteSinkGuardPolicies:     deriveWriteSinkGuardPolicyFromWorkflow(workflowData),
+			ContainerPinMappings:       workflowData.getContainerPinMappings(),
 		})
 	}
 }
@@ -185,6 +190,12 @@ func buildStandardJSONMCPRenderers(
 		},
 		RenderSafeOutputs: func(yaml *strings.Builder, isLast bool, workflowData *WorkflowData) {
 			createRenderer(isLast).RenderSafeOutputsMCP(yaml, workflowData)
+		},
+		RenderLedger: func(yaml *strings.Builder, isLast bool, workflowData *WorkflowData) {
+			createRenderer(isLast).RenderLedgerMCP(yaml, workflowData)
+		},
+		RenderWorkQueue: func(yaml *strings.Builder, isLast bool, workflowData *WorkflowData) {
+			createRenderer(isLast).RenderWorkQueueMCP(yaml, workflowData)
 		},
 		RenderMCPScripts: func(yaml *strings.Builder, mcpScripts *MCPScriptsConfig, isLast bool) {
 			createRenderer(isLast).RenderMCPScriptsMCP(yaml, mcpScripts, workflowData)

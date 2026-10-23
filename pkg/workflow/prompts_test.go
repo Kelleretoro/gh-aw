@@ -231,7 +231,7 @@ func TestDailyFunctionNamerColdStartHandling(t *testing.T) {
 	}
 
 	workflow := string(content)
-	coldStartGuidance := "**On cold start** (`/tmp/gh-aw/cache-memory/function-namer-state.json` missing): treat this as expected initialization, not a failure. Do **not** call `missing_data` for a missing state file on first run or cold cache; run the Step 1 script as written, accept `LAST_INDEX=-1`, and continue."
+	coldStartGuidance := "**On cold start** (`/tmp/gh-aw/cache-memory/function-namer-state.json` missing): treat this as expected initialization, not a failure. Do **not** call `report_missing_data` for a missing state file on first run or cold cache; run the Step 1 script as written, accept `LAST_INDEX=-1`, and continue."
 	if !strings.Contains(workflow, coldStartGuidance) {
 		t.Fatal("Expected daily-function-namer workflow to include explicit cold-start guidance")
 	}
@@ -347,7 +347,7 @@ func TestDailyCavemanOptimizerUsesConcreteClaudeModelsForExperiment(t *testing.T
 	}
 }
 
-func TestDailyFormalSpecVerifierDefinesDirectSafeOutputContract(t *testing.T) {
+func TestDailyFormalSpecVerifierDefinesConfiguredSafeOutputContract(t *testing.T) {
 	repoRoot, err := findRepoRoot()
 	if err != nil {
 		t.Fatalf("Failed to find repo root: %v", err)
@@ -365,14 +365,26 @@ func TestDailyFormalSpecVerifierDefinesDirectSafeOutputContract(t *testing.T) {
 		t.Fatal("Expected daily-formal-spec-verifier workflow to require a single final create_issue safe output")
 	}
 
-	noShellGuidance := "Do **not** use `bash`, `cli-proxy`, or the `safeoutputs` CLI to create the issue or inspect the tool schema. Emit the safe output directly with `title` and `body` arguments."
-	if !strings.Contains(workflow, noShellGuidance) {
-		t.Fatal("Expected daily-formal-spec-verifier workflow to forbid bash/CLI safe-output invocation")
+	for _, expected := range []string{
+		"cli-proxy: true",
+		"direct safe-output MCP tools are not exposed",
+		"safeoutputs create_issue '<JSON>'",
+		"Stdin is also supported with `safeoutputs create_issue .`",
+		"prefer inline JSON without auxiliary tools, pipelines, temporary files, or shell expansion",
+		`safeoutputs report_incomplete '{"reason":"<concrete blocker>"}'`,
+		"Do not redirect it to a file.",
+	} {
+		if !strings.Contains(workflow, expected) {
+			t.Fatalf("Expected daily-formal-spec-verifier workflow to support configured CLI transport with %q", expected)
+		}
+	}
+	if strings.Contains(workflow, "Do **not** use `bash`, `cli-proxy`, or the `safeoutputs` CLI") {
+		t.Fatal("Workflow must not forbid its configured safe-output transport")
 	}
 
-	reportIncompleteGuidance := "If the quality checks below cannot be met, emit `report_incomplete` directly as a safe output instead of `create_issue`."
+	reportIncompleteGuidance := "If the quality checks below cannot be met, emit `report_incomplete` through the same transport instead of `create_issue`."
 	if !strings.Contains(workflow, reportIncompleteGuidance) {
-		t.Fatal("Expected daily-formal-spec-verifier workflow to require direct report_incomplete fallback")
+		t.Fatal("Expected daily-formal-spec-verifier workflow to require report_incomplete fallback through the configured transport")
 	}
 
 	terminalSafeOutputGuidance := "**Before finishing, confirm you called exactly one terminal safe output:** `create_issue`, `report_incomplete`, or `noop`."
@@ -447,23 +459,47 @@ func TestLayoutSpecMaintainerHasToolBudgetAwareness(t *testing.T) {
 	}
 }
 
-func TestDailyAgentOfTheDayBlogWriterHasGitDenialMitigationAllowlist(t *testing.T) {
+func TestBlogWorkflowsPrepareCommittedSafeOutputBranches(t *testing.T) {
 	repoRoot, err := findRepoRoot()
 	if err != nil {
 		t.Fatalf("Failed to find repo root: %v", err)
 	}
 
-	workflowFile := filepath.Join(repoRoot, ".github", "workflows", "daily-agent-of-the-day-blog-writer.md")
-	content, err := os.ReadFile(workflowFile)
-	if err != nil {
-		t.Fatalf("Failed to read workflow file: %v", err)
-	}
-
-	workflow := string(content)
-	// The workflow uses bash: ["*"] to allow all bash commands (including git),
-	// which covers the git denial mitigation pattern without needing an explicit allowlist.
-	if !strings.Contains(workflow, `bash: ["*"]`) {
-		t.Fatalf("Expected Daily Agent of the Day Blog Writer workflow to allow all bash commands via bash: [\"*\"]")
+	for _, name := range []string{"daily-agent-of-the-day-blog-writer", "daily-ecosystem-explorer"} {
+		t.Run(name, func(t *testing.T) {
+			content, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", name+".md"))
+			if err != nil {
+				t.Fatalf("Failed to read workflow file: %v", err)
+			}
+			workflow := string(content)
+			for _, expected := range []string{
+				`bash: ["*"]`,
+				"cli-proxy: true",
+				"`create_pull_request` packages committed changes",
+				"`git checkout -b ",
+				"${{ github.run_id }}`",
+				"`git add -- <blog-post-path>`",
+				"`git diff --cached --name-only`",
+				"`git commit -m ",
+				"`branch` equal to the verified local feature branch",
+				"If preparation fails or unrelated staged files exist, emit `report_incomplete`",
+				"Do not run `git push`, `git pull`, `git fetch`, any `git remote *`",
+			} {
+				if !strings.Contains(workflow, expected) {
+					t.Errorf("Expected local-only publication preparation contract %q", expected)
+				}
+			}
+			for _, forbidden := range []string{
+				"Do not stage, commit, or switch branches yourself",
+				"Do not run git write commands yourself",
+				"Do not run `git add`, `git commit`, `git checkout`",
+				"It will package the edited docs files into the PR for you",
+			} {
+				if strings.Contains(workflow, forbidden) {
+					t.Errorf("Workflow contradicts committed-branch safe-output contract with %q", forbidden)
+				}
+			}
+		})
 	}
 }
 
@@ -534,7 +570,7 @@ func TestDailyCacheStrategyAnalyzerUsesCodexCompatibleModels(t *testing.T) {
 		t.Fatalf("Failed to parse workflow frontmatter: %v", err)
 	}
 
-	if got := parsed.Frontmatter["model"]; got != "openai/gpt-5.3-codex" {
+	if got, _ := parsed.Frontmatter["model"].(string); !isCodexCompatibleWorkflowModel(got) {
 		t.Fatalf("Expected Codex-compatible base model, got %#v", got)
 	}
 
@@ -589,9 +625,9 @@ func TestDailyModelResolutionUsesCopilotEngineWithMiniSubAgentModel(t *testing.T
 
 	workflow := string(content)
 
-	// Verify the top-level engine is copilot (not codex) so gpt-5.4-mini is accepted
+	// Verify the top-level engine is copilot (not codex) so the Copilot mini alias is accepted
 	if strings.Contains(workflow, "id: codex") {
-		t.Fatal("Expected daily-model-resolution workflow to use copilot engine, not codex (gpt-5.4-mini is not a valid Codex model)")
+		t.Fatal("Expected daily-model-resolution workflow to use copilot engine, not codex (the run-analyzer sub-agent uses the Copilot mini alias)")
 	}
 	if !strings.Contains(workflow, "id: copilot") {
 		t.Fatal("Expected daily-model-resolution workflow to use copilot engine")
@@ -602,8 +638,8 @@ func TestDailyModelResolutionUsesCopilotEngineWithMiniSubAgentModel(t *testing.T
 		t.Fatal("Expected daily-model-resolution workflow to define the run-analyzer sub-agent")
 	}
 	agentBlock := workflow[agentStart:]
-	if !strings.Contains(agentBlock, "\nmodel: gpt-5.4-mini\n") {
-		t.Fatal("Expected daily-model-resolution run-analyzer sub-agent to use explicit model gpt-5.4-mini")
+	if !strings.Contains(agentBlock, "\nmodel: mini\n") {
+		t.Fatal("Expected daily-model-resolution run-analyzer sub-agent to use the mini alias")
 	}
 }
 
@@ -623,8 +659,12 @@ func TestDailyGoTestParallelizerUsesCodexCompatibleModel(t *testing.T) {
 	if !strings.Contains(workflow, "id: codex") {
 		t.Fatal("Expected daily-go-test-parallelizer workflow to use the Codex engine")
 	}
-	if !strings.Contains(workflow, "model: copilot/gpt-5.3-codex") {
-		t.Fatal("Expected daily-go-test-parallelizer workflow to use a Codex-compatible Copilot model")
+	parsed, err := parser.ExtractFrontmatterFromContent(workflow)
+	if err != nil {
+		t.Fatalf("Failed to parse workflow frontmatter: %v", err)
+	}
+	if model, _ := parsed.Frontmatter["model"].(string); !isCodexCompatibleWorkflowModel(model) {
+		t.Fatalf("Expected daily-go-test-parallelizer workflow to use a Codex-compatible model, got %q", model)
 	}
 	if !strings.Contains(workflow, "Before stopping, call exactly one terminal safe-output tool") {
 		t.Fatal("Expected daily-go-test-parallelizer workflow to require a terminal safe output")
@@ -647,8 +687,12 @@ func TestDailyCLIPerformanceUsesCodexCompatibleModel(t *testing.T) {
 	if !strings.Contains(workflow, "engine:\n  id: codex\n") {
 		t.Fatal("Expected daily-cli-performance workflow to use the Codex engine")
 	}
-	if !strings.Contains(workflow, "\nmodel: openai/gpt-5.3-codex\n") {
-		t.Fatal("Expected daily-cli-performance workflow to use a Codex-compatible OpenAI model")
+	parsed, err := parser.ExtractFrontmatterFromContent(workflow)
+	if err != nil {
+		t.Fatalf("Failed to parse workflow frontmatter: %v", err)
+	}
+	if model, _ := parsed.Frontmatter["model"].(string); !isCodexCompatibleWorkflowModel(model) {
+		t.Fatalf("Expected daily-cli-performance workflow to use a Codex-compatible model, got %q", model)
 	}
 }
 
@@ -688,13 +732,59 @@ func TestCodexWorkflowsUseCodexModels(t *testing.T) {
 		}
 
 		model, _ := parsed.Frontmatter["model"].(string)
-		if !strings.Contains(strings.ToLower(model), "codex") {
+		if !isCodexCompatibleWorkflowModel(model) {
 			t.Errorf("%s uses Codex with non-Codex model %q", path, model)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("Failed to inspect workflows: %v", err)
+	}
+}
+
+func isCodexCompatibleWorkflowModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	model, _, _ = strings.Cut(model, "?")
+	// Empty selects Codex's native default; both auto spellings are inference pickers.
+	return model == "" || codexModelID(model) == "auto" || isCodexCompatibleModel(model)
+}
+
+func TestIsCodexCompatibleWorkflowModel(t *testing.T) {
+	for _, test := range []struct {
+		model string
+		want  bool
+	}{
+		{model: "", want: true},
+		{model: "auto", want: true},
+		{model: "copilot/auto", want: true},
+		{model: "copilot/gpt-5.3-codex", want: true},
+		{model: "gpt-6.1-sol", want: true},
+		{model: " Copilot/GPT-6.1-SOL?effort=high ", want: true},
+		{model: "openai/gpt-6.1-sol", want: true},
+		{model: "copilot/gpt-6.1-sol", want: true},
+		{model: "openai/gpt-6-sol", want: true},
+		{model: "copilot/gpt-6-sol", want: true},
+		{model: "openai/gpt-6-luna", want: true},
+		{model: "copilot/gpt-6-luna", want: true},
+		{model: "openai/gpt-6-astra", want: true},
+		{model: "copilot/gpt-6-astra", want: true},
+		{model: "openai/gpt-5.6-sol", want: true},
+		{model: "copilot/gpt-5.6-sol", want: true},
+		{model: "openai/gpt-5.6-terra", want: true},
+		{model: "copilot/gpt-5.6-terra", want: true},
+		{model: "openai/gpt-5.6-luna", want: true},
+		{model: "copilot/gpt-5.6-luna", want: true},
+		{model: "openai/gpt-4o", want: false},
+		{model: "copilot/mai-code-1.1-flash", want: false},
+		{model: "copilot/gpt-6-unknown", want: false},
+		{model: "openai/gpt-6-unknown", want: false},
+		{model: "anthropic/claude-sonnet-5", want: false},
+	} {
+		t.Run(test.model, func(t *testing.T) {
+			if got := isCodexCompatibleWorkflowModel(test.model); got != test.want {
+				t.Errorf("isCodexCompatibleWorkflowModel(%q) = %t, want %t", test.model, got, test.want)
+			}
+		})
 	}
 }
 

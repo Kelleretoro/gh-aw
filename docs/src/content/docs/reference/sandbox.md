@@ -61,8 +61,11 @@ strict: false
 | `docker` (default) | Default Docker runtime, rootless AWF, network isolation |
 | `docker-sudo-iptables` | Docker with privileged AWF, legacy `iptables` networking, and host/service access |
 | `cloud-hypervisor` | Preview KVM runtime with its required privileged launcher |
+| `nvx` | Fail-closed preview NVX one-shot microVM; requires explicit configuration and a Linux x86_64 KVM host |
 
 Omitting `runtime` is equivalent to `runtime: docker`, which keeps the secure default.
+
+The `nvx` runtime never falls back to another runtime. It requires a workload-specific guest layer, the AWF release's provenance bundle and manifest, and all three security opt-ins. The compiler checks the host and verifies the offline attestation before starting AWF. See [Agent Runtime Selection](/gh-aw/reference/agent-runtimes/#nvx-preview) for the complete configuration and compatibility requirements.
 
 ```yaml wrap
 sandbox:
@@ -207,6 +210,23 @@ When omitted, AWF's own default memory limit applies. Specifying an invalid form
 > [!NOTE]
 > Exit code 137 means the process received `SIGKILL`. A memory limit can be one cause, but verify with logs before changing `memory`. If you increase `memory`, leave headroom for the runner OS and other processes.
 
+#### Release integrity (`sandbox.agent.checksums-sha256`)
+
+To download an AWF version not covered by the setup action's built-in pins, set its version and checksum-manifest digest together:
+
+```yaml wrap
+sandbox:
+  agent:
+    version: v0.28.62
+    checksums-sha256: "0b03f6ea5b638356a799fa541ade4fd7902a6ac8d7c3f0252ee09d8259a4ce8f"
+```
+
+The example pins v0.28.62; change both fields for another release. `checksums-sha256` authenticates the release's **`checksums.txt` manifest**, which supplies digests for the Node bundle and platform binaries. It is not an individual binary or container-image digest.
+
+The value must contain exactly 64 lowercase hexadecimal characters from an independently trusted channel. The version must be a literal semantic release tag, with an optional `v` prefix. Missing versions, `latest`, expressions, disabled sandboxes, and custom `command` installers are rejected when a pin is supplied. Without a supplied pin, only releases covered by the setup action's built-in pins can be downloaded.
+
+The version and pin propagate to AWF installations in agent, threat-detection, and eval jobs. A mismatch fails installation before execution; a bundle integrity failure cannot fall back to a binary. Container-image pins and guest attestations remain separate controls. For the Copilot CLI, use [`engine.checksums-sha256`](/gh-aw/reference/engines/copilot/#copilot-release-checksum-pins).
+
 #### Model fallback (`sandbox.agent.model-fallback`)
 
 AWF's API proxy resolves unrecognized model selections against its built-in model catalog and may rewrite them. Set `model-fallback: false` to pass the configured model through to the provider verbatim:
@@ -229,6 +249,14 @@ sandbox:
     token-steering: false
 ```
 
+With steering enabled, AWF adds a notice to the next eligible model request after the run crosses 80, 90, 95 or 99% of its AI-credit budget, its effective-token budget or its runtime deadline. Runtime notices need an agent deadline, which gh-aw sends with AWF v0.28.51 or newer on runtimes other than Cloud Hypervisor and NVX:
+
+- **Literal `timeout-minutes`** (for example `timeout-minutes: 30`): the AWF config gets `container.agentTimeout` set to that value.
+- **Expression timeout**, including the default that workflows without `timeout-minutes` compile to (`${{ fromJSON(vars.GH_AW_DEFAULT_TIMEOUT_MINUTES || '20') }}`): the agent step gets the step timeout in `GH_AW_ENGINE_STEP_TIMEOUT_MINUTES`, and `awf` receives it at run time as `--agent-timeout`. The AWF config has no `agentTimeout`.
+- **AWF older than v0.28.51**: neither is emitted, so no runtime notices are sent. Cloud Hypervisor and NVX keep their existing `container.agentTimeout` on every AWF version.
+
+The deadline is never shorter than the agent step timeout, and AWF counts it from agent start, after the step has started. The GitHub Actions step timeout therefore fires before AWF's deadline (AWF exit code 124), so a notice whose next eligible model request would come after the step timeout is never delivered. The threat-detection run uses its own job timeout. Delivered notices are listed in `gh aw audit` and `gh aw logs --json` (see [Artifacts](/gh-aw/reference/artifacts/)); when the unified session cannot be read, these outputs report `steering_notices_unavailable: true` instead of an empty list.
+
 #### Custom infrastructure images (`sandbox.agent.images`)
 
 Self-hosted and air-gapped deployments can mirror, scan, approve, and preload every privileged image AWF launches. Set `sandbox.agent.images` to select digest-pinned replacements for AWF's infrastructure images (requires AWF v0.28.4 or newer):
@@ -240,18 +268,18 @@ sandbox:
     images:
       squid: registry.example.com/approved/squid:v0.28.4@sha256:<64-hex-digest>
       agent: registry.example.com/approved/agent:v0.28.4@sha256:<64-hex-digest>
-      apiProxy: registry.example.com/approved/api-proxy:v0.28.4@sha256:<64-hex-digest>
+      api-proxy: registry.example.com/approved/api-proxy:v0.28.4@sha256:<64-hex-digest>
 ```
 
 The compiler emits the manifest as `container.images` in the generated AWF configuration.
 
-Supported image roles: `squid`, `agent`, `apiProxy`, `cliProxy`, `buildTools`, `dohProxy`, `enclaveScript`, `enclaveAgent`, `enclaveMcpServer`, and `dindStaging`.
+Supported image roles: `squid`, `agent`, `api-proxy`, `router`, `cli-proxy`, `build-tools`, `doh-proxy`, `enclave-script`, `enclave-agent`, `enclave-mcp-server`, and `dind-staging`.
 
 Rules enforced at compile time:
 
 - Every value must be a literal, registry-qualified reference with both a tag and an immutable digest: `registry/repository:tag@sha256:<64 lowercase hex characters>`. Expressions (`${{ ... }}`), environment interpolation, and any other dynamic value are rejected, so no runtime input can influence an infrastructure image.
 - Unknown roles are rejected.
-- The manifest must cover every role required by the enabled features: `squid`, `agent`, and `apiProxy` are always required; `cliProxy` is required with [`tools.github.mode: gh-proxy`](/gh-aw/reference/tools/), the `integrity-reactions` feature, or raw `--difc-proxy-host` AWF arguments; `buildTools` is required with [`runner.topology: arc-dind`](/gh-aw/reference/self-hosted-runners/); `dohProxy` is required when legacy-security raw AWF arguments enable `--dns-over-https`; `dindStaging` is required when raw AWF arguments enable `--dind-pre-stage-dirs`, `--dind-stage-engine-binary-path`, or `--dind-stage-engine-binary-target-path`; `enclaveScript` and `enclaveAgent` are required for their corresponding [enclave](/gh-aw/experimental/enclaves/) executors, and `enclaveMcpServer` is required whenever any enclave is enabled. AWF fails closed rather than falling back to a default, so an incomplete manifest is a compile error.
+- The manifest must cover every role required by the enabled features: `squid`, `agent`, and `api-proxy` are always required; `router` is required when [`engine.model-routing`](/gh-aw/reference/model-routing/) is set; `cli-proxy` is required with [`tools.github.mode: gh-proxy`](/gh-aw/reference/tools/), the `integrity-reactions` feature, or raw `--difc-proxy-host` AWF arguments; `build-tools` is required with [`runner.topology: arc-dind`](/gh-aw/reference/self-hosted-runners/); `doh-proxy` is required when legacy-security raw AWF arguments enable `--dns-over-https`; `dind-staging` is required when raw AWF arguments enable `--dind-pre-stage-dirs`, `--dind-stage-engine-binary-path`, or `--dind-stage-engine-binary-target-path`; `enclave-script` and `enclave-agent` are required for their corresponding [enclave](/gh-aw/experimental/enclaves/) executors, and `enclave-mcp-server` is required whenever any enclave is enabled. AWF fails closed rather than falling back to a default, so an incomplete manifest is a compile error.
 - The manifest cannot be combined with controls that select a different effective image: SSL bump, per-enclave `image` overrides, and AWF arguments such as `--image-tag`, `--image-registry`, `--agent-image`, `--build-local`, `--sysroot-image`, and `--dind-staging-image`. The compiler-owned `container.imageTag` is suppressed when the manifest is set.
 
 Omit the field to keep AWF's default role references and gh-aw's existing digest-pin resolution.
@@ -273,18 +301,18 @@ sandbox:
   agent:
     targets:
       copilot:
-        extraHeaders:
+        extra-headers:
           x-openrouter-title: my-workflow
           http-referer: https://github.com/${{ github.repository }}
-        extraBodyFields:
+        extra-body-fields:
           custom-field: custom-value
-        sessionId: ${{ github.run_id }}
+        session-id: ${{ github.run_id }}
 ```
 
-Use this for OpenAI-compatible proxies and gateways that expect additional request metadata. `sessionId` is opt-in only; gh-aw does not derive it automatically.
+Use this for OpenAI-compatible proxies and gateways that expect additional request metadata. `session-id` is opt-in only; gh-aw does not derive it automatically.
 
 > [!NOTE]
-> Set `sessionId` only when your upstream expects a session identifier. Some strict OpenAI-compatible providers reject unknown `session_id` fields, so automatic injection would be unsafe.
+> Set `session-id` only when your upstream expects a session identifier. Some strict OpenAI-compatible providers reject unknown `session_id` fields, so automatic injection would be unsafe.
 
 #### Go cache paths in AWF (`GOMODCACHE` / `GOCACHE`)
 

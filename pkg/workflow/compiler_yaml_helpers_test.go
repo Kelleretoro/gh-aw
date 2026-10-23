@@ -113,6 +113,8 @@ func TestBuildJobsAndValidate(t *testing.T) {
 						ID: "copilot",
 					},
 					MarkdownContent: "Test content",
+					FrontmatterHash: strings.Repeat("a", 64),
+					BodyHash:        strings.Repeat("b", 64),
 				}
 			},
 			shouldError: false,
@@ -250,7 +252,7 @@ func TestGenerateWorkflowHeader(t *testing.T) {
 			compiler := NewCompiler()
 			var yaml strings.Builder
 
-			if err := compiler.generateWorkflowHeader(&yaml, tt.data, "", "", nil, nil); err != nil {
+			if err := compiler.generateWorkflowHeader(&yaml, tt.data, "", "", nil, nil, nil); err != nil {
 				t.Fatalf("generateWorkflowHeader() error = %v", err)
 			}
 			result := yaml.String()
@@ -287,7 +289,7 @@ func TestGenerateWorkflowHeaderIncludesMCPManifest(t *testing.T) {
 		},
 	}
 
-	if err := compiler.generateWorkflowHeader(&yaml, data, "frontmatter-hash", "", nil, nil); err != nil {
+	if err := compiler.generateWorkflowHeader(&yaml, data, "frontmatter-hash", "", nil, nil, nil); err != nil {
 		t.Fatalf("generateWorkflowHeader() error = %v", err)
 	}
 

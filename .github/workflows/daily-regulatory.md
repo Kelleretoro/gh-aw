@@ -3,7 +3,6 @@ private: true
 emoji: "⚖️"
 description: Daily regulatory workflow that monitors and cross-checks other daily report agents' outputs for data consistency and anomalies
 on:
-  schedule: daily
   workflow_dispatch:
 permissions:
   contents: read
@@ -15,12 +14,15 @@ permissions:
 
 engine:
   id: codex
-  model-provider: openai
-model: openai/gpt-5.3-codex
+  model-provider: github
+model: copilot/gpt-5.6-luna
 strict: true
 tracker-id: daily-regulatory
 max-ai-credits: 1000
 tools:
+  work-queue:
+    worker: true
+    require-assignment: true
   cli-proxy: true
   github:
     toolsets: [default, discussions]
@@ -32,6 +34,7 @@ safe-outputs:
     required-title-prefix: "[daily regulatory] "
 timeout-minutes: 30
 imports:
+  - shared/daily-report-worker.md
   - uses: shared/daily-audit-base.md
     with:
       title-prefix: "[daily regulatory] "

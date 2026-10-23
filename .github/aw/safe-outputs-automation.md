@@ -74,7 +74,7 @@ description: Safe-output reference for workflow dispatch, code scanning, checks,
       allowed-refs: ["release/*"]         # Optional: glob allowlist for agent-provided per-call ref overrides (default: caller's ref only)
   ```
 
-  Triggers other agentic workflows using workflow_dispatch. Agent output includes `workflow_name` (without .md extension) and optional `inputs` (key-value pairs). Cross-repo dispatch is supported via `target-repo` plus an `allowed-repos` allowlist; cross-repo targets require a token with `actions: write` on the target repository.
+  Triggers other agentic workflows using workflow_dispatch. Agent output includes `workflow_name` (without .md extension) and optional `inputs` (key-value pairs). Cross-repo dispatch is supported via `target-repo` plus an `allowed-repos` allowlist; cross-repo targets require a token with `actions: write` on the target repository. For queue workers, load [work-queue.md](work-queue.md) and use `work_queue_dispatch_next` to request a bounded pool prefix. Trusted processing selects Work and the installed worker profile; do not select `work_id` through `dispatch_workflow` or declare reserved assignment/caller inputs.
 - `dispatch-repository:` - Dispatch `repository_dispatch` events to external repositories (experimental)
 
   ```yaml
@@ -172,6 +172,7 @@ description: Safe-output reference for workflow dispatch, code scanning, checks,
       custom-agent: "agent-id"        # Optional: custom agent ID
       custom-instructions: "..."      # Optional: additional instructions for the agent
       allowed: [copilot]              # Optional: restrict to specific agent names
+      required-labels: [copilot-ready] # Optional: ALL of these labels must be present on the issue/PR for assignment to run
       max: 1                          # Optional: max assignments (default: 1)
       target: "*"                     # Optional: "triggering" (default), "*", or number
       target-repo: "owner/repo"       # Optional: where the issue lives (cross-repository)
@@ -265,28 +266,29 @@ description: Safe-output reference for workflow dispatch, code scanning, checks,
   ```yaml
   safe-outputs:
     noop:
+      max: 2                          # Optional: max noop messages (default: 2)
       report-as-issue: false          # Optional: report noop as issue (default: true)
   ```
 
   Fallback ensuring workflows never complete silently. Agents emit human-visible messages even when no other action is required (e.g., "Analysis complete - no issues found").
-- `missing-tool:` - Report missing tools or functionality (auto-enabled)
+- `report-missing-tool:` - Report missing tools or functionality (auto-enabled; `missing-tool:` is a deprecated alias — run `gh aw fix` to migrate)
 
   ```yaml
   safe-outputs:
-    missing-tool:
-      create-issue: true              # Optional: create issues for missing tools (default: false when this block is set; auto-enabled as true only when `missing-tool` is omitted)
+    report-missing-tool:
+      create-issue: true              # Optional: create issues for missing tools (default: false when this block is set; auto-enabled as true only when `report-missing-tool` is omitted)
       report-as-failure: true         # Optional: classify the run as an agent failure (default: true)
       title-prefix: "[missing tool]"  # Optional: prefix for issue titles
       labels: [tool-request]          # Optional: labels for created issues
   ```
 
   Lets agents report tools or functionality they need but lack; tracks feature requests. When `create-issue` is true, reports create or update GitHub issues.
-- `missing-data:` - Report missing data required to complete tasks (auto-enabled)
+- `report-missing-data:` - Report missing data required to complete tasks (auto-enabled; `missing-data:` is a deprecated alias — run `gh aw fix` to migrate)
 
   ```yaml
   safe-outputs:
-    missing-data:
-      create-issue: true              # Optional: create issues for missing data (default: false when this block is set; auto-enabled as true only when `missing-data` is omitted)
+    report-missing-data:
+      create-issue: true              # Optional: create issues for missing data (default: false when this block is set; auto-enabled as true only when `report-missing-data` is omitted)
       report-as-failure: true         # Optional: classify the run as an agent failure (default: true)
       title-prefix: "[missing data]"  # Optional: prefix for issue titles
       labels: [data-request]          # Optional: labels for created issues

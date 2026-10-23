@@ -12,34 +12,45 @@ import (
 	"testing"
 
 	"github.com/github/gh-aw/pkg/linters"
+	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 var (
-	docBulletRe   = regexp.MustCompile(`^//\s+-\s+([a-z0-9-]+)\s+—`)
-	readmeTableRe = regexp.MustCompile(`^\|\s+` + "`" + `([a-z0-9-]+)` + "`" + `\s+\|`)
-	linterFlagsRe = regexp.MustCompile(`LINTER_FLAGS="([^"]+)"`)
+	docBulletRe   = regexp.MustCompile(`^//\s+-\s+([a-z0-9_-]+)\s+—`)
+	readmeTableRe = regexp.MustCompile(`^\|\s+` + "`" + `([a-z0-9_-]+)` + "`" + `\s+\|`)
+	linterFlagsRe = regexp.MustCompile(`LINTER_FLAGS=["']([^"']+)["']`)
 )
 
 var notYetEnforced = map[string]string{
 	"blankassigncomma":            "existing production violations need remediation before enforcement; nolint suppression already works",
 	"bufferresetbeforereuse":      "new correctness analyzer needs an enforcement-readiness audit before native CI enables it",
 	"bufioscannererunchecked":     "existing scanner loops need Err handling before native CI enables it",
+	"closeerrorunchecked":         "existing production violations need remediation before enforcement; nolint suppression already works",
+	"deferrerrorunchecked":        "new deferred-error analyzer needs an enforcement-readiness audit before native and WebAssembly CI enable it",
 	"errorfwrapv":                 "requires an enforcement audit after the recent false-positive fix (#51928)",
 	"errormessage":                "dedicated lint-error-messages CI job is intentionally advisory (continue-on-error per #54800)",
 	"excessivefuncparams":         "existing production violations need remediation before enforcement; nolint suppression already works",
+	"formatintitoa":               "existing FormatInt conversions need remediation before CI enforcement",
+	"fprintferrorunchecked":       "existing production violations need remediation before enforcement; nolint suppression already works",
+	"goroutineresourceleak":       "requires an enforcement-readiness audit before native and WebAssembly CI enable it",
 	"hardcodedfilepath":           "requires an enforcement audit after the same-package constant fix (#52428)",
 	"largefunc":                   "existing production violations need remediation before enforcement; nolint suppression already works",
 	"lenstringzero":               "requires an enforcement audit after the diagnostic-message fix (#54717)",
 	"manualpathconcat":            "existing production violations need remediation",
+	"osisnotexist":                "existing os error predicates need case-by-case review before CI enforcement",
 	"packagelevelmutableslicemap": "existing production violations need remediation",
+	"reflectdeepequalusage":       "existing reflect.DeepEqual uses need case-by-case review before CI enforcement",
 	"seenmapbool":                 "existing production violations need remediation",
 	"sprintferrdot":               "has not yet completed an enforcement-readiness audit",
 	"ssljson":                     "has not yet completed an enforcement-readiness audit",
 	"stringsconcatloop":           "has not yet completed an enforcement-readiness audit",
+	"typeassertionnil":            "needs a cross-platform enforcement-readiness audit before CI enables it",
 	"typeassertionokdiscarded":    "existing production violations need remediation before enforcement; nolint suppression already works",
+	"unchecked_deferredclose":     "existing deferred Close() findings need remediation before CI enforcement",
 	"uncheckedsliceindex":         "existing production violations need remediation before enforcement; nolint suppression already works",
+	"walkdirignoredeerror":        "existing discarded WalkDir errors in audit_threat_detection.go and model_routing.go need remediation before CI enforcement",
 }
 
 // TestDocGo_CountMatchesBullets validates that the "All N active analyzers:"
@@ -116,17 +127,11 @@ func TestCIEnforcedLintersMatchRegistry(t *testing.T) {
 	workflowBytes, err := os.ReadFile("../../.github/workflows/cgo.yml")
 	require.NoError(t, err, "cgo.yml must be present")
 
-	flagMatches := linterFlagsRe.FindAllStringSubmatch(string(workflowBytes), -1)
-	require.Len(t, flagMatches, 2, "cgo.yml must define native and wasm LINTER_FLAGS values")
-
+	native, wasm := parseCIEnforcedLinterSets(t, workflowBytes)
 	enforced := make(map[string]struct{})
-	for _, match := range flagMatches {
-		for flag := range strings.FieldsSeq(match[1]) {
-			if flag == "-test=false" {
-				continue
-			}
-			require.Truef(t, strings.HasPrefix(flag, "-"), "LINTER_FLAGS entry %q must be a flag", flag)
-			enforced[strings.TrimPrefix(flag, "-")] = struct{}{}
+	for _, target := range []map[string]struct{}{native, wasm} {
+		for name := range target {
+			enforced[name] = struct{}{}
 		}
 	}
 
@@ -145,6 +150,85 @@ func TestCIEnforcedLintersMatchRegistry(t *testing.T) {
 		assert.NotContainsf(t, enforced, name, "remove %q from notYetEnforced once CI enforces it", name)
 		assert.NotEmptyf(t, reason, "notYetEnforced analyzer %q must have a reason", name)
 	}
+	for name := range enforced {
+		assert.Containsf(t, registry, name, "CI-enforced analyzer %q must be registered", name)
+	}
+}
+
+func TestCIEnforcedLintersMatchTargets(t *testing.T) {
+	t.Parallel()
+	workflowBytes, err := os.ReadFile("../../.github/workflows/cgo.yml")
+	require.NoError(t, err, "cgo.yml must be present")
+
+	native, wasm := parseCIEnforcedLinterSets(t, workflowBytes)
+	require.NotEmpty(t, native, "cgo.yml must enforce custom linters on native Go code")
+	require.NotEmpty(t, wasm, "cgo.yml must enforce custom linters on WebAssembly code")
+
+	assert.Empty(t, linterSetDifference(native, wasm),
+		"native and wasm CI must enforce the same custom linters; mirror dedicated steps as well as bulk flags")
+	assert.Empty(t, linterSetDifference(wasm, native),
+		"wasm CI must not enforce custom linters missing from native CI")
+}
+
+func parseCIEnforcedLinterSets(t *testing.T, workflowBytes []byte) (map[string]struct{}, map[string]struct{}) {
+	t.Helper()
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Run string            `yaml:"run"`
+				Env map[string]string `yaml:"env"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	require.NoError(t, yaml.Unmarshal(workflowBytes, &workflow), "CI workflow must be valid YAML")
+	job, ok := workflow.Jobs["lint-go-custom"]
+	require.True(t, ok, "CI workflow must define the lint-go-custom job")
+
+	native := make(map[string]struct{})
+	wasm := make(map[string]struct{})
+	for _, step := range job.Steps {
+		activeLines := slices.DeleteFunc(strings.Split(step.Run, "\n"), func(line string) bool {
+			return strings.HasPrefix(strings.TrimSpace(line), "#")
+		})
+		run := strings.Join(activeLines, "\n")
+		goos, goarch := step.Env["GOOS"], step.Env["GOARCH"]
+		for field := range strings.FieldsSeq(run) {
+			key, value, ok := strings.Cut(field, "=")
+			if !ok {
+				continue
+			}
+			switch key {
+			case "GOOS":
+				goos = strings.Trim(value, `"'`)
+			case "GOARCH":
+				goarch = strings.Trim(value, `"'`)
+			}
+		}
+		target := native
+		if goos == "js" && goarch == "wasm" {
+			target = wasm
+		}
+		for _, match := range linterFlagsRe.FindAllStringSubmatch(run, -1) {
+			for flag := range strings.FieldsSeq(match[1]) {
+				if flag == "-test=false" {
+					continue
+				}
+				require.Truef(t, strings.HasPrefix(flag, "-"), "LINTER_FLAGS entry %q must be a flag", flag)
+				target[strings.TrimPrefix(flag, "-")] = struct{}{}
+			}
+		}
+	}
+	return native, wasm
+}
+
+func linterSetDifference(left, right map[string]struct{}) []string {
+	difference := make(map[string]struct{})
+	for name := range left {
+		if _, ok := right[name]; !ok {
+			difference[name] = struct{}{}
+		}
+	}
+	return sortedKeys(difference)
 }
 
 func parseDocBulletSet(t *testing.T) map[string]struct{} {

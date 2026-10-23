@@ -7,9 +7,9 @@ sidebar:
 
 # Safe Outputs MCP Gateway Specification
 
-**Version**: 1.29.6<br>
+**Version**: 1.29.13<br>
 **Status**: Working Draft<br>
-**Publication Date**: 2026-09-23<br>
+**Publication Date**: 2026-10-18<br>
 **Editor**: GitHub Agentic Workflows Team<br>
 **This Version**: [safe-outputs-specification](/gh-aw/specs/safe-outputs-specification/)<br>
 **Latest Published Version**: This document
@@ -201,7 +201,7 @@ An implementation satisfying ALL normative requirements (MUST, SHALL, REQUIRED s
 An implementation satisfying ALL security-critical normative requirements but omitting support for optional safe output types. Partial conformance requires:
 
 - Complete security architecture (non-negotiable)
-- Mandatory safe output types: `create_issue`, `add_comment`, `create_pull_request`, `noop`, `missing_tool`, `missing_data`, `report_incomplete`
+- Mandatory safe output types: `create_issue`, `add_comment`, `create_pull_request`, `noop`, `report_missing_tool`, `report_missing_data`, `report_incomplete`
 - Clear documentation listing unsupported optional types
 - Warning messages when workflows attempt to use unsupported types
 
@@ -319,7 +319,7 @@ The Safe Outputs MCP Gateway implements defense-in-depth through strict architec
 
 **Requirement AR1: Agent Isolation**
 
-Agents MUST execute without GitHub write permissions. Only read-level tokens SHALL be accessible to agent processes. Write-capable tokens MUST reside exclusively in safe output job contexts.
+Agents MUST execute without GitHub write permissions. Only read-level tokens SHALL be accessible to agent processes. Safe-output write credentials MUST remain confined to downstream safe-output processing jobs. Mention/team allowlist resolution MUST be deferred to the trusted `safe_outputs` job; ingestion in the `agent` job MUST perform no privileged mention or team lookups and MUST NOT receive mention-specific credentials.
 
 **Verification**:
 
@@ -396,14 +396,14 @@ Safe Output Processors MAY target external APIs. Credentials for each external s
 
 - **Method**: Manual security audit and code review
 - **Tool**: Security review of workflow structure and GitHub Actions architecture
-- **Criteria**: No GITHUB_TOKEN or credentials are accessible from agent job context; tokens only exist in safe output job contexts
+- **Criteria**: Safe-output and mention-resolution credentials are inaccessible to agent processes; mention resolution occurs only in trusted safe-output processing after the agent artifact has been transferred
 - **Manual Check**: Audit all communication channels (artifacts, environment variables, network, filesystem) to confirm no credential leakage
 
 **Formal Definition**:
 
 ```
 ∀ t ∈ [agent_start, agent_end]:
-  accessible_credentials(agent_context, t) ∩ safe_output_credentials = ∅
+  accessible_credentials(agent_context, t) ∩ (safe_output_credentials ∪ mention_resolution_credentials) = ∅
 ```
 
 **Requirement AR5: Steering Issue Provenance**
@@ -567,7 +567,7 @@ This specification addresses five primary threat scenarios:
 
 | Layer | Mechanism | Effectiveness |
 |-------|-----------|---------------|
-| **Manifest precedence** | Compiler-emitted checkout manifest is consulted before any workspace scan | High for declared checkouts |
+| **Manifest precedence** | Each checkout job builds its manifest after finalization; handlers consult it before any workspace scan | High for declared checkouts |
 | **Scan confinement** | Discovery scans only under `$GITHUB_WORKSPACE`; manifest paths that are absolute or escape the workspace root are rejected | High |
 | **Scoped trust** | `safe.directory` is injected per invocation for the single `git config --get remote.origin.url` read instead of mutating process-wide git trust | High |
 | **Read-only discovery** | Discovery invokes only `git config --get`, which does not run hooks, pagers, or filesystem-monitor processes | High |
@@ -575,6 +575,27 @@ This specification addresses five primary threat scenarios:
 | **Deferred trust** | Durable `safe.directory` trust is granted only to the resolved, allowlist-validated checkout directory at the point of the git write operations | Medium |
 
 *Residual Risk*: A spoofed `remote.origin.url` can still redirect an allowlisted operation to a different workspace directory, so the pushed content is agent-controlled — as it is for any safe output. Two further residuals remain: a `.git` gitdir-link file may point its git directory outside the workspace even though the worktree path is confined, and pushes use the local remote name `origin` rather than a remote URL reconstructed from `GITHUB_SERVER_URL`. Mitigation: configure `allowed-repos`/`allowed-github-references` so the target set is explicit, prefer `checkout:` entries (which populate the manifest and take precedence over the scan) over ad-hoc workspace clones, and rely on branch protection and review for the receiving repository.
+
+**Threat T8: Private-to-Public Data Exposure**
+
+*Attack Vector*: A workflow opts out of the gateway's cross-visibility protections, allowing data read from a private repository to reach public Actions logs or a public repository selected by the agent.
+
+*Examples*:
+
+- An agent includes private issue or source content in a safe-output body targeting a public repository.
+- A safe-output failure or diagnostic includes private data in a public workflow log.
+- A blanket or server-specific `private-to-public-flows` opt-out disables the default sink-visibility guard.
+
+*Architectural Mitigations*:
+
+| Layer | Mechanism | Effectiveness |
+|-------|-----------|---------------|
+| **Default policy** | Private workflows enforce public sink visibility restrictions unless an explicit opt-out is configured | High |
+| **Compiler gate** | Strict mode rejects both blanket and server-list opt-outs; non-strict mode emits a security warning | High when strict mode is enabled |
+| **Target authorization** | Safe-output handlers continue to enforce configured repository and per-type allowlists | High |
+| **Auditability** | The opt-out and resulting safe-output operations are retained in compiler and workflow audit records | Medium |
+
+*Residual Risk*: A non-strict workflow can still intentionally configure the opt-out, and public logs remain visible to repository readers. Mitigation: use strict mode for workflows processing private data, keep the default sink-visibility policy enabled, and review any non-strict warning before deployment.
 
 **Repository Reference Format**
 
@@ -600,12 +621,17 @@ When evaluating cross-repository operations, implementations MUST apply these ru
    - MUST reject cross-repository operations
    - Same-repository operations are permitted
 
+**Invocation-context authorization** is a separate runtime check applied when resolving a `workflow_dispatch` target repository after safe-output processing. If parsing `GH_AW_ALLOWED_REPOS` yields one or more entries, that list MUST remain authoritative and MUST NOT be extended with handler configuration. Otherwise, when handler configuration is valid, the resolver MUST build a fallback from configured per-handler `allowed_repos` entries, retaining their existing matching semantics, and exact, valid per-handler `target-repo` slugs. Handler `target-repo` values MUST be trimmed and validated as exact repository slugs before inclusion; wildcard and malformed values MUST be ignored. The resolver MUST reject any dispatch target that is neither the workflow repository nor allowed by this effective list. This fallback preserves the handler's configured target without authorizing arbitrary repositories.
+
 **Matching Rules**
 
-- Matching is EXACT (case-sensitive)
-- Wildcards (*, ?) are NOT supported
-- Pattern matching is NOT supported
-- Each repository MUST be explicitly listed
+- Literal repository entries match EXACTLY (case-sensitive)
+- Explicit allowlist patterns retain the matching semantics supported by that allowlist; `?` is NOT supported
+- A per-handler `target-repo` fallback value is never treated as a pattern, even if the safe-output handler supports a wildcard target
+- Exact fallback slugs allow ASCII alphanumerics, hyphens, and underscores in the owner (including Enterprise Managed User logins), and additionally dots in the repository name
+- Each repository MUST be explicitly listed or match an explicit supported allowlist pattern
+
+Internal work-queue Claim adapters use the authenticated worker profile's `effect_scope` as a singleton repository allowlist. Declared adapters MUST specify a fixed literal `target-repo`, validated by `work_queue_claim_adapters.cjs`. Every selected repository, including native adapter runtime fallbacks and independently resolved mutation targets, MUST match the profile allowlist through `assertClaimAuthorized` before effects execute. Repository allowlist rejection carries error code E004 while preserving the queue protocol message `work_queue_effect_scope_denied`. This queue-specific authorization does not replace type-specific or global allowlists for user-facing safe-output handlers.
 
 **Security Properties**
 
@@ -1073,7 +1099,7 @@ When no `safe-outputs:` section is present, the compiler automatically injects a
 #     title-prefix: "[<workflowID>]"
 ```
 
-This auto-injection is suppressed when any safe output type other than the system types (`noop`, `missing-tool`, `missing-data`) is explicitly configured.
+This auto-injection is suppressed when any safe output type other than the system types (`noop`, `report-missing-tool`, `report-missing-data`) is explicitly configured.
 
 **Compilation Layer**:
 
@@ -1712,6 +1738,27 @@ Result:
 
 Beyond common parameters, individual safe output types support specialized configuration.
 
+#### Protected-File Exclusions
+
+The `create-pull-request` and `push-to-pull-request-branch` handlers accept `protected-files` as either the existing policy string or an object containing `policy` and `exclude`:
+
+```yaml
+safe-outputs:
+  create-pull-request:
+    protected-files:
+      policy: fallback-to-issue
+      exclude: ["/pyproject.toml"]
+```
+
+The object form MUST preserve the policy values and defaults supported by the corresponding handler's string form. Each `exclude` entry MUST be interpreted as follows:
+
+- An entry without a leading slash MUST retain the existing basename or path-prefix matching behavior.
+- An entry beginning with `/` MUST match only the exact repository-relative path after removing the leading slash. For example, `"/pyproject.toml"` excludes the root `pyproject.toml`, but not `lib/foo/pyproject.toml`.
+
+Implementations MUST apply exact-path exclusions in both patch-time and post-apply protected-file checks. Before comparing paths, implementations MUST normalize patch paths to repository-relative paths and decode Git C-style quoted paths, including octal UTF-8 byte escapes. An exact-path exclusion MUST NOT remove protection for other paths with the same basename.
+
+Protected-file exclusions only affect the protected-file check. Implementations MUST evaluate `allowed-files` independently and MUST NOT treat a protected-file exclusion as permission to modify a path that fails the `allowed-files` check.
+
 **Representative Examples**:
 
 **Issue Creation Extensions**:
@@ -1749,7 +1796,7 @@ submit-pull-request-review:
   target-repo: owner/repo        # Cross-repository target
   allowed-repos: [...]           # Additional allowed repositories
   allowed-events: [COMMENT]      # Preferred default for non-blocking bot reviews
-  supersede-older-reviews: true  # Best-effort dismissal of older same-workflow REQUEST_CHANGES reviews (including legacy blockers)
+  supersede-older-reviews: true  # Best-effort dismissal of older same-workflow blockers after a clean COMMENT review without inline findings
   footer: "always" | "none" | "if-body"     # Footer on review body
 ```
 
@@ -2039,6 +2086,184 @@ Test Case 3: Context Inclusion
 
 **Requirement CS3**: Sanitization MUST be idempotent: `sanitize(sanitize(content)) === sanitize(content)`
 
+#### Issue-body tree provenance and coarse redaction
+
+The issue publication AST records optional `agentTainted` provenance on report,
+footer, block, and inline nodes. `true` identifies agent-origin content; `false`
+identifies framework-origin structure or metadata. Missing provenance MUST be
+treated as agent-tainted. The flag describes the node itself, not its descendants:
+a framework-owned `details` wrapper can contain agent-tainted paragraphs.
+
+Only trusted builders MAY assign framework provenance. Agent body text, including
+HTML comments or JSON containing `agentTainted: false`, MUST NOT set node provenance.
+The attributed issue builder parses agent content separately and inserts typed
+blocks into the framework template. Agent delimiters cannot close framework
+wrappers or consume the generated footer. Normalization MUST retain provenance and
+MUST NOT merge inline nodes across provenance boundaries.
+Serialization MUST assemble complete adjacent text or code runs before applying
+secret redaction, including runs already merged during normalization and singleton
+runs. It MUST also detect secrets reconstructed across inline formatting
+containers without mutating the AST or discarding unrelated formatting.
+Redacting incomplete prefixes can hide a registered secret from subsequent
+matching and expose its suffix. Complete-run normalization and redaction MUST
+precede escaping and code-fence selection, regardless of provenance.
+
+Before concretizing a report tree to publication strings, the renderer MUST
+assert that the tree passed the rendering redaction stage and contains no
+remaining secret-tainted strings. `redactReportForRendering` prepares a fresh tree;
+`assertRedactedReport` requires its private, non-serializable redaction proof and
+checks every string, including nested metadata keys and values, encoded forms,
+and reconstructed inline runs. Normalization alone, copied proof fields, or
+framework provenance MUST NOT satisfy this assertion. The assertion MUST recheck
+current masks, rather than trust a stale proof after mutation or mask changes.
+The concrete title and body MUST also be checked before returning, so escaping
+or formatting cannot introduce a publishable secret. Failures MUST prevent
+publication and MUST NOT include the rejected content in their error messages.
+
+Secret-tainted string safety is distinct from agent-origin provenance: benign
+agent text MAY survive redaction without being relabeled as framework-origin.
+The mandatory rendering redaction stage does not require an optional coarse
+content policy.
+
+##### Automatic publication size redaction
+
+Issue-body AST publication and comment/review body fitting MUST measure the
+concrete rendered body, including escaping, code fences, attribution, and metadata,
+against the destination limit. The runtime measures string length in UTF-16 code
+units, with a 65,536-unit cap for GitHub issue and comment bodies; review summaries
+retain its conservative 65,000-unit limit. Supported issue creation, comment, and review tools accept
+bounded source bodies up to 524,288 units for this fitting stage. Mention and
+link quotas MUST still apply before size redaction; removing text MUST NOT bypass
+these constraints.
+
+On overflow, `renderSizedReport` replaces large wholly agent-origin subtrees with
+the framework notice `Content redacted to fit size limit.` Mixed-origin containers
+MUST retain framework labels and traverse their agent slots instead. Adjacent
+replacement notices MAY be coalesced. The final concrete length MUST be checked;
+an estimated source size alone MUST NOT establish that a body fits. Existing
+Markdown strings that already fit MUST remain unchanged by the size-fitting helper.
+
+Markers, closing references, expiration, complete generated/configured footers,
+and footer diagnostics MUST NOT be sliced, ellipsized, or omitted to make space.
+Trusted builders MAY set `sizeProtected: true` on diagnostic subtrees embedded in
+the main body. Normalization MUST retain this flag and MUST NOT merge protected
+inline strings with unprotected siblings. Raw Markdown or JSON MUST NOT assign
+this flag. Size protection MUST NOT bypass secret redaction, mandatory rendering
+assertions, or an explicit coarse security policy.
+
+Structured payloads MUST use the atomic `structured_data` AST node. Valid `json`
+code fences are parsed into this node; invalid JSON examples remain literal code
+blocks. Size redaction MAY replace an entire agent-origin structured payload, but
+MUST NOT truncate its serialized JSON, alter selected fields to make space, or
+leave unbalanced fences. JSON metadata uses the distinct protected `json_marker`
+node, not a size-redactable structured payload.
+
+After replacement, the tree MUST pass the normal redaction/proof assertions before
+serialization. Protected-frame overflow MUST fail explicitly before an API write,
+without publishing a clipped footer or reporting success. Review fallback
+excerpts MUST likewise reserve their complete configured footers; fitting a
+fallback MUST NOT truncate the review's original attribution or caller marker.
+
+##### Explicit coarse content policies
+
+Agent-authored missing-tool, missing-data, no-op, and incomplete-report diagnostics
+in generated footers MUST remain tainted. Their framework section labels,
+attribution, expiration, and metadata retain independent framework provenance.
+Issue builders MUST reject wrappers that prevent typed content slots from being
+consumed, including paired code-fence wrappers, rather than publish placeholder
+text or silently lose agent content.
+
+The runtime helper `redactReport(report, shouldRedact)` applies an additional,
+trusted-code policy to normalized block and inline nodes. A selected agent block
+is replaced by a framework-generated `Content redacted.` paragraph, removing the
+entire subtree. An inline match removes its containing agent paragraph, heading,
+task, or table instead of leaving broken Markdown fragments. Framework nodes are
+not policy candidates, and mixed-origin subtrees MUST NOT be replaced wholesale.
+Their children are traversed instead; tainted inline slots in framework or
+mixed-origin paragraphs receive an inline notice without removing framework labels.
+When a descendant matches inside a wholly agent-origin inline container, that
+container MUST become a plain notice too. For example, selecting an agent link's
+label MUST remove the link destination rather than leave a link around the notice.
+Mixed-origin inline containers are traversed instead, preserving framework
+descendants.
+Consecutive selected inline siblings produce one notice per matching run, but the
+policy MUST still be evaluated for every candidate. Framework content or an
+unmatched sibling separates runs. The transform includes preamble and footer
+nodes and does not mutate the input.
+
+The report node's `agentTainted` flag also describes its title. A tainted title,
+including one with missing provenance, is offered to the same predicate as a
+normalized `{type: "text", value: title, agentTainted: true}` node. A selected title
+becomes the fixed `Content redacted.` title, and the report node is marked
+framework-origin so repeated redaction does not revisit it. Child provenance
+remains independent and unchanged. Framework titles and unmatched tainted titles
+are retained; ordinary title sanitization and secret redaction still apply.
+
+`buildIssueReport` and `buildIssueBodyReport` accept this predicate as the optional
+`redact` builder option. This is an internal runtime API, not an agent tool field
+or a workflow frontmatter option. Without a predicate, mandatory secret redaction
+and automatic size fitting still apply. Framework provenance MUST NOT bypass
+secret redaction, node validation, URL validation, or rendering escapes.
+
+##### HTML and code fidelity
+
+Issue-report text MUST remain literal, escaped text rather than raw HTML.
+Markdown inline code and fenced code MUST become typed code nodes; angle
+brackets and XML-comment examples inside them MUST NOT become presentation
+elements or metadata. Backtick runs without an exact matching closer MUST remain
+literal, and a backtick fence's info string MUST NOT contain backticks.
+Code nodes remain subject to secret redaction, Unicode hardening, and the
+configured URL policy; preserving code syntax MUST NOT exempt their contents
+from these controls.
+
+The report importer MAY translate a complete, single-line `<img>` token into
+the typed `image` node. Its only supported attributes are `src`, `alt`, `width`,
+`height`, and `align`, without duplicates. The source MUST be a validated HTTPS
+URL without credentials, on a hostname accepted by the configured domain policy.
+Renderable images MUST NOT use the URL-policy exception for code regions,
+even when `allowed-or-code-region` is configured and their attributes contain
+backticks; renderable destinations follow the same domain restrictions as
+`allowed-only`. The shared image-node
+normalizer MUST enforce this policy for HTML imports, Markdown images, and
+directly constructed AST images, regardless of provenance. Data URIs MUST be
+rejected, including encoded variants; only canonical HTTPS sources are valid.
+Markdown links, angle-bracket autolinks, and bare HTTPS links imported as
+renderable nodes MUST also recheck domain policy, rather than rely on upstream
+code-region classification.
+Width and height MUST be
+integer pixel dimensions from 1 through 10,000; alignment MUST be `left`, `right`,
+or `center`. Unsupported, malformed, or disallowed HTML MUST remain visible,
+escaped text with prose URL filtering, not be passed through as raw HTML.
+Quoted attribute boundaries MUST be preserved before entity decoding, including
+decimal and hexadecimal quote entities. Decoded attribute values remain subject
+to normalization, domain policy, and secret redaction without being reparsed as
+additional attributes. Indented fences MUST use the same opening-fence rule
+during paragraph collection and code-block parsing.
+
+Images without layout fields retain Markdown image serialization. Images with
+layout fields MUST serialize only validated attributes, with HTML-attribute
+escaping for both URL and alt text. Attribute values MUST NOT introduce HTML,
+mentions, table delimiters, template structure, or framework provenance.
+Image-only lines and standalone subscript delimiters in multi-line paragraphs
+MUST remain in Markdown inline context,
+so subsequent code cannot become raw HTML through CommonMark HTML-block parsing.
+Adjacent generated code delimiters MUST NOT merge into a different backtick run.
+Markdown delimiter matching, URL punctuation trimming, and hidden link-title
+neutralization MUST avoid repeated full-suffix scans on malformed input.
+These protections MUST apply before publication-size fitting, including at the
+sanitizer's maximum input length.
+Imported images retain the source's agent taint and remain subject to ordinary
+secret redaction, coarse content policies, rendering assertions, and concrete
+publication-size fitting. These rules do not introduce a raw-HTML AST node.
+
+Community reports motivating this separation fall into three clusters:
+
+| Cluster | Reports | Boundary |
+| --- | --- | --- |
+| Overly strict URL filtering | [#17513](https://github.com/github/gh-aw/issues/17513), [#33970](https://github.com/github/gh-aw/issues/33970) | Readable citations versus URL-based exfiltration; this AST support does not relax the configured URL policy. |
+| HTML and code fidelity | [#18829](https://github.com/github/gh-aw/issues/18829), [#29009](https://github.com/github/gh-aw/issues/29009) | Literal code, typed presentation elements, and arbitrary HTML require different handling; provenance does not enable raw HTML nodes. |
+| Hidden metadata loss | [#18992](https://github.com/github/gh-aw/issues/18992), [#67174](https://github.com/github/gh-aw/issues/67174) | Agent payloads remain distinct from framework markers; typed metadata does not grant agent comments framework trust. |
+
 **Detailed Transformation Specifications**:
 
 **Transformation T1: Unicode Normalization**
@@ -2087,10 +2312,22 @@ Requirements:
 
 Requirements:
 
-- Detect @mentions: `@[a-zA-Z0-9_-]+`
-- Check against allowed-aliases list
-- Neutralize unauthorized: `@user` becomes `@ user` (add space)
+- Ingestion MUST preserve mentions for mention-aware output types without performing allowlist lookups.
+- The trusted safe-output processor MUST detect @mentions: `@[a-zA-Z0-9_-]+`
+- Check each mention against the resolved allowed-aliases list
+- Neutralize unauthorized mentions before publication
 - Preserve mentions in code blocks
+
+**Ingestion credential requirements**:
+
+- Ingestion MUST use only the default GitHub Actions context and MUST NOT resolve collaborators, comment authors, or team membership. It MUST preserve mention candidates for the trusted safe-output processor to filter before any write operation.
+- Mention resolution MUST run in the trusted `safe_outputs` job. Its lookup token MUST come only from `safe-outputs.mentions.github-app`, then `safe-outputs.mentions.github-token`, then `github.token`; it MUST NOT inherit `safe-outputs.github-token`, `safe-outputs.github-app`, per-output credentials, or `GH_AW_GITHUB_TOKEN`.
+- When `safe-outputs.mentions.github-app` is configured, the compiler MUST mint its dedicated installation token in `safe_outputs` before **Process Safe Outputs**. The token MUST use the configured installation owner and repository scope, request `issues: read` whenever `add-comment` is enabled, and request `members: read` when `mentions.allowed-teams` is configured. Explicit permission overrides MAY select only `read` or `none`; the compiler MUST reject `write` and other levels.
+- With `ignore-if-missing: true`, missing app credentials MUST skip minting and mention resolution MUST fall back to `safe-outputs.mentions.github-token`, then `github.token`. Mention credentials MUST NOT change downstream safe-output write credentials.
+- Allowed team members' raw `@login` mentions MUST remain unmodified during untrusted ingestion and MUST be filtered in the trusted safe-output processor before publication.
+- A mention token referencing `steps.<id>.outputs.*` MUST be produced by an earlier step in the `safe_outputs` job.
+- Mention credentials MUST NOT be serialized into agent-visible validation or handler configuration.
+- Compiler debug logging SHOULD identify the mention-resolution token source without logging credential values or token expressions.
 
 **Transformation T6: Markdown Safety**
 
@@ -2210,8 +2447,8 @@ The following table defines the exact `createHandlers()` function used for each 
 | `autofix_code_scanning_alert` | `defaultHandler("autofix_code_scanning_alert")` |
 | `create_check_run` | `defaultHandler("create_check_run")` |
 | `create_agent_session` | `defaultHandler("create_agent_session")` |
-| `missing_tool` | `defaultHandler("missing_tool")` |
-| `missing_data` | `defaultHandler("missing_data")` |
+| `report_missing_tool` | `defaultHandler("report_missing_tool")` |
+| `report_missing_data` | `defaultHandler("report_missing_data")` |
 | `report_incomplete` | `defaultHandler("report_incomplete")` |
 
 ### 7.0.3 Declared Field Payload Construction
@@ -2331,14 +2568,15 @@ Fields used for privileged transport metadata, including patch anchoring and upl
 ```json
 {
   "name": "add_comment",
-  "description": "Add a comment to an existing issue, pull request, or discussion. IMPORTANT: Comments are subject to validation constraints enforced by the MCP server - maximum 65536 characters for the complete comment (including footer which is added automatically), 10 mentions (@username), and 50 links. Exceeding these limits will result in an immediate error with specific guidance. NOTE: By default, this tool does not require discussions:write permission. Set 'discussions: true' in the workflow's safe-outputs.add-comment configuration to enable discussion comments and request this permission.",
+  "description": "Add a comment to an existing issue, pull request, or discussion. Maximum input: 524288 characters, 10 mentions, and configured max-links URL occurrences (default: 50). Large agent content is automatically redacted to fit 65536 published characters, reserving complete footers and markers. Protected-frame overflow fails explicitly. Discussion comments require safe-outputs.add-comment.discussions: true.",
   "inputSchema": {
     "type": "object",
     "required": ["body"],
     "properties": {
       "body": {
         "type": "string",
-        "description": "Comment text in Markdown. CONSTRAINTS: The complete comment (your body text + automatically added footer) must not exceed 65536 characters total. Maximum 10 mentions (@username), maximum 50 links (http/https URLs). A footer (~200-500 characters) is automatically appended, so leave adequate space. If these limits are exceeded, the tool call will fail with a detailed error message indicating which constraint was violated."
+        "maxLength": 524288,
+        "description": "Final intended Markdown comment. Large agent content may be replaced with size-redaction notices; complete footers and markers are preserved. Mention and link limits apply before fitting."
       },
       "item_number": {
         "type": "number",
@@ -2356,7 +2594,7 @@ Fields used for privileged transport metadata, including patch anchoring and upl
 
 **Operational Semantics**:
 
-1. **Constraint Enforcement**: The MCP server validates body content before recording operations. Violations trigger immediate error responses with specific guidance (see Section 8.3). The body length limit applies to user-provided content; a second validation occurs after footer addition to ensure the complete comment doesn't exceed limits.
+1. **Constraint Enforcement**: The MCP server enforces the bounded input length, mentions, and links before recording operations. Violations trigger immediate errors (see Section 8.3). The processor validates input again, automatically fits agent content after reserving attribution, and checks the complete final comment before publication.
 2. **Context Resolution**: When `item_number` omitted, resolves from workflow trigger context.
 3. **Related Items**: When multiple outputs created, adds related items section to comments.
 4. **Footer Injection**: Appends footer according to configuration (typically 200-500 characters).
@@ -2373,16 +2611,22 @@ These extensions apply to safe-output processor messages for `add_comment` (incl
 5. When an agent supplies `comment_id`, implementations MUST reject the operation unless `safe-outputs.add-comment.allows-comment-ids` is configured and contains that exact positive integer ID. The allowlist is trusted workflow state and MAY be computed by earlier workflow steps.
 6. Agent-supplied `comment_id` MUST NOT be honored for discussion comments and MUST NOT be treated as a substitute for the trusted status comment ID used by `target: "status"`.
 7. When updating an existing comment through either controlled reuse path, implementations SHOULD skip hide-older-comments behavior for that operation.
+8. With `replace-older-comments: true`, implementations MUST update the newest issue/PR comment on the target item authored by the authenticated workflow identity whose `gh-aw-workflow-call-id` marker matches the current caller workflow, or create a new comment if none matches. If the authenticated identity cannot be resolved, only bot-authored comments are eligible. When no caller ID is available, implementations MAY use the workflow ID marker instead. The replacement MUST include the newly generated body, footer, and markers; staged mode MUST NOT perform the lookup or update. Explicit trusted comment reuse takes precedence.
 
 **Enforced Constraints**:
 
 | Constraint | Limit | Error Code | Example Error Message |
 |------------|-------|------------|----------------------|
+| Input body length | 524288 characters | E006 | "Comment body exceeds maximum length of 524288 characters (got 524289)" |
 | Body length (complete comment including footer) | 65536 characters | E006 | "Comment body exceeds maximum length of 65536 characters (got 70000)" |
 | Mentions | 10 per comment | E007 | "Comment contains 15 mentions, maximum is 10" |
-| Links | 50 per comment | E008 | "Comment contains 60 links, maximum is 50" |
+| Links | `safe-outputs.add-comment.max-links` (default: 50) in agent content | E008 | "Comment contains 60 links, maximum is 50" |
 
-**Note**: The 65536 character limit applies to the final comment text including the automatically appended footer. Users should leave approximately 200-500 characters of headroom to accommodate the footer, which contains workflow attribution and installation instructions.
+The final limit includes all attribution and metadata. The processor reserves
+their actual size automatically; callers do not need to estimate footer headroom.
+If protected content alone cannot fit, publication fails rather than shortening it.
+
+The link limit counts URL occurrences, not distinct URLs, and excludes trusted generated footer and metadata links. `max-links` accepts a positive integer and is enforced at both tool invocation and posting time. Generated metadata remains subject to final-body length and mention limits.
 
 **Configuration Parameters**:
 
@@ -2390,9 +2634,17 @@ These extensions apply to safe-output processor messages for `add_comment` (incl
 - `target`: Filter by type ("issue", "pull_request", "discussion", "*"). This configuration field applies to static workflow configuration (`safe-outputs.add-comment.target`) and is distinct from the runtime per-message `target: "status"` extension above.
 - `allows-comment-ids`: Trusted allowlist of issue/PR comment IDs that the agent may update with `comment_id` when `target: "*"` is configured. This field is REQUIRED before any agent-supplied `comment_id` is honored. Accepts an array of positive integer IDs, strings containing positive integer IDs, or a GitHub Actions expression that resolves to such a list.
 - `hide-older-comments`: Hide previous workflow comments
+- `replace-older-comments`: Replace the newest matching issue/PR comment instead of creating another (default: false). MUST NOT be enabled together with `hide-older-comments`.
 - `discussions`: Control `discussions:write` permission (default: false). Set to `true` to comment on discussions.
 - `target-repo`: Cross-repository target
 - `allowed-repos`: Cross-repo allowlist
+
+**Security Requirements**:
+
+- Body undergoes full sanitization; `@mentions` are neutralized except for the parent item's author and configured mention aliases
+- Length, mention, and link limits (see Enforced Constraints) validated before and after footer injection
+- Cross-repo validation against `allowed-repos`
+- Agent-supplied `comment_id` rejected unless `target` is `"*"` and the ID is listed in `allows-comment-ids`; never honored for discussion comments
 
 **Required Permissions**:
 
@@ -2503,6 +2755,10 @@ safe-outputs:
 10. **Ephemeral Fork Branch Model**: When `head-repo` differs from `target-repo`, implementations SHOULD create or refresh an ephemeral branch in `head-repo` from the resolved upstream base SHA, apply the agent changes, and open the pull request back to the upstream base. Implementations MAY support explicit synchronization of that ephemeral branch with a newer upstream base, but implicit reuse of arbitrary pre-existing fork branches MUST NOT occur.
 11. **Summary and Manifest Provenance**: Successful executions MUST record `head_repo` in the safe-output summary and machine-readable manifest.
 12. **`head_repo` Required for Same-Organization Forks**: The owner-qualified head reference (requirement 9) alone is insufficient when `head-repo` and `target-repo` share the same owner/organization, because multiple repositories under that owner can define the same branch name. Whenever `head-repo` differs from `target-repo` — including when both share the same owner/organization — every pull request creation or update API call MUST include the `head_repo` parameter naming the head repository, in addition to the owner-qualified `head` reference.
+13. **Signed Commit Delivery**: Branch delivery MUST satisfy the [signed commit delivery requirements](#signed-commit-delivery-requirements), shared with `push_to_pull_request_branch`.
+14. **Transport Integrity**: Patch/bundle application and publication MUST satisfy the shared [transport integrity requirements](#patch-and-bundle-transport-integrity-requirements).
+15. **Bundle Git Operations**: Bundle inspection and prerequisite recovery MUST satisfy [BGO-001–003 and BGO-008](#bundle-git-operations-and-validation-baselines). Optional unsigned push baselines (BGO-004–007) apply only to `push_to_pull_request_branch`.
+
 **Configuration Parameters**:
 
 - `max`: Operation limit (default: 1)
@@ -2521,11 +2777,82 @@ safe-outputs:
 - `github-token`: Optional credential for upstream pull request creation and related upstream metadata operations
 - `head-github-token`: Optional credential for `head-repo` branch writes. When specified, it SHOULD be limited to `contents: write` on `head-repo`
 - `head-github-app`: Optional GitHub App configuration to mint an ephemeral credential for `head-repo` branch writes at runtime. When `head-github-app` is configured, the minted token takes precedence over `head-github-token`. The app installation MUST have `contents: write` on `head-repo`
+- `allow-full-history-fetch`: Literal boolean, default `false`, independently scoped to this handler. Permits potentially unbounded bundle prerequisite recovery; does not enable downloads for optional validation baselines.
 - `preserve-branch-name`: When `true`, use the agent-supplied branch name verbatim without appending a random salt suffix (default: `false`)
 - `recreate-ref`: When `true` (and `preserve-branch-name: true`), allows the handler to force-delete an existing remote branch ref and recreate it from the agent's local HEAD on collision. When `false` (default), an existing remote branch under `preserve-branch-name: true` causes a fallback rather than overwriting the remote ref. Has no effect when `preserve-branch-name: false`. (default: `false`)
+
+##### Signed Commit Delivery Requirements
+
+These requirements apply to `create_pull_request` and `push_to_pull_request_branch` when rebasing stale commits before GraphQL signed delivery.
+
+**SCD-001**: After a successful rebase onto the current GraphQL parent, `HEAD` MUST remain attached to the checked-out delivery branch, and that named branch MUST point to the rebased tip. A rebase MUST NOT leave the named branch at its pre-rebase tip while advancing a detached `HEAD`.
+
+**SCD-002**: If GraphQL signing subsequently fails and direct git-push fallback is permitted, the fallback MUST push the rebased named branch, not its pre-rebase tip. A remote branch seeded at the current GraphQL parent MUST receive the rebased changes without requiring a force push or ref deletion to compensate for a stale local branch.
+
+**SCD-003**: Rebase attachment MUST NOT broaden fallback policy or change signing defaults, credential selection, or head-repository routing. When the shared delivery helper is invoked with `allowGitPushFallback: false`, a signed-delivery failure MUST fail without attempting an unsigned push. Unsupported commit shapes and policy violations MUST continue to refuse unsigned fallback.
+
+**Conformance Evidence**: The real-git regression in `actions/setup/js/push_signed_commits.test.cjs` advances the base, seeds the remote delivery branch at that base, and simulates GraphQL signing failure with fallback enabled. It verifies attached `HEAD`, the updated named branch, advanced-base ancestry, and delivery of both agent and upstream file contents.
+
+##### Patch and Bundle Transport Integrity Requirements
+
+These requirements apply to `create_pull_request` and `push_to_pull_request_branch`, including unsigned delivery, bundle recovery, signed delivery, PR/issue publication retries, and optional CI-trigger commits. They bind handler-time policy validation and Git consumption to captured bytes; capture alone does not establish policy approval or detection provenance.
+
+**PTI-001 — Trusted capture**: Producer and consumer MUST derive canonical transport paths from the same validated branch and fully qualified, authorized target repository slug, not raw agent-supplied repository/path values or the head repository of a fork-backed delivery. Bare names and surrounding whitespace MUST be normalized by repository authorization before path resolution. Producers MUST qualify filenames even for the implicit workflow repository. Consumers MAY accept a unique legacy unqualified namespace, but MUST reject multiple matching namespaces before capture or side effects, including duplicate patches/bundles and a patch in one namespace paired with a bundle in another. They MUST NOT search another default repository after resolving an explicit target. For each resolved patch or bundle, the handler MUST capture raw bytes, a cryptographic digest, and descriptor-verified device/inode identity. Opens MUST reject symlinks and nonregular files without blocking on FIFOs. Missing or unreadable resolved artifacts MUST fail closed, including in allow-empty mode.
+
+**PTI-002 — Stable consumption**: Git operations that consume a captured path MUST receive a private, read-only snapshot outside the checkout, not the agent-writable original. A bundle's verification, head discovery, imports, and recovery retries MUST use the same snapshot unless a trusted transformation explicitly replaces it. Capture and snapshots MUST preserve raw bytes, including non-UTF-8 data.
+
+**PTI-003 — Integrity boundaries and cost**: Full content-digest and identity checks of originals and existing snapshots MUST run at transport reads/application, immediately before publication attempts, and at handler completion. Publication includes remote ref creation/deletion, signed mutations, direct pushes, PR creation, and issue fallbacks; each retried attempt MUST recheck. Successful PR and fallback-issue creation MUST also recheck after the awaited API request and before returning its response to callers that can enable auto-merge, close older PRs, or assign a coding agent. Unrelated local commands MAY use lightweight identity/type/size checks, but these MUST NOT replace byte checks at trust boundaries. Implementations MUST cache snapshot digests and MUST NOT reread or hash full artifacts around every unrelated command.
+
+**PTI-004 — Trusted transformations**: Temporary-ID substitution and commit-title suffixing MUST operate on captured bytes and affect only trusted in-memory content and its private snapshot. They MUST NOT rewrite canonical artifacts or refresh the original digest/identity baseline from disk. The transformed bytes consumed by Git MUST be the trusted transformation of the validated input.
+
+**PTI-005 — Permanent failure**: An integrity failure MUST remain sticky for the invocation and prevent further application or publication. It MUST NOT enter conflict recovery, publication fallbacks, or transient/rate-limit retries, regardless of branch names, paths, or message substrings. The shared retry loop MUST reject the stable integrity error classification before invoking any custom retry classifier. A previously completed remote write is not rolled back by this contract; implementations MUST NOT claim transactional rollback across GitHub operations.
+
+**PTI-006 — Restricted cleanup**: Integrity failure MUST NOT prevent registered local cleanup of temporary bundle refs, an in-progress patch application, or a bundle-rewrite rebase. Rewrite rollback MUST be registered before mutation and pinned to the original checkout and trusted pre-rewrite HEAD; only the registered rebase abort and restoration to that exact HEAD MAY bypass the sticky failure. Explicit and finalizer patch aborts MUST be no-ops when no apply session exists in the pinned checkout, without suppressing genuine abort failures. Cleanup MUST be limited to resources registered by the current guard and pinned to the original checkout; it MUST NOT permit arbitrary resets, ref deletion, remote writes, or renewed artifact consumption. Private snapshots MUST be disposed on success and failure, even when Git cleanup fails. Cleanup failures MUST be surfaced rather than treated as success.
+
+**PTI-007 — Diagnostics**: Capture and verification MUST preserve filesystem error causes and distinguish operation, nonregular input, identity replacement, and content mismatch. Handler errors MUST expose the stable `ERR_TRANSPORT_INTEGRITY` classification, including when an intermediate helper wraps the error. Logs MUST use safe operation/reason/system-code diagnostics and MUST NOT expose artifact contents, secret values, or raw filesystem cause text.
+
+**Conformance Evidence**:
+
+| Requirement | Implementation | Regression evidence |
+|---|---|---|
+| PTI-001–004 | `safe_outputs_handlers.cjs`, `resolve_transport_paths.cjs`, `transport_integrity.cjs`, both PR handlers | `safe_outputs_handlers.test.cjs` producer/consumer round trips; `resolve_transport_paths.test.cjs`, `transport_integrity.test.cjs`, `transport_integrity_handlers.test.cjs` |
+| PTI-003 cost bound | Lightweight local checks and cached snapshot digests | An 8 MiB bundle and 100 unrelated commands require zero full-file reads and hashes; subsequent publication still rejects same-size mutation |
+| PTI-005 | `error_recovery.cjs`, `create_or_update_pull_request.cjs`, guarded publication callbacks | `error_recovery.test.cjs`, `create_or_update_pull_request.test.cjs`; real typed errors with network/timeout/rate-limit paths |
+| PTI-006–007 | Registered cleanup and structured diagnostics in `transport_integrity.cjs` | `transport_integrity_git.test.cjs` verifies real Git refs, conflicting-rebase rollback, and malformed-patch aborts; helper tests cover checkout pinning, failed cleanup, cause retention, and safe logging |
+
+All implementation and test paths in this table are under `actions/setup/js/`. The bounded [transport lifecycle model](https://github.com/github/gh-aw/blob/main/specs/workflow-security/SafeOutputTransport.tla) specifies stable consumption, failure, retry, cleanup, and diagnostic invariants; it does not prove filesystem isolation or cryptographic collision resistance.
+
+##### Bundle Git Operations and Validation Baselines
+
+**BGO-001 — Offline object inspection**: Bundle prerequisite checks, local import, and optional baseline ancestry/tree inspection MUST deny all Git transports, including promisor lazy downloads, using both `GIT_ALLOW_PROTOCOL=""` and `GIT_NO_LAZY_FETCH=1`. Missing local history or blobs MUST NOT implicitly deepen a shallow checkout, expand sparse-checkout patterns, or materialize missing remote objects. A local bundle MAY supply its own objects without changing this rule.
+
+**BGO-002 — Explicit recovery authority**: `create_pull_request` and `push_to_pull_request_branch` MUST default `allow-full-history-fetch` to `false` and MUST accept only a literal boolean. Missing prerequisites MUST fail with checkout-provisioning guidance unless this handler's trusted configuration is exactly `true`. An agent request MUST NOT grant recovery authority. Opted-in recovery MAY use `--unshallow` or fetch-by-SHA and MUST warn that downloads have no byte limit. Depth, a SHA, and `blob:none` MUST NOT be described as byte bounds. A locally sufficient bundle MUST NOT trigger recovery.
+
+**BGO-003 — Credential roles**: Recovery MUST use the handler-selected authorized repository and its credentials. For `push_to_pull_request_branch`, this is the validated PR head repository, including a configured automation fork; head credentials MUST be restored before baseline discovery and validation. For `create_pull_request`, recovery uses the target checkout's `origin`. Optional base metadata discovery MUST query only the target checkout's `origin` and use its credentials, not a temporarily installed fork-head token. REST comparisons MUST use the upstream repository client; Git credentials MUST NOT be assumed to authorize REST.
+
+**BGO-004 — Pinned provenance and opt-in**: For unsigned bundle pushes, the handler MUST pin exactly one current base-branch SHA from an exact-ref, metadata-only `ls-remote` to preserve exact-tip recognition. It MUST NOT fetch the pinned object. Older-ancestor baseline discovery MUST be disabled by default and enabled only by literal `allow-merged-base-baseline: true` on `safe-outputs.push-to-pull-request-branch`. A locally proven merge of the exact pinned tip MUST bypass REST comparison discovery regardless of the opt-in. When older-ancestor discovery is enabled, a merge parent MAY be selected for size validation only when REST comparison with the pinned SHA as `base` and that parent as `head` reports `behind` or `identical`. Workflow-start SHAs, commit timestamps, and agent metadata MUST NOT substitute for pinned provenance. Parent preference MUST use topological ordering.
+
+**BGO-005 — Bounded discovery**: Optional base metadata, ancestry, and merge-tree commands MUST have a 5-second process timeout, a 1 MiB limit per output stream, noninteractive authentication, and no shell interpolation. Each merge-parent/history scan MUST accept at most 100 records, using a 101st record to detect overflow before trusting a partial scan. Octopus-parent discovery MUST fall back rather than expand an unbounded argument list. REST comparison discovery MUST issue at most four requests, each with a 5-second abort deadline and automatic retries disabled. Only candidate-specific missing-parent responses (404) MAY continue within the remaining budget. Authorization, rate-limit, service, transport, timeout, and unknown failures MUST stop comparison discovery immediately.
+
+**BGO-006 — Conservative fallback**: Timeouts, output overflow, missing required local objects, and unsupported merge-tree operations MUST NOT be treated as successful evidence; partial command output MUST NOT establish a baseline. An inconclusive exact-tip ancestry probe MAY proceed to independently bounded parent discovery without downloading the tip only when `allow-merged-base-baseline: true`. With older-ancestor discovery disabled, or when discovery is inconclusive, unavailable pinned metadata, history overflow, an unconfirmed ancestor, or inability to construct its validation tree MUST retain PR-head validation unless the exact pinned tip was locally proven. An optional baseline failure MUST NOT enable recovery downloads even when `allow-full-history-fetch` is true; that flag applies only to prerequisite recovery. Required file/history checks MUST NOT be skipped because optional discovery failed.
+
+**BGO-007 — Separate size and protection provenance**: A validation-only merge tree MAY exclude confirmed ancestor content from patch-size and changed-content-size calculations when the required objects and ancestry are available locally. Only the exact pinned base tip MAY exempt its history and unmodified files from protected-file checks. A non-tip ancestor MUST retain PR-head-based protected-file and history checks, including changes later reverted in side-branch or agent commits. Reachability alone does not prove a historical base-branch state. Agent changes and conflict resolutions MUST remain subject to policy checks; unvalidated octopus merge resolutions MUST be rejected.
+
+**BGO-008 — Safe failures and append-only delivery**: Optional discovery and recovery diagnostics MUST NOT expose raw remote errors, artifact contents, or credentials. Validation-only trees MUST NOT rebase or rewrite existing PR commits. Baseline selection MUST NOT change append-only push policy, signing defaults, or authorization of the destination repository.
+
+**Conformance Evidence**:
+
+| Requirements | Implementation / regression evidence |
+|---|---|
+| BGO-001–003 | `git_helpers.cjs`, `git_helpers.test.cjs`, and `bundle_transport.integration.test.cjs`: literal opt-in, scoped fork recovery, unchanged shallow markers and pack inventory, missing blobs still absent, and no optional fetches |
+| BGO-004–006 | `push_to_pull_request_branch.cjs` and `push_to_pull_request_branch_comparisons.test.cjs`: disabled-by-default discovery, exact-tip compatibility, 100/101-record boundaries, 24-parent request caps, abort signals, real subprocess time/output limits, fixed diagnostics, and conservative fallback |
+| BGO-007–008 | `push_to_pull_request_branch.test.cjs` and `push_to_pull_request_branch.integration.test.cjs`: exact-tip no-network path, advanced-base sizing, strict non-tip protection, A-add/B-remove side-branch imports, reverted changes, and unchanged PR refs on rejection |
+
+Paths in this table are under `actions/setup/js/`. The bounded [Git-operation model](https://github.com/github/gh-aw/blob/main/specs/workflow-security/SafeOutputGit.tla) separates prerequisite recovery from optional discovery and size trust from protection trust. Synthetic negative controls and reachability witnesses check the abstraction, not Git internals, wall-clock guarantees, credential grants, or implementation refinement.
+
 **Security Requirements**:
 
-- Branch name sanitization (prevent injection)
+- Branch name sanitization (prevent injection). Producers and consumers MUST reject dash-only branch names before deriving transport paths or publishing, including in allow-empty mode. Adding a salt MUST NOT turn an empty normalized branch into a valid branch name.
 - Patch content validation
 - Size limits on commits
 - `head-repo` MUST be either the same repository as `target-repo` or an explicitly configured automation-owned fork; arbitrary contributor forks MUST NOT be used as write targets
@@ -2577,7 +2904,7 @@ safe-outputs:
 
 ### 7.2 System Types
 
-System types are always available in every workflow. The types `noop`, `missing-tool`, and `missing-data` are unconditionally enabled, while `create-issue` is conditionally auto-injected when no other safe output types are explicitly configured (see Section 4.3 for auto-injection rules).
+System types are always available in every workflow. The types `noop`, `report-missing-tool`, and `report-missing-data` are unconditionally enabled, while `create-issue` is conditionally auto-injected when no other safe output types are explicitly configured (see Section 4.3 for auto-injection rules).
 
 #### Type: noop
 
@@ -2909,7 +3236,8 @@ For all Linear types, GraphQL source, endpoint, protocol, and host are implement
 4. **Cross-Repository**: When `target-repo` is configured, operates on that repository (must be in `allowed-repos`).
 5. **Footer Injection**: Appends attribution footer to the closing comment when configured.
 6. **Body Suppression**: When `allow-body` is `false`, the handler MUST NOT post a closing comment. Any `body` value provided by the agent SHALL be discarded before the close operation is executed. The implementation MUST log a warning if a non-empty `body` value was discarded.
-7. **Native Duplicate Marking**: When `duplicate_of` is provided and `state_reason` is `duplicate`, the handler SHALL call the GitHub `markAsDuplicate` GraphQL mutation to create a native "marked this as a duplicate of #X" timeline event. If the mutation fails (e.g., missing permissions or invalid reference), a warning is logged and the close operation continues. The `duplicate_of` value MUST be parsed and resolved to a valid issue node ID before calling the mutation.
+7. **Issue-Intent Close**: When issue-intent metadata is present, the handler MUST submit the close through the issue-intent endpoint. If that request is rejected or otherwise fails, the safe-output item MUST fail and the handler MUST NOT retry through the legacy close endpoint, except for HTTP 404 or 501 responses, which MAY use the legacy endpoint as an availability fallback.
+8. **Native Duplicate Marking**: When `duplicate_of` is provided and `state_reason` is `duplicate`, the handler SHALL call the GitHub `markAsDuplicate` GraphQL mutation to create a native "marked this as a duplicate of #X" timeline event. If the mutation fails (e.g., missing permissions or invalid reference), a warning is logged and the close operation continues. The `duplicate_of` value MUST be parsed and resolved to a valid issue node ID before calling the mutation.
 
 **Configuration Parameters**:
 
@@ -2940,6 +3268,10 @@ For all Linear types, GraphQL source, endpoint, protocol, and host are implement
 **CI-004**: Only `target: "*"` MAY select an issue from the agent-supplied `issue_number`.
 
 **CI-005**: Schema shaping, prompt instructions, and temporary-ID resolution MUST NOT replace or precede runtime target authorization. Agent-supplied target identifiers, including unresolved temporary IDs, MUST be ignored unless `target` is `"*"`.
+
+**CI-006**: When issue-intent metadata is present, a non-404/non-501 failure from the issue-intent close request MUST fail the safe-output item and MUST NOT invoke the legacy close endpoint.
+
+**CI-007**: The handler MAY invoke the legacy close endpoint only when the issue-intent close request returns HTTP 404 or 501, indicating that the intent endpoint may be unavailable.
 
 **Required Permissions**:
 
@@ -3572,6 +3904,7 @@ For all Linear types, GraphQL source, endpoint, protocol, and host are implement
 - `allowed-repos`: Cross-repository allowlist applied to both `target-repo` and `head-repo`
 - `head-github-token`: Optional credential for `head-repo` branch writes
 - `head-github-app`: Optional GitHub App configuration to mint an ephemeral credential for `head-repo` branch writes at runtime; takes precedence over `head-github-token` when both are specified
+- `allow-full-history-fetch`: Literal boolean, default `false`, independently scoped to this handler. Permits potentially unbounded bundle prerequisite recovery; does not enable downloads for optional validation baselines.
 
 **Notes**:
 
@@ -3586,6 +3919,9 @@ For all Linear types, GraphQL source, endpoint, protocol, and host are implement
 - Arbitrary contributor forks MUST remain unsupported write targets even when the upstream repository itself is allowlisted
 - Successful executions MUST record `head_repo` in the safe-output summary and machine-readable manifest
 - When the Convertible fallback (WTD2) opens a review or fallback pull request from `head-repo`, the `head_repo` parameter MUST be included on the pull request creation API call whenever `head-repo` differs from `target-repo`, including when both share the same owner/organization
+- Signed branch delivery MUST satisfy the shared [signed commit delivery requirements](#signed-commit-delivery-requirements).
+- Patch/bundle handling and publication MUST satisfy the shared [transport integrity requirements](#patch-and-bundle-transport-integrity-requirements).
+- Bundle inspection, recovery, and unsigned validation baselines MUST satisfy [BGO-001–008](#bundle-git-operations-and-validation-baselines).
 
 ---
 
@@ -3662,6 +3998,14 @@ For all Linear types, GraphQL source, endpoint, protocol, and host are implement
 - `required-labels`: Labels that must ALL be present on the pull request for the resolution to be processed
 - `required-title-prefix`: Title prefix that the pull request MUST have for the resolution to be processed
 
+**Operational Semantics**:
+
+1. **Node Lookup**: Before resolving, the processor MUST look up `thread_id` through GraphQL and verify that it identifies a `PullRequestReviewThread` or a `PullRequestReviewComment`. A review-comment ID is mapped to its containing review thread; an ID of another node type MUST be rejected.
+2. **Target and Filter Checks**: The processor MUST derive the thread's pull request and repository from GitHub's response, then enforce repository allowlists, the configured target, and required label/title filters before mutation. Agent-supplied repository or pull request metadata MUST NOT override the resolved node's parent.
+3. **Resolution**: The processor MUST use GitHub's `resolveReviewThread` GraphQL mutation only for a verified, unresolved thread. Already-resolved threads and stale or missing thread IDs are successful no-ops; staged mode MUST preview without calling the mutation.
+4. **Comment-ID Lookup**: When `thread_id` contains a review-comment ID, the processor MUST search the parent pull request's review threads and comments, following GraphQL cursors until the comment is found or all pages are exhausted. If no containing thread is found, the operation MUST fail without mutation.
+5. **Permission Failure**: If GitHub rejects the mutation because the integration token cannot access the thread, the processor MUST report a skipped operation with guidance to configure a suitable `github-token`; unrelated API errors MUST remain failures.
+
 **Target Authorization**:
 
 **RPT-001**: If `target` is omitted, the processor MUST interpret it as `target: "triggering"`.
@@ -3690,6 +4034,8 @@ For all Linear types, GraphQL source, endpoint, protocol, and host are implement
 - Higher default max (10) enables resolving multiple threads per review cycle
 - GitHub can reject `resolveReviewThread` with `Resource not accessible by integration` for some `GITHUB_TOKEN` contexts even with `pull-requests: write`; gh-aw treats this specific response as a soft-skip warning for this handler
 - For reliable resolution, configure `safe-outputs.resolve-pull-request-review-thread.github-token` with a token that can resolve review threads in the target repository
+- The safe-output message field is `thread_id`; it accepts a review-thread GraphQL node ID or a review-comment node ID that can be mapped to its containing thread.
+- A thread ID normally needs one GraphQL lookup and, if unresolved and not staged, one GraphQL mutation. A comment ID can require paginated GraphQL reads across the pull request's review threads and comments. Configured label/title filters also read pull request metadata before the mutation.
 
 ---
 
@@ -3922,6 +4268,7 @@ For all Linear types, GraphQL source, endpoint, protocol, and host are implement
 - `target`: `"triggering"` (default), `"*"`, or a fixed issue/pull request number
 - `target-repo`: Cross-repository target
 - `allowed-repos`: Cross-repo allowlist
+- `required-labels`: Labels that must ALL be present on the target issue or pull request before assignment
 
 **Target Authorization**:
 
@@ -3934,6 +4281,10 @@ For all Linear types, GraphQL source, endpoint, protocol, and host are implement
 **ATA-004**: Only `target: "*"` MAY select an issue or pull request from the agent-supplied `issue_number`/`pull_number`; only in this mode MUST the processor reject a message that specifies both fields as mutually exclusive.
 
 **ATA-005**: Schema shaping, prompt instructions, and temporary-ID resolution MUST NOT replace or precede runtime target authorization. Agent-supplied target identifiers, including unresolved temporary IDs, MUST be ignored unless `target` is `"*"`.
+
+**Required Labels**:
+
+**ATA-006**: When `required-labels` is configured, the processor MUST check the current labels on the resolved target issue or pull request immediately before assignment. If any configured label is missing, the processor MUST skip agent assignment.
 
 **Required Permissions**:
 
@@ -4572,9 +4923,11 @@ safe-outputs:
 
 ---
 
-#### Type: missing_tool
+#### Type: report_missing_tool
 
 **Purpose**: Report when AI requests unavailable functionality for feature discovery.
+
+The YAML configuration key is `report-missing-tool`. The legacy tool/output type `missing_tool` and YAML key `missing-tool` remain accepted as aliases. `gh aw fix --write` migrates the legacy YAML key.
 
 **Default Max**: unlimited  
 **Cross-Repository Support**: N/A (logging only)  
@@ -4600,9 +4953,11 @@ safe-outputs:
 
 ---
 
-#### Type: missing_data
+#### Type: report_missing_data
 
 **Purpose**: Report when AI lacks required information to complete goals.
+
+The YAML configuration key is `report-missing-data`. The legacy tool/output type `missing_data` and YAML key `missing-data` remain accepted as aliases. `gh aw fix --write` migrates the legacy YAML key.
 
 **Default Max**: unlimited  
 **Cross-Repository Support**: N/A (logging only)  
@@ -4622,7 +4977,7 @@ safe-outputs:
 
 **Notes**:
 
-- Same permission model as `missing_tool`
+- Same permission model as `report_missing_tool`
 - Base functionality requires no permissions (logging only)
 - Optional issue creation requires `issues: write` when `create-issue: true`
 
@@ -4791,13 +5146,14 @@ Tool descriptions (MCP tool schemas) MUST surface enforced constraints to the LL
 ```json
 {
   "name": "add_comment",
-  "description": "Add a comment to an existing GitHub issue, pull request, or discussion. IMPORTANT: Comments are subject to validation constraints enforced by the MCP server - maximum 65536 characters for the complete comment (including footer which is added automatically), 10 mentions (@username), and 50 links. Exceeding these limits will result in an immediate error with specific guidance.",
+  "description": "Add a comment with at most 524288 input characters, 10 mentions, and configured max-links URL occurrences (default: 50). Large agent content is automatically redacted to fit 65536 published characters including complete footers and markers. Protected-frame overflow fails explicitly.",
   "inputSchema": {
     "type": "object",
     "properties": {
       "body": {
         "type": "string",
-        "description": "The comment text in Markdown format. CONSTRAINTS: The complete comment (your body text + automatically added footer) must not exceed 65536 characters total. A footer (~200-500 characters) is automatically appended, so leave adequate space. Maximum 10 mentions (@username), maximum 50 links (http/https URLs). If these limits are exceeded, the tool call will fail with a detailed error message indicating which constraint was violated."
+        "maxLength": 524288,
+        "description": "Final intended Markdown comment. Input mention/link limits apply before automatic publication size redaction. Markers and footers are not shortened."
       }
     }
   }
@@ -4844,42 +5200,52 @@ This dual enforcement pattern ensures constraints cannot be bypassed through mal
 ```javascript
 // MCP Server - Immediate validation during tool call
 function handleAddComment(args) {
-  enforceCommentLimits(args.body); // Throws if limits exceeded
+  enforceCommentLimits(args.body, {maxLength: MAX_COMMENT_INPUT_LENGTH});
   recordOperation('add_comment', args);
   return {result: {content: [{type: "text", text: '{"result":"success"}'}]}};
 }
 
 // Safe Output Processor - Final validation before API call  
-async function processAddComment(operation) {
-  enforceCommentLimits(operation.body); // Defense-in-depth
-  const sanitized = sanitizeContent(operation);
-  await github.rest.issues.createComment(sanitized);
+async function processAddComment(operation, footer) {
+  enforceCommentLimits(operation.body, {maxLength: MAX_COMMENT_INPUT_LENGTH});
+  const sanitized = sanitizeContent(operation.body);
+  const body = fitMarkdownBody(sanitized, {suffix: footer});
+  enforceCommentLimits(body, {linkBody: sanitized});
+  await github.rest.issues.createComment({body});
 }
 ```
 
 **Requirement MCE5: Constraint Configuration Consistency**
 
-Constraint limits defined in MCP tool descriptions MUST match the enforcement logic in both the MCP server and safe output processor implementations. Inconsistent limits between these components violate the specification.
+Input limits defined in MCP tool descriptions MUST match invocation-time and
+processor input validation. Publication limits MAY be smaller when automatic
+size redaction is supported; descriptions MUST distinguish those limits and the
+processor MUST enforce the final complete-body limit. Inconsistent limits for
+the same stage violate the specification.
 
 **Verification**:
 
 - **Method**: Code review and integration testing
 - **Tool**: Automated tests comparing tool descriptions to handler enforcement code
-- **Criteria**: All constraint limits are identical across tool schema, MCP server, and processor
+- **Criteria**: Input limits match across tool schema, MCP server, and processor; final publication limits are disclosed and enforced after fitting
 
 **Example Constraints for Common Safe Output Types**:
 
 | Type | Constraint | Limit | Error Code |
 |------|-----------|-------|------------|
+| `add_comment` | Input body length | 524288 chars | E006 |
 | `add_comment` | Body length (complete comment with footer) | 65536 chars | E006 |
 | `add_comment` | Mentions | 10 | E007 |
-| `add_comment` | Links | 50 | E008 |
+| `add_comment` | Links in agent content (excluding generated metadata) | Configured `max-links`, default 50 | E008 |
 | `create_issue` | Title length | 256 chars | E009 |
+| `create_issue` | Input body length | 524288 chars | Schema validation |
 | `create_issue` | Body length (complete body with footer) | 65536 chars | E006 |
 | `create_pull_request` | Title length | 256 chars | E009 |
 | `create_pull_request` | Body length (complete body with footer) | 65536 chars | E006 |
 
-**Note**: For operations that append footers (comments, issues, pull requests), the character limit applies to the complete text including the automatically added footer. Users should reserve approximately 200-500 characters to accommodate the footer.
+Final publication limits include automatically added footers. AST-aware issue
+and comment/review fitting reserves complete attribution automatically. Other
+output types retain their declared input and publication constraints.
 
 **Rationale**: Early constraint enforcement transforms validation failures from post-execution errors (requiring workflow reruns) into correctable feedback during agent reasoning. This improves agent effectiveness by enabling iterative refinement and reduces wasted compute on operations that will ultimately fail validation.
 
@@ -5006,16 +5372,18 @@ Implementations MUST apply these transformations in order:
 
 - Do NOT execute or interpret code blocks
 - Do NOT evaluate template expressions
-- Preserve code blocks verbatim (no escaping needed in markdown)
+- Preserve literal code syntax while retaining secret redaction, Unicode
+  hardening, and the configured URL policy
 
 **Excluded Content**
 
-The following content MUST NOT be sanitized:
+HTML-tag conversion and XML-comment removal MUST NOT alter Markdown code blocks
+or inline code. This is not an exemption from secret redaction or URL policy:
+the default `allowed-only` policy filters URLs inside code as well as prose.
+Only an explicit `allowed-or-code-region` setting permits URLs in code regions.
 
-- Code blocks (` ``` `)
-- Inline code (`` `code` ``)
-- System-generated footers
-- System-generated metadata
+System-generated footers and metadata retain their typed framework structure,
+but framework provenance MUST NOT bypass secret redaction or rendering checks.
 
 **Sanitization Reversibility**
 
@@ -5108,7 +5476,7 @@ Safe outputs that operate on a local git tree (`create_pull_request`, `push_to_p
 
 **Requirement RCR1: Manifest Precedence**
 
-The compiler-emitted checkout manifest MUST be consulted first. A workspace scan MUST be attempted only when no usable manifest entry exists for the target slug.
+The checkout manifest emitted by the trusted compiler/runtime checkout pipeline MUST be consulted first. A workspace scan MUST be attempted only when no usable manifest entry exists for the target slug. Runtime-expanded entries MUST be recorded by the job that creates the checkouts, rather than inferred from a bounded filesystem scan or an agent-supplied checkout map.
 
 **Requirement RCR2: Workspace Confinement**
 
@@ -5124,7 +5492,7 @@ Discovery MUST use git commands that neither execute repository-supplied program
 
 **Requirement RCR5: Remote Host Constraint**
 
-A scanned repository MUST be bound to an `owner/repo` slug only when its `remote.origin.url` names the GitHub instance the workflow runs against (the host of `GITHUB_SERVER_URL`, or `github.com`). Remotes on any other host MUST be ignored by the scan, so that a planted repository configuration cannot claim an allowlisted slug. Manifest entries are exempt because they are compiler-generated.
+A scanned repository MUST be bound to an `owner/repo` slug only when its `remote.origin.url` names the GitHub instance the workflow runs against (the host of `GITHUB_SERVER_URL`, or `github.com`). Remotes on any other host MUST be ignored by the scan, so that a planted repository configuration cannot claim an allowlisted slug. Manifest entries are exempt because they originate in the trusted checkout pipeline; runtime entries MUST first pass the metadata and authorization checks below.
 
 **Requirement RCR6: Allowlist Precedence**
 
@@ -5133,6 +5501,70 @@ Cross-repository allowlist validation (SP6, SP7) MUST succeed before a discovery
 **Requirement RCR7: Non-Disclosing Failures**
 
 When resolution fails, the error returned to the agent MUST identify the requested slug and the supported remediation (a `checkout:` entry or a workspace clone) and MUST NOT include scanned filesystem paths or credentials.
+
+#### 9.6.1 Runtime Repository-List Checkouts
+
+The multi-repository requirements in this subsection apply only to `checkout:` entries with literal `multi: true`, including those consumed by `create_pull_request` and `push_to_pull_request_branch`. The [Checkout Behavior Specification](/gh-aw/specs/checkout-behavior-specification/#runtime-repository-lists) defines the complete parsing and merge contract. Checkout authorization and safe-output target authorization are separate: permission to check out a repository MUST NOT grant permission to write to it.
+
+**Requirement RCR8: Trusted Policy and Explicit Selection**
+
+Only literal `multi: true` MUST enable repository-list expansion; selectors and `allowed-repos` alone MUST NOT enable it. With multi omitted or false, an explicit `repository` or `repo` MUST resolve to exactly one `owner/repo` slug, validated before checkout in both agent and safe-output jobs. Empty, malformed, wildcard, or multiple resolved slugs, including duplicates, MUST fail. Single-repository expressions MUST NOT require the multi-mode allowlist, visibility preflight, private-target opt-in, non-root prefix, or explicit App scope; normal LFS, submodule, `current`, and `wiki` behavior MUST remain available. Multi-only policy fields MUST NOT constrain these checkouts. Single and multi entries MUST NOT merge across modes.
+
+With `multi: true`, every repository selector MUST require `checkout.allowed-repos` at compilation, including a literal or the standalone `${{ github.repository }}` expression. Repository selectors MUST NOT contain wildcards. Policies MAY contain scoped wildcards but MUST NOT permit every repository. Policy expressions MUST be direct trusted configuration-variable references, such as `${{ vars.ALLOWED_REPOS }}` or `${{ vars['ALLOWED_REPOS'] }}`; caller-controlled and computed policy expressions MUST fail compilation. Expression results MUST be treated as data, not executable script text. These checkout mode choices MUST NOT weaken any safe-output write-target authorization or other independent workflow security control.
+
+**Requirement RCR9: Complete, Bounded Preflight**
+
+Selected newline-separated slugs MUST be deduplicated case-insensitively. Each entry MUST enforce its positive literal `max-repos` limit, defaulting to 10, before metadata requests or checkout generation; oversized lists MUST fail in full rather than truncate. An empty selection MUST NOT expand to the allowed set. The entire selected batch MUST pass allowlist, canonical-name, metadata, visibility, and path checks before any selected checkout begins. Canonical names returned by GitHub MUST be revalidated against the policy.
+
+Runtime entries MUST reject private/internal targets by default. The literal boolean `allow-private-repos: true` MAY enable them only when the hosting repository is private/internal; the flag MUST require `allowed-repos`, and malformed runtime values MUST fail before authenticated reads. Agent and safe-output jobs MUST enforce the same flag. Merged entries MUST use logical AND with omitted values treated as false, so imports cannot opt a main entry into private access. Public hosting repositories MUST NOT check out private or internal targets, even with this flag enabled, regardless of token access or `private-to-public-flows` settings. Unverifiable host or target metadata MUST fail closed.
+
+**Requirement RCR10: Job-Local Finalized Manifests**
+
+Agent and safe-output checkout jobs MUST derive `<prefix>/<canonical-owner>/<canonical-repo>` paths from a literal, non-root prefix and MUST build their own `${RUNNER_TEMP}/gh-aw/safeoutputs/checkout-manifest.json` after finalization. Each runtime manifest entry MUST contain its validated repository, workspace-relative path, and default branch. When the checkout branch runs, manifest construction MUST precede agent execution or repository-targeting handlers and MUST use the same condition as checkout preparation. Deep prefixes MUST remain resolvable through the manifest independently of workspace scan depth. The privileged job MUST NOT trust a manifest supplied or modified by the agent.
+
+**Requirement RCR11: Entry Authentication and Privileged Fallback**
+
+Runtime safe-output checkouts MUST preserve explicit per-entry PAT, read-App, and safe-output-App precedence, including configured missing-key fallbacks. Entries without an explicit credential MUST use the effective PR checkout fallback, including operation-specific PATs and the global safe-output App/PAT flow. That fallback MUST be resolved independently of other entries' scoped App credentials; fork-only `head-github-token` credentials MUST NOT become shared upstream credentials. Target metadata, checkout, and configured follow-up fetches MUST use the selected entry credential. Agent setup MUST NOT acquire safe-output-only App credentials. Static and hosting-repository checkout authentication MUST remain unchanged.
+
+**Requirement RCR12: No Secondary Repository Fetches**
+
+Runtime lists MUST reject enabled LFS and submodules at compilation and runtime, irrespective of host visibility. Generated actions MUST hardcode `lfs: false` and `submodules: false`; configured follow-up fetches MUST explicitly pass `--no-recurse-submodules`, including when repository-local Git configuration requests recursion. Repository `.gitmodules` content MUST remain unchanged. These guarantees cover generated checkout/finalization steps, not independently invoked tooling.
+
+**Requirement RCR13: Credential Finalization Boundary**
+
+Before agent execution, finalization MUST explicitly clean and independently verify the Git configuration of every validated runtime checkout and any nested submodule Git configuration, including deep prefixes outside discovery bounds. Missing configurations, symlinked configuration paths, failed cleanup, and residual credentials MUST fail closed before the engine starts. Safe-output finalization MUST retain the intended authenticated-write credentials within the trusted job instead of applying agent credential stripping.
+
+**Requirement RCR14: Trusted Failure Reporting**
+
+Preparation and finalization failures MUST record a controlled checkout diagnostic and fail the checkout job. When agent failure reporting is enabled, the conclusion handler MUST include known agent or safe-output checkout failures in the failure issue, even when no agent jobs were recorded. Unexpected underlying errors MUST produce generic controlled diagnostics; credentials and arbitrary dependency error text MUST NOT be copied into failure issues.
+
+**Requirement RCR15: Staged Checkout Isolation**
+
+Staged safe-output processing MUST NOT emit runtime checkout, checkout-App, or manifest steps that depend on skipped checkout preparation. Preview handlers MUST NOT perform checkout-backed writes. Compilation MUST still enforce the checkout policy contract.
+
+#### 9.6.2 Bounded Formal Reference Model
+
+[`RuntimeRepositoryCheckout.tla`](https://github.com/github/gh-aw/blob/main/specs/workflow-security/RuntimeRepositoryCheckout.tla) models explicit multi-mode classification, single-repository runtime cardinality validation, the compiler decision, complete-batch preflight, job-local finalization, manifest-before-consumer ordering, credential-source precedence, staged isolation, and known-failure reporting. The existing workflow-security checker runs exhaustive bounded safety checks, deliberate guard mutations, and reachability witnesses. This is not a proof of expression parsing, wildcard matching, Git internals, filesystem confinement, GitHub token grants, or arbitrary privileged scripts; those obligations remain covered by compiler/runtime conformance tests.
+
+### 9.7 Private-to-Public Flow Containment
+
+Safe-output processing MUST preserve the default separation between data read from private repositories and public logs or repositories. The `tools.github.private-to-public-flows` compiler setting is an explicit opt-out from this protection and does not weaken safe-output target authorization.
+
+**Requirement PPF1: Default Sink Visibility**
+
+When a workflow can process private data, the gateway MUST enforce public sink visibility restrictions unless `private-to-public-flows` is explicitly configured. The default MUST NOT permit an agent to select a public destination for private data solely because the destination is reachable with the workflow token.
+
+**Requirement PPF2: Compiler Enforcement**
+
+The compiler MUST reject `tools.github.private-to-public-flows` in strict mode for both the blanket `allow` form and the server-ID list form. In non-strict mode, the compiler MUST emit a security warning that identifies public Actions logs and public destinations as exposure channels.
+
+**Requirement PPF3: Server-ID Validation**
+
+When the server-ID list form is used, every ID MUST resolve to a declared MCP server before the workflow is compiled. Unknown IDs MUST be rejected regardless of strict-mode setting.
+
+**Requirement PPF4: Target Authorization Preservation**
+
+An accepted opt-out MUST NOT bypass safe-output target authorization. Repository allowlists, per-type allowlists, permission checks, content validation, and audit recording MUST continue to apply to every safe-output operation.
 
 ---
 
@@ -5150,7 +5582,7 @@ Operations execute in:
 
 1. NDJSON file order
 2. Type grouping (same type together)
-3. System types last (noop, missing_tool, missing_data, report_incomplete)
+3. System types last (noop, report_missing_tool, report_missing_data, report_incomplete)
 
 ### 10.3 Idempotency
 
@@ -5187,7 +5619,7 @@ When threat detection executes in `warn` mode and reports a threat signal for a 
 2. A visible threat label string: `agentic threat detected`.
 3. An XML comment marker in emitted markdown content: `<!-- gh-aw-threat-detected -->`.
 
-**Requirement WTD1a (Threat Engine Error Annotation)**: When warn-mode threat detection produces a tooling-failure reason (`agent_failure` or `parse_error`) instead of a real threat verdict, implementations MUST emit a review-first artifact with all of the following:
+**Requirement WTD1a (Threat Engine Error Annotation)**: When warn-mode threat detection produces a tooling-failure reason (`agent_failure` or `parse_error`) instead of a real threat verdict, including when the detection execution step itself failed, implementations MUST emit a review-first artifact with all of the following. A warn-mode detection conclusion of `failure` with a tooling-failure reason MUST be handled as `warning` and MUST NOT be treated as a passed detection:
 
 1. A prominent warning section:
 
@@ -5244,8 +5676,8 @@ When threat detection executes in `warn` mode and reports a threat signal for a 
 | `create_code_scanning_alert` | Reviewable |
 | `autofix_code_scanning_alert` | Abort |
 | `create_agent_session` | Abort |
-| `missing_tool` | Reviewable |
-| `missing_data` | Reviewable |
+| `report_missing_tool` | Reviewable |
+| `report_missing_data` | Reviewable |
 | `report_incomplete` | Reviewable |
 
 **Compliance Testing**:
@@ -5659,7 +6091,7 @@ Operators SHOULD communicate this expected one-time cache miss to their teams to
   - [ ] Content sanitization pipeline
 
 - [ ] Safe Output Types
-  - [ ] Mandatory: create_issue, add_comment, create_pull_request, noop, missing_tool, missing_data, report_incomplete
+  - [ ] Mandatory: create_issue, add_comment, create_pull_request, noop, report_missing_tool, report_missing_data, report_incomplete
   - [ ] Optional types documented if unsupported
 
 - [ ] Protocol
@@ -5998,6 +6430,48 @@ This specification revision aligns with directly relevant `CHANGELOG.md` entries
 - **v0.40.1**: append-only status comment behavior was documented for smoke workflow execution.
 - **Earlier changelog entry**: status comments were decoupled from default AI reaction behavior; explicit `on.status-comment` configuration is required when status comments are desired.
 - **Earlier changelog entry**: `command` trigger was renamed to `slash_command` with deprecation compatibility.
+
+**Version 1.29.13** (2026-10-18):
+
+- **Added**: BGO-001–008 for offline bundle inspection, literal history-recovery opt-in, repository-specific credential roles, and bounded optional validation-baseline discovery.
+- **Clarified**: Confirmed non-tip ancestors may reduce size accounting but cannot exempt protected files/history; only the exact pinned base tip grants that exemption.
+- **Added**: A bounded Git-operation TLA+ model with shallow/full and opt-in/default-deny profiles, negative controls, and reachability witnesses in the pinned transport checker.
+
+**Version 1.29.12** (2026-10-14):
+
+- **Added**: PTI-001–007 for captured patch/bundle bytes, nonblocking regular-file checks, private snapshots, bounded integrity-check cost, trusted transformations, permanent retry classification, restricted Git cleanup, and safe diagnostics.
+- **Specified**: Producer/consumer qualified repository identity and fail-closed ambiguous namespace selection, including mixed patch/bundle namespaces and unique legacy compatibility.
+- **Clarified**: Integrity checks after awaited PR/issue creation, permanent-error rejection before custom retry classifiers, scoped bundle-rewrite rollback, and session-aware patch aborts.
+- **Added**: Runtime regression mappings and a bounded transport lifecycle TLA+ model; no new compiler rule or token permission is introduced.
+- Scoped RCR8-RCR15 multi-repository controls to literal `multi: true`; required single-selector runtime validation in both jobs when omitted/false, without list restrictions or changes to write authorization.
+- Extended the bounded checkout model with explicit mode, single-selector rejection, negative controls, and reachability witnesses.
+
+**Version 1.29.11** (2026-10-14):
+
+- **Specified**: Explicit runtime `allow-private-repos` opt-in, default-deny private/internal selection, conservative merged policy, and the unconditional public-host prohibition across both checkout jobs.
+- **Added**: Bounded TLA+ opt-in invariant, opt-in/public-host negative controls, and private/internal-host reachability witnesses.
+
+**Version 1.29.10** (2026-10-14):
+
+- **Specified**: Runtime repository-list policy provenance, bounded batch preflight, public-host visibility isolation, job-local finalized manifests, and effective safe-output checkout authentication.
+- **Specified**: Secondary-fetch restrictions, verified agent credential cleanup, staged checkout isolation, and trusted failure reporting even without recorded agent jobs.
+- **Added**: Bounded TLA+ reference-model coverage for the runtime checkout and safe-output boundary.
+
+**Version 1.29.9** (2026-10-12):
+
+- **Specified**: Successful stale-base rebases preserve attached `HEAD` and advance the named delivery branch; permitted git-push fallback delivers that rebased tip without broadening signing or fallback policy.
+- **Added**: Shared signed commit delivery requirements and real-git conformance evidence for `create_pull_request` and `push_to_pull_request_branch`.
+
+**Version 1.29.8** (2026-10-01):
+
+- **Specified**: Issue-intent close failures MUST fail closed rather than bypassing review through the legacy close endpoint; only HTTP 404 and 501 responses MAY use the legacy endpoint as an availability fallback.
+- **Updated**: Publication metadata to 1.29.8.
+
+**Version 1.29.7** (2026-09-29):
+
+- **Added**: Threat T8 "Private-to-Public Data Exposure" to Section 3.2, covering public Actions logs and public safe-output destinations.
+- **Specified**: The compiler gate and target-authorization requirements for `tools.github.private-to-public-flows` opt-outs.
+- **Updated**: Publication metadata to 1.29.7.
 
 **Version 1.29.6** (2026-09-23):
 

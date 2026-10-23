@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -31,36 +32,102 @@ func AuditWorkflowRun(ctx context.Context, runID int64, opts AuditOptions) (bool
 		return false, err
 	}
 	if err := ensureAuditNotCancelled(ctx); err != nil {
-		return false, err
+		return false, renderIncompleteAuditIfTimedOut(cfg, WorkflowRun{}, auditAnalysisResults{}, "metadata", err)
 	}
 	announceAuditRun(cfg)
 	if cfg.jobID > 0 {
-		return false, auditJobRun(cfg.jobOptions())
+		err := auditJobRun(ctx, cfg.jobOptions())
+		return false, renderIncompleteAuditIfTimedOut(cfg, WorkflowRun{}, auditAnalysisResults{}, "job_logs", err)
 	}
 	if done, skipped, err := renderCachedAuditIfAvailable(ctx, cfg); done {
-		return skipped, err
+		return skipped, renderIncompleteAuditIfTimedOut(cfg, WorkflowRun{}, auditAnalysisResults{}, "cached_report", err)
 	}
 	run, err := prepareAuditWorkflowRun(ctx, cfg)
 	if err != nil {
-		return false, err
+		return false, renderIncompleteAuditIfTimedOut(cfg, run, auditAnalysisResults{}, auditPreparationTimeoutStage(run), err)
 	}
 	results, err := collectAuditAnalysisResults(ctx, run, cfg.outputDir, cfg.verbose, artifactMatchesFilter(constants.AgentArtifactName.String(), cfg.artifactFilter))
 	if err != nil {
-		return false, err
+		return false, renderIncompleteAuditIfTimedOut(cfg, run, results, "analysis", err)
 	}
 	run = applyAuditMetrics(run, results)
 	processedRun := buildProcessedAuditRun(run, results)
-	saveAuditRunSummary(cfg.outputDir, run, processedRun, results, cfg.verbose)
-	if shouldSkipAuditRun(cfg.runID, cfg.outputDir, cfg.experimentFilter, cfg.variantFilter, cfg.runtimeFilter) {
+	skipByRunFilter := shouldSkipAuditRun(cfg.runID, cfg.outputDir, cfg.experimentFilter, cfg.variantFilter, cfg.runtimeFilter)
+	if err := ctx.Err(); err != nil {
+		return false, renderIncompleteAuditIfTimedOut(cfg, run, results, "report", err)
+	}
+	if skipByRunFilter {
+		saveAuditRunSummary(cfg.outputDir, run, processedRun, results, cfg.verbose)
 		return true, nil
 	}
 	if shouldSkipForEvals(ctx, cfg, run) {
+		if err := ctx.Err(); err != nil {
+			return false, renderIncompleteAuditIfTimedOut(cfg, run, results, "report", err)
+		}
+		saveAuditRunSummary(cfg.outputDir, run, processedRun, results, cfg.verbose)
 		return true, nil
 	}
-	return false, renderAuditReport(ctx, processedRun, results.metrics, results.mcpToolUsage, cfg.auditOptions())
+	err = renderAuditReport(ctx, processedRun, results.metrics, results.mcpToolUsage, cfg.auditOptions())
+	if err != nil {
+		return false, renderIncompleteAuditIfTimedOut(cfg, run, results, "report", err)
+	}
+	saveAuditRunSummary(cfg.outputDir, run, processedRun, results, cfg.verbose)
+	return false, nil
+}
+
+func auditPreparationTimeoutStage(run WorkflowRun) string {
+	if run.DatabaseID == 0 {
+		return "metadata"
+	}
+	return "artifacts"
+}
+
+// Incomplete reports are never written to the full-audit or run-summary caches.
+func renderIncompleteAuditIfTimedOut(cfg auditRunConfig, run WorkflowRun, results auditAnalysisResults, stage string, err error) error {
+	if !cfg.jsonOutput || !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if run.DatabaseID == 0 {
+		run.DatabaseID = cfg.runID
+	}
+	envelope := map[string]any{
+		"partial":  true,
+		"complete": false,
+		"error":    "audit timed out before analysis completed",
+		"stage":    stage,
+		"overview": buildAuditOverview(run, nil),
+		"suggestions": []string{
+			"Retry the same audit to reuse downloaded artifacts",
+			"Request fewer artifact sets with artifacts",
+		},
+	}
+	if stage == "analysis" || stage == "report" {
+		envelope["jobs"] = buildAuditJobs(results.jobDetails)
+		envelope["missing_tools"] = results.missingTools
+		envelope["missing_data"] = results.missingData
+		envelope["mcp_failures"] = results.mcpFailures
+	}
+	if encodeErr := json.NewEncoder(os.Stdout).Encode(envelope); encodeErr != nil {
+		return errors.Join(err, fmt.Errorf("failed to write incomplete audit: %w", encodeErr))
+	}
+	return err
 }
 
 func newAuditRunConfig(runID int64, opts AuditOptions) (auditRunConfig, error) {
+	if opts.Search != "" {
+		if opts.SearchLimit == 0 {
+			opts.SearchLimit = defaultAuditSearchLimit
+		}
+		if err := validateAuditSearch(opts.Search, opts.SearchLimit); err != nil {
+			return auditRunConfig{}, err
+		}
+		if opts.Group || opts.JobID > 0 {
+			return auditRunConfig{}, errors.New("--search requires a single run without --group or job selection")
+		}
+		if len(opts.ArtifactSets) > 0 {
+			opts.ArtifactSets = append(append([]string(nil), opts.ArtifactSets...), "usage")
+		}
+	}
 	if err := ValidateArtifactSets(opts.ArtifactSets); err != nil {
 		return auditRunConfig{}, err
 	}
@@ -76,12 +143,15 @@ func newAuditRunConfig(runID int64, opts AuditOptions) (auditRunConfig, error) {
 		jobID:                  opts.JobID,
 		stepNumber:             opts.StepNumber,
 		artifactFilter:         ResolveArtifactFilter(opts.ArtifactSets),
+		includeWorkQueue:       workQueueEvidenceRequested(opts.ArtifactSets),
 		experimentFilter:       opts.ExperimentFilter,
 		variantFilter:          opts.VariantFilter,
 		runtimeFilter:          opts.RuntimeFilter,
 		evalsOnly:              opts.EvalsOnly,
 		group:                  opts.Group,
 		noBaseline:             opts.NoBaseline,
+		search:                 opts.Search,
+		searchLimit:            opts.SearchLimit,
 		evalsArtifactRequested: isEvalsArtifactRequested(opts.EvalsOnly, opts.ArtifactSets),
 	}, nil
 }
@@ -154,16 +224,18 @@ func (cfg auditRunConfig) jobOptions() auditJobRunOptions {
 
 func (cfg auditRunConfig) auditOptions() AuditOptions {
 	return AuditOptions{
-		Owner:      cfg.owner,
-		Repo:       cfg.repo,
-		Hostname:   cfg.hostname,
-		OutputDir:  cfg.outputDir,
-		Verbose:    cfg.verbose,
-		Parse:      cfg.parse,
-		JSONOutput: cfg.jsonOutput,
-		EvalsOnly:  cfg.evalsOnly,
-		Group:      cfg.group,
-		NoBaseline: cfg.noBaseline,
+		Owner:       cfg.owner,
+		Repo:        cfg.repo,
+		Hostname:    cfg.hostname,
+		OutputDir:   cfg.outputDir,
+		Verbose:     cfg.verbose,
+		Parse:       cfg.parse,
+		JSONOutput:  cfg.jsonOutput,
+		EvalsOnly:   cfg.evalsOnly,
+		Group:       cfg.group,
+		NoBaseline:  cfg.noBaseline,
+		Search:      cfg.search,
+		SearchLimit: cfg.searchLimit,
 	}
 }
 
@@ -174,6 +246,21 @@ func (cfg auditRunConfig) auditOptions() AuditOptions {
 func renderCachedAuditIfAvailable(ctx context.Context, cfg auditRunConfig) (done bool, skipped bool, err error) {
 	summary, ok := loadRunSummary(cfg.outputDir, cfg.verbose)
 	if !ok {
+		return false, false, nil
+	}
+	if cfg.search != "" {
+		path, err := findUnifiedSessionPath(cfg.outputDir)
+		if err != nil {
+			return false, false, err
+		}
+		if path == "" {
+			return false, false, invalidateCompleteArtifactDownloadMarker(cfg.outputDir)
+		}
+	}
+	if cfg.includeWorkQueue && len(cfg.artifactFilter) > 0 && len(findMissingFilterEntries(cfg.artifactFilter, cfg.outputDir)) > 0 {
+		return false, false, nil
+	}
+	if workQueueLogsMissing(cfg.includeWorkQueue, cfg.outputDir) {
 		return false, false, nil
 	}
 	auditLog.Printf("Using cached run summary for run %d (processed at %s)", cfg.runID, summary.ProcessedAt.Format(time.RFC3339))
@@ -199,13 +286,18 @@ func renderCachedAuditIfAvailable(ctx context.Context, cfg auditRunConfig) (done
 		}
 		return false, false, nil
 	}
+	if downloaded, err := downloadRegisteredCustomGraders(ctx, cfg); err != nil {
+		return false, false, err
+	} else if downloaded {
+		return false, false, nil
+	}
 	processedRun := processedRunFromSummary(summary, cfg.outputDir)
 	return true, false, renderAuditReport(ctx, processedRun, summary.Metrics, summary.MCPToolUsage, cfg.auditOptions())
 }
 
 func invalidateCompleteArtifactDownloadMarker(runOutputDir string) error {
 	markerPath := filepath.Join(runOutputDir, downloadedArtifactsMarkerDir, string(ArtifactSetAll))
-	if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to invalidate complete artifact download marker: %w", err)
 	}
 	return nil
@@ -216,6 +308,11 @@ func auditNeedsDetectionArtifact(cfg auditRunConfig, summary *RunSummary) bool {
 		hasThreatDetectionArtifact(cfg.outputDir) {
 		return false
 	}
+	if len(cfg.artifactFilter) == 0 {
+		if _, found := readDetectionUsageResult(cfg.outputDir); found {
+			return false
+		}
+	}
 	for _, job := range summary.JobDetails {
 		if normalizeJobName(job.Name) == string(constants.DetectionJobName) {
 			return true
@@ -225,6 +322,12 @@ func auditNeedsDetectionArtifact(cfg auditRunConfig, summary *RunSummary) bool {
 }
 
 func processedRunFromSummary(summary *RunSummary, runOutputDir string) ProcessedRun {
+	backfillWorkQueueReport(&summary.WorkQueue, runOutputDir)
+	if summary.Ledger == nil {
+		if activity, err := loadUsageActivitySummary(runOutputDir); err == nil && activity != nil {
+			summary.Ledger = activity.Ledger
+		}
+	}
 	gatewaySteeringEvents := summary.GatewaySteeringEvents
 	if len(gatewaySteeringEvents) == 0 {
 		if events, err := extractGatewaySteeringEvents(runOutputDir); err == nil && len(events) > 0 {
@@ -248,8 +351,11 @@ func processedRunFromSummary(summary *RunSummary, runOutputDir string) Processed
 		SkillActivations:        summary.SkillActivations,
 		GatewaySteeringEvents:   gatewaySteeringEvents,
 		TokenUsage:              summary.TokenUsage,
+		ModelRouting:            summary.ModelRouting,
 		SafeOutputs:             summary.SafeOutputs,
 		WorkingSet:              summary.WorkingSet,
+		Ledger:                  summary.Ledger,
+		WorkQueue:               summary.WorkQueue,
 		Friction:                summary.Friction,
 		GitHubRateLimitUsage:    summary.GitHubRateLimitUsage,
 		JobDetails:              summary.JobDetails,
@@ -296,7 +402,12 @@ func prepareAuditWorkflowRun(ctx context.Context, cfg auditRunConfig) (WorkflowR
 	if !useLocalCache {
 		useLocalCache, err = downloadAuditArtifactsIfNeeded(ctx, cfg, run, hasLocalCache)
 		if err != nil {
-			return WorkflowRun{}, err
+			return run, err
+		}
+	}
+	if !useLocalCache {
+		if _, err := downloadRegisteredCustomGraders(ctx, cfg); err != nil {
+			return run, err
 		}
 	}
 	return prepareRunForAnalysis(run, cfg, useLocalCache), nil
@@ -305,6 +416,9 @@ func prepareAuditWorkflowRun(ctx context.Context, cfg auditRunConfig) (WorkflowR
 func fetchAuditRunWithCache(ctx context.Context, cfg auditRunConfig) (WorkflowRun, bool, bool, error) {
 	hasLocalCache := fileutil.DirExists(cfg.outputDir) && !fileutil.IsDirEmpty(cfg.outputDir)
 	run, err := fetchWorkflowRunMetadata(ctx, cfg.runID, cfg.owner, cfg.repo, cfg.hostname, cfg.verbose)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return WorkflowRun{}, false, false, ctxErr
+	}
 	if err == nil {
 		return run, hasLocalCache, false, nil
 	}
@@ -325,7 +439,7 @@ func downloadAuditArtifactsIfNeeded(ctx context.Context, cfg auditRunConfig, run
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Run: %s (Status: %s, Conclusion: %s)", run.WorkflowName, run.Status, run.Conclusion)))
 	}
 	auditLog.Printf("Downloading artifacts for run %d", cfg.runID)
-	err := downloadRunArtifacts(ctx, downloadArtifactsOptions{runID: cfg.runID, outputDir: cfg.outputDir, verbose: cfg.verbose, owner: cfg.owner, repo: cfg.repo, hostname: cfg.hostname, artifactFilter: cfg.artifactFilter})
+	err := downloadRunArtifacts(ctx, downloadArtifactsOptions{runID: cfg.runID, outputDir: cfg.outputDir, verbose: cfg.verbose, owner: cfg.owner, repo: cfg.repo, hostname: cfg.hostname, artifactFilter: cfg.artifactFilter, includeWorkQueue: cfg.includeWorkQueue})
 	if err == nil || errors.Is(err, ErrNoArtifacts) {
 		downloadLegacyEvalsArtifactIfNeeded(ctx, cfg)
 		if errors.Is(err, ErrNoArtifacts) {

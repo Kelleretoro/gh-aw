@@ -6,11 +6,20 @@ description: Reviews pull requests using Impeccable skills and applies the most 
 on:
   pull_request:
     types: [ready_for_review]
-    paths-ignore:
-      - '*.md'
-      - 'docs/**'
-      - '.changeset/**'
-      - 'scratchpad/**'
+    # Scoped to the repo's only real UI/design surface (the docs site).
+    # gh-aw itself is a CLI/compiler with no frontend; running Impeccable's
+    # UI skill (audit/critique/harden/distill/extract/clarify) against
+    # backend Go/JS PRs gave it no applicable mode, so it fell back to
+    # exhaustive manual codebase exploration (80+ bash calls) and routinely
+    # hit the engine timeout - see #66819.
+    paths:
+      - 'docs/src/components/**'
+      - 'docs/src/styles/**'
+      - 'docs/src/pages/**'
+      - 'docs/src/assets/**'
+      - 'docs/src/lib/**'
+      - 'docs/src/og/**'
+      - 'docs/src/scripts/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -25,6 +34,7 @@ network:
 model: claude-sonnet-5
 engine:
   id: copilot
+  copilot-sdk: true
   max-continuations: 6
 imports:
   - uses: shared/pr-review-base.md
@@ -40,10 +50,10 @@ tools:
   github:
     mode: gh-proxy
 cache:
-  key: pr-prefetch-${{ github.event.pull_request.head.sha }}
+  key: pr-prefetch-v2-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
   path: /tmp/gh-aw/agent
   restore-keys:
-    - pr-prefetch-${{ github.event.pull_request.number }}-
+    - pr-prefetch-v2-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-
 safe-outputs:
   add-comment:
     hide-older-comments: true
@@ -60,7 +70,9 @@ safe-outputs:
     run-success: "🧵 [{workflow_name}]({run_url}) has completed the skills-based review. ✅"
     run-failure: "🧵 [{workflow_name}]({run_url}) {status} during the skills-based review."
 max-daily-ai-credits: 10000
-timeout-minutes: 15
+# Raised from 15m: skill-driven PR reviews on larger diffs were hitting the
+# engine step's hard timeout mid-review (not a hang) - see #66819.
+timeout-minutes: 30
 
 ---
 
@@ -98,6 +110,10 @@ The installed `/impeccable` skill provides these review-relevant modes:
 - **`distill`** — identify unnecessary visual or interaction complexity
 - **`extract`** — identify reusable components, tokens, and design-system patterns
 - **`clarify`** — improve labels, UX copy, validation, and error messages
+
+## Investigation Budget
+
+Treat the pre-fetched diff and the mode guidance above as your primary source of truth. If you need to read additional repository files beyond the diff (e.g. the installed skill, a component's surrounding context), bound that exploration to roughly 15 tool calls. If you reach that budget without a clear picture, stop investigating and submit the best review supported by the evidence gathered so far rather than continuing to trace the codebase — note any remaining uncertainty in the review body.
 
 ## Process
 

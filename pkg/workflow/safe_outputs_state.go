@@ -92,6 +92,7 @@ func hasAnySafeOutputEnabled(safeOutputs *SafeOutputsConfig) bool { //nolint:lar
 		safeOutputs.CallWorkflow != nil ||
 		safeOutputs.MissingTool != nil ||
 		safeOutputs.MissingData != nil ||
+		safeOutputs.ReportIncomplete != nil ||
 		safeOutputs.SetIssueType != nil ||
 		safeOutputs.SetIssueField != nil ||
 		safeOutputs.NoOp != nil ||
@@ -194,7 +195,19 @@ func HasSafeOutputsEnabled(safeOutputs *SafeOutputsConfig) bool {
 // instruction for the agent. This aligns create-issue with the other builtin safe outputs
 // (noop, missing-tool, missing-data) that are always available.
 func applyDefaultCreateIssue(workflowData *WorkflowData) {
+	if workflowData.SafeOutputs != nil && workflowData.SafeOutputs.CreateIssuesDisabled {
+		return
+	}
 	if workflowData.CommentMemoryConfig != nil || hasNonBuiltinSafeOutputsEnabled(workflowData.SafeOutputs) {
+		return
+	}
+	if repoMemoryLedgerEnabled(workflowData.RepoMemoryConfig) {
+		if workflowData.SafeOutputs == nil {
+			workflowData.SafeOutputs = &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{}}
+		}
+		if workflowData.SafeOutputs.NoOp == nil {
+			workflowData.SafeOutputs.NoOp = &NoOpConfig{}
+		}
 		return
 	}
 	if workflowData.SafeOutputs == nil {

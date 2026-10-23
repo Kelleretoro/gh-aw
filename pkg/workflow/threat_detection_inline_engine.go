@@ -3,10 +3,10 @@ package workflow
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
-	"github.com/github/gh-aw/pkg/workflow/compilerenv"
 )
 
 // buildDetectionEngineExecutionStep creates the engine execution step for inline threat detection.
@@ -30,13 +30,9 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 	// otherwise main engine.
 	engineSetting := c.getThreatDetectionEngineID(data)
 
-	engineConfig := data.EngineConfig
 	hasThreatDetectionEngineConfig := data.SafeOutputs != nil &&
 		data.SafeOutputs.ThreatDetection != nil &&
 		data.SafeOutputs.ThreatDetection.EngineConfig != nil
-	if hasThreatDetectionEngineConfig {
-		engineConfig = data.SafeOutputs.ThreatDetection.EngineConfig
-	}
 	// Preserve the original engine identity before Pi is normalized to Copilot for
 	// detection. Precedence matches runtime engine resolution: explicit
 	// threat-detection.engine.id overrides the main engine config, which overrides
@@ -56,34 +52,11 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 		return []string{"      # Engine not found, skipping execution\n"}
 	}
 
-	// Build a detection engine config inheriting ID, Version, Env, Config, Args, APITarget.
-	// MaxTurns, Concurrency, UserAgent, Firewall, Agent, and MaxAICredits are intentionally
-	// omitted — MaxAICredits is set independently below from safe-outputs.threat-detection
-	// so the detection budget is always resolved from its own default expression rather than
-	// silently reusing the main agent budget.
-	detectionEngineConfig := engineConfig
-	if detectionEngineConfig == nil {
-		detectionEngineConfig = &EngineConfig{ID: engineSetting}
-	} else {
-		detectionEngineConfig = &EngineConfig{
-			ID:                       detectionEngineConfig.ID,
-			Version:                  detectionEngineConfig.Version,
-			Env:                      detectionEngineConfig.Env,
-			Config:                   detectionEngineConfig.Config,
-			Args:                     detectionEngineConfig.Args,
-			APITarget:                detectionEngineConfig.APITarget,
-			HarnessScript:            detectionEngineConfig.HarnessScript,
-			Driver:                   detectionEngineConfig.Driver,
-			HarnessMaxRetries:        detectionEngineConfig.HarnessMaxRetries,
-			HarnessInitialDelayMs:    detectionEngineConfig.HarnessInitialDelayMs,
-			HarnessBackoffMultiplier: detectionEngineConfig.HarnessBackoffMultiplier,
-			HarnessMaxDelayMs:        detectionEngineConfig.HarnessMaxDelayMs,
-			HarnessWatchdogTimeoutMs: detectionEngineConfig.HarnessWatchdogTimeoutMs,
-		}
-	}
-	if detectionEngineConfig.ID == "" {
-		detectionEngineConfig.ID = engineSetting
-	}
+	// Preserve execution policy and authentication while resetting task-specific settings.
+	// Detection resolves its own budgets independently of the main agent.
+	detectionEngineConfig := resolveExternalDetectorEngineConfig(data, engineSetting)
+	resetDetectionEngineTaskSettings(detectionEngineConfig)
+	detectionEngineConfig.Env = mergeThreatDetectionEngineEnv(data, engineSetting, detectionEngineConfig.Env)
 	if data.SafeOutputs != nil && data.SafeOutputs.ThreatDetection != nil && data.SafeOutputs.ThreatDetection.MaxAICredits != 0 {
 		detectionEngineConfig.MaxAICredits = data.SafeOutputs.ThreatDetection.MaxAICredits
 	}
@@ -102,37 +75,21 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 		detectionEngineConfig.HarnessMaxRetries = "0"
 	}
 
-	resolvedDetectionModel := inheritedDetectionModel(data)
-	if data.SafeOutputs != nil && data.SafeOutputs.ThreatDetection != nil && data.SafeOutputs.ThreatDetection.Model != "" {
-		resolvedDetectionModel = data.SafeOutputs.ThreatDetection.Model
-	}
-
 	// Apply enterprise and engine default detection models when no model was explicitly configured.
 	// GetDefaultDetectionModel() returns a cost-effective model optimised for detection
 	// (e.g. "gpt-5.1-codex-mini" for Copilot). Other engines return "" (no default).
-	// This was accidentally removed in commit a93e36ea4 while fixing engine.agent propagation.
-	if resolvedDetectionModel == "" {
-		if defaultModel := compilerenv.ResolveDefaultDetectionModel(""); defaultModel != "" {
-			resolvedDetectionModel = defaultModel
-		} else if defaultModel := engine.GetDefaultDetectionModel(); defaultModel != "" {
-			resolvedDetectionModel = defaultModel
-		}
-	}
-	if resolvedDetectionModel == "" {
-		resolvedDetectionModel = "detection"
-	}
+	resolvedDetectionModel := resolveThreatDetectionModel(data, engineSetting, engine)
 
-	// Inherit APITarget from the main engine config for GHE/custom endpoints if not already set.
-	// This ensures the threat detection AWF invocation receives the same --copilot-api-target
-	// and GHE-specific domains in --allow-domains as the main agent AWF invocation.
-	if detectionEngineConfig.APITarget == "" && data.EngineConfig != nil && data.EngineConfig.APITarget != "" {
+	// Inherit APITarget for GHE/custom endpoints only when the engine IDs match.
+	if detectionEngineConfig.APITarget == "" && data.EngineConfig != nil &&
+		ResolveEngineID(data) == engineSetting {
 		detectionEngineConfig.APITarget = data.EngineConfig.APITarget
 	}
-	if engineSetting == "copilot" && originalEngineID == "pi" {
+	if originalEngineID == "pi" {
 		// Pi requires provider/model syntax (for example "copilot/gpt-5.4"), but the
-		// Copilot CLI expects only the model ID. extractPiModelID preserves bare model
-		// names unchanged, so empty or already-normalized values keep their current
-		// fallback behavior while provider-scoped Pi models become Copilot-compatible.
+		// detection engine expects only the model ID. extractPiModelID preserves bare
+		// model names unchanged, so provider-scoped Pi models become compatible with
+		// the matching built-in detection engine.
 		resolvedDetectionModel = extractPiModelID(resolvedDetectionModel)
 	}
 
@@ -140,14 +97,14 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 
 	// Create minimal WorkflowData for threat detection.
 	// SandboxConfig with AWF enabled ensures the engine runs inside the firewall.
-	// NetworkPermissions.Allowed preserves only literal user-specified domains when Copilot
-	// BYOK is enabled so secret-backed provider URLs can still be paired with an explicit
-	// provider hostname in network.allowed without re-opening whole ecosystem allow-lists.
+	// NetworkPermissions.Allowed preserves explicit vendor opt-ins and literal
+	// user-specified domains when Copilot BYOK is enabled, without re-opening other ecosystem
+	// allow-lists.
 	// No MCP servers are configured for detection.
 	// bash: ["*"] allows all shell commands — AWF's network firewall is the primary
 	// constraint, so restricting individual bash commands inside the sandbox adds friction
 	// without meaningful security benefit.
-	// ModelMappings is propagated so the detection awf-config.json includes the alias map
+	// For matching engines, ModelMappings is propagated so the detection awf-config.json includes the alias map
 	// (apiProxy.models). Without it, copilot_harness.cjs cannot resolve alias model names
 	// (e.g. "small") to concrete ids before spawning the Copilot CLI in the detection job.
 	threatDetectionData := buildThreatDetectionWorkflowData(data, engineSetting)
@@ -156,21 +113,23 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 	}
 	threatDetectionData.Model = resolvedDetectionModel
 	threatDetectionData.EngineConfig = detectionEngineConfig
-	threatDetectionData.ModelMappings = data.ModelMappings // propagate alias map so detection awf-config.json can resolve model aliases
 	var detectionFirewall *FirewallConfig
 	if threatDetectionData.NetworkPermissions != nil {
 		detectionFirewall = threatDetectionData.NetworkPermissions.Firewall
 	}
 	threatDetectionData.NetworkPermissions = &NetworkPermissions{
-		Allowed:  getThreatDetectionAdditionalAllowedDomains(data),
+		Allowed:  getThreatDetectionAdditionalAllowedDomains(data, engineSetting),
 		Firewall: detectionFirewall,
+	}
+	if data.NetworkPermissions != nil {
+		threatDetectionData.NetworkPermissions.Blocked = slices.Clone(data.NetworkPermissions.Blocked)
 	}
 
 	var steps []string
 
 	// Install the engine in the detection job. The detection job runs on a separate fresh
 	// runner where the agent's installed tools are not available, so we must install them here.
-	installSteps := engine.GetInstallationSteps(threatDetectionData)
+	installSteps := applyNodeSetupOverrides(engine.GetInstallationSteps(threatDetectionData), data)
 
 	// Ensure node is on PATH when the engine's execution wraps the CLI with a harness
 	// script (see engineRequiresNodeHarness). The detection job does not go through
@@ -180,7 +139,7 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 	// JobManager.ValidateDuplicateSteps and hard-fail the compile.
 	if engineRequiresNodeHarness(engine) && !installStepsContainNodeSetup(installSteps) {
 		threatLog.Print("Injecting Node.js setup step for detection engine harness")
-		for _, line := range GenerateNodeJsSetupStep() {
+		for _, line := range generateNodeJsSetupStepForWorkflow(data) {
 			steps = append(steps, line+"\n")
 		}
 	}
@@ -258,7 +217,7 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 			// missing/incomplete detection log as parse_error in warn mode (exit 0).
 			if i == 0 {
 				steps = append(steps, prefixed+"\n")
-				steps = append(steps, fmt.Sprintf("        if: %s\n", detectionStepCondition))
+				steps = append(steps, fmt.Sprintf("        if: %s\n", detectionExecutionCondition))
 				steps = append(steps, "        continue-on-error: true\n")
 				continue
 			}

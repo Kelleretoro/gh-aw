@@ -15,6 +15,7 @@ package workflow
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -57,6 +58,31 @@ var awfImageRoles = []string{
 	awfImageRoleDindStaging,
 }
 
+// sandboxImageRoleFromFrontmatter converts the hyphenated frontmatter spelling to
+// the camel-cased role name required by the AWF config schema.
+func sandboxImageRoleFromFrontmatter(role string) string {
+	switch role {
+	case "api-proxy":
+		return awfImageRoleAPIProxy
+	case "cli-proxy":
+		return awfImageRoleCliProxy
+	case "build-tools":
+		return awfImageRoleBuildTools
+	case "doh-proxy":
+		return awfImageRoleDohProxy
+	case "enclave-script":
+		return awfImageRoleEnclaveScript
+	case "enclave-agent":
+		return awfImageRoleEnclaveAgent
+	case "enclave-mcp-server":
+		return awfImageRoleEnclaveMcpServer
+	case "dind-staging":
+		return awfImageRoleDindStaging
+	default:
+		return role
+	}
+}
+
 // awfPinnedImagePattern is AWF's canonical digestPinnedImage grammar. It follows
 // distribution/reference while requiring an explicit registry host, tag, and
 // lowercase SHA-256 digest.
@@ -65,10 +91,55 @@ var awfPinnedImagePattern = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[
 // getSandboxAgentImages returns the configured sandbox.agent.images manifest, or nil.
 func getSandboxAgentImages(workflowData *WorkflowData) map[string]string {
 	agentConfig := getAgentConfig(workflowData)
-	if agentConfig == nil || len(agentConfig.Images) == 0 {
+	if (agentConfig == nil || len(agentConfig.Images) == 0) && !isModelRoutingEnabled(workflowData) {
 		return nil
 	}
-	return agentConfig.Images
+	images := make(map[string]string)
+	if agentConfig != nil {
+		maps.Copy(images, agentConfig.Images)
+	}
+	if isModelRoutingEnabled(workflowData) {
+		defaultImages, _ := modelRoutingDefaultImages(workflowData, images)
+		for role, image := range defaultImages {
+			if _, exists := images[role]; !exists {
+				images[role] = image
+			}
+		}
+	}
+	return images
+}
+
+func modelRoutingDefaultImages(workflowData *WorkflowData, configuredImages map[string]string) (map[string]string, []string) {
+	images := make(map[string]string)
+	var missing []string
+	imageTag := getAWFImageTag(getFirewallConfig(workflowData))
+	roles := []string{awfImageRoleSquid, awfImageRoleAgent, awfImageRoleAPIProxy, awfImageRoleCliProxy}
+	for _, role := range roles {
+		if _, configured := configuredImages[role]; configured {
+			continue
+		}
+		image := defaultAWFImageForRole(role, imageTag)
+		pin, found := lookupContainerPin(image, workflowData.ActionCache)
+		if !found || pin.PinnedImage == "" {
+			missing = append(missing, image)
+			continue
+		}
+		images[role] = pin.PinnedImage
+	}
+
+	if _, configured := configuredImages[awfImageRoleRouter]; !configured {
+		image := constants.DefaultRouterRegistry + ":" + string(constants.DefaultRouterVersion)
+		if awfSupportsRouterReleaseImage(getFirewallConfig(workflowData)) {
+			image = defaultAWFImageForRole(awfImageRoleRouter, imageTag)
+		}
+		pin, found := lookupContainerPin(image, workflowData.ActionCache)
+		if !found || pin.PinnedImage == "" {
+			missing = append(missing, image)
+		} else {
+			images[awfImageRoleRouter] = pin.PinnedImage
+		}
+	}
+	return images, missing
 }
 
 // isKnownAWFImageRole reports whether role is part of the closed AWF role set.
@@ -80,6 +151,9 @@ func isKnownAWFImageRole(role string) bool {
 // manifest for the workflow's enabled feature set.
 func requiredAWFImageRoles(workflowData *WorkflowData) []string {
 	required := []string{awfImageRoleSquid, awfImageRoleAgent, awfImageRoleAPIProxy}
+	if isModelRoutingEnabled(workflowData) {
+		required = appendUniqueRole(required, awfImageRoleRouter)
+	}
 	args := customAWFArgs(workflowData)
 	if isCliProxyNeeded(workflowData) || hasEnabledAWFArg(args, "--difc-proxy-host") {
 		required = append(required, awfImageRoleCliProxy)
@@ -192,6 +266,23 @@ func validateSandboxAgentImages(workflowData *WorkflowData) error {
 	images := getSandboxAgentImages(workflowData)
 	if images == nil {
 		return nil
+	}
+
+	if isModelRoutingEnabled(workflowData) {
+		configuredImages := map[string]string(nil)
+		if agentConfig := getAgentConfig(workflowData); agentConfig != nil {
+			configuredImages = agentConfig.Images
+		}
+		_, missing := modelRoutingDefaultImages(workflowData, configuredImages)
+		if len(missing) > 0 {
+			effectiveVersion := getAWFImageTag(getFirewallConfig(workflowData))
+			return NewValidationError(
+				"sandbox.agent.images",
+				strings.Join(missing, ", "),
+				"no digest pins are available for model routing with AWF version "+effectiveVersion,
+				fmt.Sprintf("Add matching entries to the embedded container pin catalog or provide explicit sandbox.agent.images overrides for: %s.", strings.Join(missing, ", ")),
+			)
+		}
 	}
 
 	roles := make([]string, 0, len(images))

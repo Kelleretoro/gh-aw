@@ -189,7 +189,7 @@ func TestGenerateMaintenanceWorkflow_PushTrigger(t *testing.T) {
 	})
 
 	t.Run("compile-workflows can create pull requests with custom token secret", func(t *testing.T) {
-		const compileJobSectionSearchRange = 500
+		const compileJobSectionSearchRange = 650
 		tmpDir := t.TempDir()
 		repoConfig := &RepoConfig{
 			Maintenance: &MaintenanceConfig{
@@ -233,7 +233,7 @@ func TestGenerateMaintenanceWorkflow_PushTrigger(t *testing.T) {
 		if strings.Contains(jobSection, "contents: write") {
 			t.Errorf("compile-workflows should not request contents: write in PR mode, got:\n%s", jobSection)
 		}
-		if !strings.Contains(yaml, "GH_AW_MAINTENANCE_GITHUB_TOKEN: ${{ secrets.MAINTENANCE_TOKEN }}") {
+		if !strings.Contains(yaml, `GH_AW_MAINTENANCE_GITHUB_TOKEN: "${{ secrets.MAINTENANCE_TOKEN }}"`) {
 			t.Errorf("workflow should use configured maintenance github token secret, got:\n%s", yaml)
 		}
 		if !strings.Contains(yaml, "github-token: ${{ env.GH_AW_MAINTENANCE_GITHUB_TOKEN }}") {

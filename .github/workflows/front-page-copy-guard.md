@@ -30,9 +30,9 @@ tools:
 safe-outputs:
   add-comment:
     max: 1
-    hide-older-comments: true
+    replace-older-comments: true
   noop:
-model: copilot/gpt-5.3-codex
+model: copilot/gpt-5.6-terra
 ---
 
 # Front Page Copy Guard

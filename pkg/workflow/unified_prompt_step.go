@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
@@ -76,6 +77,9 @@ func (c *Compiler) collectPromptSections(data *WorkflowData) []PromptSection { /
 		Content: tempFolderPromptFile,
 		IsFile:  true,
 	})
+	if section := webhookPromptSection(data); section != nil {
+		sections = append(sections, *section)
+	}
 
 	// 2. Markdown generation instructions (always included)
 	unifiedPromptLog.Print("Adding markdown section")
@@ -128,6 +132,9 @@ func (c *Compiler) collectPromptSections(data *WorkflowData) []PromptSection { /
 	if section := buildDriveMemoryPromptSection(data.DriveMemoryConfig); section != nil {
 		sections = append(sections, *section)
 	}
+	if section := buildLedgerPromptSection(data.LedgerConfig); section != nil {
+		sections = append(sections, *section)
+	}
 
 	// 7. Repo memory instructions (if enabled)
 	if data.RepoMemoryConfig != nil && len(data.RepoMemoryConfig.Memories) > 0 {
@@ -136,12 +143,19 @@ func (c *Compiler) collectPromptSections(data *WorkflowData) []PromptSection { /
 		if section != nil {
 			sections = append(sections, *section)
 		}
+		if memory := data.RepoMemoryConfig.ledgerEntry(); memory != nil {
+			sections = append(sections, PromptSection{
+				Content: "Use `ledger_append`, `ledger_query`, `ledger_get`, and `ledger_status` to record and inspect structured events. " +
+					"Do not edit ledger storage directly.",
+			})
+		}
 	}
 
 	// 8. Safe outputs instructions (if enabled)
-	if HasSafeOutputsEnabled(data.SafeOutputs) || data.CommentMemoryConfig != nil {
+	if HasSafeOutputsEnabled(data.SafeOutputs) || data.CommentMemoryConfig != nil || data.LedgerConfig.Enabled() {
 		unifiedPromptLog.Print("Adding safe outputs section")
-		cliOnlySafeOutputs := !engineSupportsMCPToolCalls(c.engineCatalog, data)
+		cliOnlySafeOutputs := !engineSupportsMCPToolCalls(c.engineCatalog, data) ||
+			slices.Contains(getMCPCLIExcludeFromAgentConfig(data), constants.SafeOutputsMCPServerID.String())
 		transportPromptFile := safeOutputsMCPTransportPromptFile
 		if cliOnlySafeOutputs {
 			transportPromptFile = safeOutputsCLIOnlyTransportPromptFile
@@ -156,7 +170,7 @@ func (c *Compiler) collectPromptSections(data *WorkflowData) []PromptSection { /
 			IsFile:  true,
 		})
 		// Per-tool sections: opening tag + tools list (inline), tool instruction files, closing tag
-		sections = append(sections, buildSafeOutputsSections(data.SafeOutputs, data.CommentMemoryConfig)...)
+		sections = append(sections, buildSafeOutputsSections(data.SafeOutputs, data.CommentMemoryConfig, data.LedgerConfig)...)
 	}
 
 	// 8a. MCP CLI tools instructions (if any MCP servers are mounted as CLIs)
@@ -350,10 +364,12 @@ func (c *Compiler) generateUnifiedPromptCreationStep(yaml *strings.Builder, buil
 	type promptRenderItem struct {
 		ContentEnvVar   string `json:"content_env,omitempty"`
 		File            string `json:"file,omitempty"`
+		LedgerReplay    bool   `json:"ledger_replay,omitempty"`
 		ConditionEnvVar string `json:"condition_env,omitempty"`
 	}
 	type promptRenderConfig struct {
-		Items []promptRenderItem `json:"items"`
+		Items           []promptRenderItem `json:"items"`
+		SystemItemCount int                `json:"system_item_count"`
 	}
 
 	renderConfig := promptRenderConfig{}
@@ -380,6 +396,10 @@ func (c *Compiler) generateUnifiedPromptCreationStep(yaml *strings.Builder, buil
 	}
 	for _, section := range builtinSections {
 		if section.IsFile {
+			if section.Content == ledgerReplayPromptFile {
+				renderConfig.Items = append(renderConfig.Items, promptRenderItem{LedgerReplay: true})
+				continue
+			}
 			appendFile(section.Content, section.ConditionEnvVar)
 			continue
 		}
@@ -395,6 +415,7 @@ func (c *Compiler) generateUnifiedPromptCreationStep(yaml *strings.Builder, buil
 	if len(builtinSections) > 0 {
 		appendContent("</system>\n", "")
 	}
+	renderConfig.SystemItemCount = len(renderConfig.Items)
 
 	userBlankRun := 0
 	for chunkIdx, chunk := range userPromptChunks {
@@ -428,10 +449,10 @@ func (c *Compiler) generateUnifiedPromptCreationStep(yaml *strings.Builder, buil
 	// Generate the step with all environment variables. Prompt text and expression
 	// values are passed as environment data and never interpolated into JavaScript.
 	yaml.WriteString("      - name: Create prompt with built-in context\n")
-	fmt.Fprintf(yaml, "        uses: %s\n", getCachedActionPin("actions/github-script", data))
+	yaml.WriteString("        uses: " + getCachedActionPin("actions/github-script", data) + "\n")
 	yaml.WriteString("        env:\n")
 	yaml.WriteString("          GH_AW_ACTIONS_DIR: ${{ runner.temp }}/gh-aw/actions\n")
-	fmt.Fprintf(yaml, "          GH_AW_PROMPT: %s\n", constants.AwPromptsFileExpr)
+	yaml.WriteString("          GH_AW_PROMPT: " + constants.AwPromptsFileExpr + "\n")
 	if data.SafeOutputs != nil {
 		yaml.WriteString("          GH_AW_SAFE_OUTPUTS: ${{ runner.temp }}/gh-aw/safeoutputs/outputs.jsonl\n")
 	}
@@ -440,7 +461,7 @@ func (c *Compiler) generateUnifiedPromptCreationStep(yaml *strings.Builder, buil
 	// Add all environment variables in sorted order for consistency
 	envKeys := sliceutil.SortedKeys(allEnvVars)
 	for _, key := range envKeys {
-		fmt.Fprintf(yaml, "          %s: %s\n", key, allEnvVars[key])
+		yaml.WriteString("          " + key + ": " + allEnvVars[key] + "\n")
 	}
 	for _, key := range sliceutil.SortedKeys(renderContent) {
 		writeYAMLEnv(yaml, "          ", key, renderContent[key])
@@ -495,7 +516,7 @@ func sharedToolBudget(family string, names []string, max *string) string {
 //
 // The static intro (gh CLI warning, temporary ID rules, noop note) lives in
 // actions/setup/md/safe_outputs_prompt.md and is included by the caller before these sections.
-func buildSafeOutputsSections(safeOutputs *SafeOutputsConfig, commentMemory *CommentMemoryConfig) []PromptSection { //nolint:largefunc // Explicit tool checks keep the agent-facing list aligned with safe-output configuration.
+func buildSafeOutputsSections(safeOutputs *SafeOutputsConfig, commentMemory *CommentMemoryConfig, ledgerConfig *LedgerToolConfig) []PromptSection { //nolint:largefunc // Explicit tool checks keep the agent-facing list aligned with safe-output configuration.
 	if safeOutputs == nil {
 		safeOutputs = &SafeOutputsConfig{}
 	}
@@ -619,6 +640,9 @@ func buildSafeOutputsSections(safeOutputs *SafeOutputsConfig, commentMemory *Com
 	if safeOutputs.UploadAssets != nil {
 		tools = append(tools, toolWithMaxBudget("upload_asset", safeOutputs.UploadAssets.Max))
 	}
+	if safeOutputs.UploadCodeCoverage != nil {
+		tools = append(tools, toolWithMaxBudget("upload_code_coverage", safeOutputs.UploadCodeCoverage.Max))
+	}
 	if safeOutputs.UpdateRelease != nil {
 		tools = append(tools, toolWithMaxBudget("update_release", safeOutputs.UpdateRelease.Max))
 	}
@@ -677,16 +701,31 @@ func buildSafeOutputsSections(safeOutputs *SafeOutputsConfig, commentMemory *Com
 		}
 	}
 	if safeOutputs.MissingTool != nil {
-		tools = append(tools, toolWithMaxBudget("missing_tool", safeOutputs.MissingTool.Max))
+		tools = append(tools, toolWithMaxBudget("report_missing_tool", safeOutputs.MissingTool.Max))
 	}
 	if safeOutputs.MissingData != nil {
-		tools = append(tools, toolWithMaxBudget("missing_data", safeOutputs.MissingData.Max))
+		tools = append(tools, toolWithMaxBudget("report_missing_data", safeOutputs.MissingData.Max))
 	}
 	// noop is always included: it is auto-injected by extractSafeOutputsConfig and
 	// must always appear in the tools list so agents can signal no-op completion.
 	if safeOutputs.NoOp != nil {
 		tools = append(tools, toolWithMaxBudget("noop", safeOutputs.NoOp.Max))
 	}
+
+	ledgerTools := computeEnabledToolNames(&WorkflowData{LedgerConfig: ledgerConfig})
+	if ledgerConfig.Enabled() {
+		for _, ledger := range ledgerConfig.Ledgers {
+			switch ledger.Type {
+			case "map":
+				ledgerTools["ledger_map_put"] = struct{}{}
+				ledgerTools["ledger_map_delete"] = struct{}{}
+			case "notes":
+				ledgerTools["ledger_note_add"] = struct{}{}
+				ledgerTools["ledger_note_vote"] = struct{}{}
+			}
+		}
+	}
+	tools = append(tools, sliceutil.SortedKeys(ledgerTools)...)
 
 	// Add custom job tools from SafeOutputs.Jobs (sorted for deterministic output).
 	if len(safeOutputs.Jobs) > 0 {

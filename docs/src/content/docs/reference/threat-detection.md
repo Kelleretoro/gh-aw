@@ -12,6 +12,19 @@ GitHub Agentic Workflows includes automatic threat detection to analyze agent ou
 
 Threat detection provides an additional security layer by analyzing agent output for malicious content, scanning code changes for suspicious patterns, using workflow context to distinguish legitimate actions from threats, and running automatically after the main job completes but before safe outputs are applied.
 
+Detection sanitizes its files after firewall-log collection and custom post-steps,
+before accounting reads or renders them. A second redaction pass covers newly
+generated usage files before log rendering, result publication, and artifact
+upload. These consumers require successful detection-job redaction; a failed or
+skipped redaction blocks publication for an active detection run even when detection
+uses `continue-on-error`. When no detection is needed, the redaction passes are
+skipped and the job still reports a successful skipped conclusion without reading
+detection output files. Exact-value secret inputs are limited to the detection
+job's own steps and inherited environment, not unrelated workflow credentials.
+GitHub Actions console masking does not sanitize downloadable artifact contents.
+Copied firewall files must be valid UTF-8 text no larger than 16 MiB; unsupported
+byproducts are removed before upload, and removal failures block publication.
+
 **Security Architecture:**
 
 ```text
@@ -102,13 +115,34 @@ safe-outputs:
 | `enabled` | boolean | Enable or disable detection (default: `true` when safe-outputs exist) |
 | `prompt` | string | Custom instructions appended to default detection prompt |
 | `engine` | string/object/false | AI engine config (`"copilot"`, full config object, or `false` for no AI) |
+| `ca-cert` | string/false | Absolute host path to a CA certificate for the detection API proxy. Inherits `sandbox.agent.ca-cert` when unset or empty and the detection engine matches the agent engine; set to `false` to disable inheritance. Requires AWF v0.28.10 or later. |
 | `runs-on` | string/array/object | Runner for the detection job (default: inherits from workflow `runs-on`) |
 | `artifact-base-url` | string | HTTPS base URL for a mirror of the pinned detector release assets. The compiler appends the pinned release tag and asset name; the embedded digest cannot be overridden. |
 | `steps` | array | Additional GitHub Actions steps to run **before** AI analysis (pre-steps) |
 | `post-steps` | array | Additional GitHub Actions steps to run **after** AI analysis (post-steps) |
 | `max-ai-credits` | integer | AI Credits cap for the detection run, independent of the main agent budget. Defaults to `400` when unset, with runtime override via `vars.GH_AW_DEFAULT_DETECTION_MAX_AI_CREDITS`. Accepts plain integers; `-1` disables the detection budget. |
-| `continue-on-error` | boolean | When `true` (default), detection warnings/failures produce a caution notice instead of blocking safe outputs. |
+| `continue-on-error` | boolean | When `true` (default), detected threats and detection engine failures apply the warn-mode policy (annotate reviewable outputs, convert branch pushes, abort non-reviewable outputs) instead of blocking all safe outputs. When `false`, they fail the detection job and safe outputs are not applied. |
 | `report-as-issue` | boolean | When `true` (default), detection warnings/failures create or update the `[aw] Detection Runs` tracking issue. Set to `false` to keep threat detection and its enforcement enabled while skipping the tracking issue; results remain visible in the GitHub Actions run logs. |
+
+### Private CA certificates
+
+The detection job inherits `sandbox.agent.ca-cert` for upstream API proxy TLS verification only when the detection and agent engines match. A non-empty `safe-outputs.threat-detection.ca-cert` overrides the inherited path; set it to `false` to opt out, or leave it unset/empty to use the matching-engine inheritance behavior.
+
+Detection runs on a fresh runner, so the certificate file must also exist there before engine execution. Use detection pre-steps to write it:
+
+```yaml wrap
+safe-outputs:
+  create-issue:
+  threat-detection:
+    ca-cert: /tmp/detection-ca.pem
+    steps:
+      - name: Write CA certificate
+        env:
+          CA_PEM: ${{ secrets.INTERNAL_CA_PEM }}
+        run: printf '%s\n' "$CA_PEM" > /tmp/detection-ca.pem
+```
+
+AWF versions before v0.28.10 silently omit `apiProxy.caCert` from the configuration instead of failing compilation. The custom certificate is therefore not used, and connections that require it may fail TLS verification.
 
 ### Use an artifact mirror
 
@@ -243,6 +277,12 @@ The custom prompt is appended to the default threat detection instructions, prov
 ## Custom Engine Configuration
 
 Override the main workflow engine for threat detection:
+
+When the resolved detection engine matches the main engine, detection inherits `engine.env`, `api-target`, and model aliases. Detection-specific environment values take precedence, including empty values.
+
+When the engines differ, detection does not inherit the main engine's environment, API target, or custom model aliases. This prevents provider URLs, API keys, and custom headers from reaching an unrelated engine. Configure any required provider settings under `safe-outputs.threat-detection.engine.env`; built-in model aliases remain available.
+
+The conclusion job emits a warning when detection runs but produces no security verdict, including engine failures and unparseable results. Intentionally skipped detection does not emit this warning. The warning does not change `continue-on-error` behavior.
 
 **String Format:**
 
@@ -435,7 +475,13 @@ Reasons:
 
 **When Detection Fails:**
 
-If the detection process itself fails (e.g., network issues, tool errors), the workflow stops and safe outputs are not applied. This fail-safe approach prevents potentially malicious content from being processed.
+If the detection process itself fails (for example a provider outage, a retired model, or unparseable results), detection concludes with reason `agent_failure` or `parse_error` and no security verdict. What happens next depends on `continue-on-error`:
+
+- **Warn mode** (`continue-on-error: true`, the default): the run continues and detection concludes `warning`. Safe outputs get the warn-mode policy from the [safe outputs specification](/gh-aw/specs/safe-outputs-specification/) instead of being applied as if detection passed:
+  - Reviewable outputs (such as `create-issue`, `add-comment`, `create-pull-request`) are applied with a `[!WARNING]` block, the `threat detection engine error` label string, and the `<!-- gh-aw-threat-engine-error -->` marker.
+  - `push-to-pull-request-branch` falls back to a review pull request with the same warning.
+  - Non-reviewable outputs (such as `merge-pull-request`, `close-issue`, `assign-to-agent`) are not applied and are reported as failures in the step summary.
+- **Strict mode** (`continue-on-error: false`): the detection job fails and safe outputs are not applied.
 
 **When Detection Returns a Warning:**
 
@@ -444,6 +490,8 @@ A warning is a lower-severity signal than a hard threat: the safe output is allo
 **Opting Out of Tracking Issues:**
 
 By default, a warning or failure conclusion also creates or updates a `[aw] Detection Runs` tracking issue in the repository and posts a comment describing the run. This is useful for auditing automation health, but not every repository wants detector diagnostics (such as `parse_error` reports) surfaced alongside user-facing issues.
+
+Comments categorize the structured reason as `threat_finding` (`threat_detected`), `detector_execution_failure` (`agent_failure`), or `detector_result_invalid` (`parse_error`). Missing or unrecognized reasons are `detection_outcome_unknown`; unrecognized reason text is omitted. Execution failures and invalid results leave the security assessment incomplete, rather than proving a threat or a clean result. The category is independent of the warning/failure conclusion and does not change enforcement. Comments omit agent text and detection payloads; existing comments are not rewritten.
 
 Set `report-as-issue: false` to keep threat detection and its enforcement fully active while skipping the tracking issue entirely:
 

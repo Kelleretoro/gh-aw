@@ -189,6 +189,7 @@ func runGrypeOnLockFiles(lockFiles []string, verbose bool, strict bool) error {
 	}
 
 	totalFindings := 0
+	var findings []scanfindings.Finding
 	var scanErrors []string
 
 	configFile := grypeConfigFile()
@@ -212,6 +213,7 @@ func runGrypeOnLockFiles(lockFiles []string, verbose bool, strict bool) error {
 
 		count := grypeDisplayFindings(img.Image, output)
 		totalFindings += count
+		findings = append(findings, grypeFindingsToShared(img.Image, output.Matches)...)
 	}
 
 	if len(scanErrors) > 0 {
@@ -224,7 +226,7 @@ func runGrypeOnLockFiles(lockFiles []string, verbose bool, strict bool) error {
 	}
 
 	if strict && totalFindings > 0 {
-		return fmt.Errorf("strict mode: grype found %d vulnerability finding(s) in container images", totalFindings)
+		return withScannerFindings(fmt.Errorf("strict mode: grype found %d vulnerability finding(s) in container images", totalFindings), findings)
 	}
 
 	return nil
@@ -452,14 +454,10 @@ func grypeFindingsToShared(imageTag string, matches []grypeFinding) []scanfindin
 			message = fmt.Sprintf("%s (%s)", message, vuln.DataSource)
 		}
 
-		findings = append(findings, scanfindings.Finding{
-			RuleID:   vuln.ID,
-			Severity: scanfindings.ParseSeverity(severityLabel),
-			Message:  message,
-			File:     imageTag,
-			Line:     1,
-			Column:   1,
-		})
+		findings = append(findings, scanfindings.NewFinding(scanfindings.NewFindingParams{
+			RuleID: vuln.ID, SeverityLabel: severityLabel, Message: message,
+			File: imageTag, Line: 1, Column: 1,
+		}))
 	}
 	return findings
 }

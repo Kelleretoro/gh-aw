@@ -9,14 +9,16 @@
 //
 // # Validation Rules
 //
-//  1. In strict mode: always emit a warning that pull_request_target is a very
-//     dangerous trigger, even when checkout: false is set, because the workflow
-//     still runs with full write permissions and secret access.
-//     Workflows can opt out by setting strict: false in frontmatter.
+//  1. In strict mode: emit a warning about elevated permissions and secret access,
+//     unless on.pull_request_target.acknowledge-risk is explicitly true.
 //
-//  2. When checkout is NOT explicitly disabled (checkout: false not set):
+//  2. When checkout is neither explicitly disabled nor restricted to trusted
+//     base-repository refs or literal on.pull_request_target.allowed-checkouts:
 //     - In strict mode: return a hard error (extremely insecure).
 //     - In non-strict mode: emit a warning.
+//
+//  3. With on.roles containing all or read: reject in strict mode and warn in
+//     non-strict mode, regardless of checkout or trigger risk acknowledgment.
 //
 // # References
 //
@@ -36,19 +38,16 @@ package workflow
 import (
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/goccy/go-yaml"
 
+	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/workflow/checkoutpolicy"
 )
 
 var pullRequestTargetLog = logger.New("workflow:pull_request_target_validation")
-
-// [^{}]+? deliberately excludes brace characters so nested expression constructs
-// are never treated as a trusted literal allowlist match.
-var pullRequestTargetGitHubExpressionPattern = regexp.MustCompile(`^\$\{\{\s*([^{}]+?)\s*\}\}$`)
 
 // validatePullRequestTargetTrigger validates security requirements for pull_request_target triggers.
 //
@@ -57,7 +56,7 @@ var pullRequestTargetGitHubExpressionPattern = regexp.MustCompile(`^\$\{\{\s*([^
 // may execute untrusted PR code with elevated privileges — a critical security vulnerability
 // commonly known as a "pwn request" attack.
 //
-// In strict mode, a warning is always emitted that pull_request_target is inherently dangerous
+// In strict mode, a warning is emitted unless the trigger-specific risk is acknowledged,
 // even with checkout disabled, since the workflow still runs with elevated permissions.
 // When the workflow frontmatter sets strict: false, effectiveStrictMode is lowered so the
 // dangerous-trigger strict-only warning is skipped; the insecure-checkout check still runs
@@ -99,11 +98,42 @@ func (c *Compiler) validatePullRequestTargetTrigger(workflowData *WorkflowData, 
 	}
 
 	effectiveStrictMode := c.effectiveStrictMode(workflowData.RawFrontmatter)
+	for _, role := range workflowData.Roles {
+		if role != "all" && role != "read" {
+			continue
+		}
+		message := "pull_request_target with on.roles containing 'all' or 'read' is a dangerous combination.\n" +
+			"Untrusted contributors can trigger the agent job with access to repository secrets,\n" +
+			"including engine credentials and custom secrets, even when checkout is disabled.\n" +
+			"Use pull_request instead, or restrict on.roles to trusted repository roles\n" +
+			"(for example, [admin, maintainer, write]).\n" +
+			"on.pull_request_target.acknowledge-risk does not bypass this restriction."
+		if effectiveStrictMode {
+			return formatCompilerError(markdownPath, "error", message, nil)
+		}
+		if !dangerouslyAllowsRolesReadAndPullRequestTarget(workflowData) {
+			message += "\nTo suppress this warning in non-strict mode only, set " +
+				"features.dangerously-allow-roles-read-and-pull-request-target: true."
+			fmt.Fprintln(os.Stderr, formatCompilerMessage(markdownPath, "warning", message))
+			c.IncrementWarningCount()
+		}
+		break
+	}
+	var acknowledged bool
+	var allowedCheckouts []any
+	if on, ok := workflowData.RawFrontmatter["on"].(map[string]any); ok {
+		if trigger, ok := on["pull_request_target"].(map[string]any); ok {
+			acknowledged = trigger["acknowledge-risk"] == true
+			if entries, ok := trigger["allowed-checkouts"].([]any); ok {
+				allowedCheckouts = entries
+			}
+		}
+	}
 
-	// In strict mode, always emit a warning that pull_request_target is a very dangerous trigger,
+	// In strict mode, emit a warning unless the trigger-specific risk is acknowledged,
 	// regardless of whether checkout is disabled. The workflow still runs with full write
 	// permissions and has access to all repository secrets.
-	if effectiveStrictMode {
+	if effectiveStrictMode && !acknowledged {
 		pullRequestTargetLog.Print("Emitting strict mode warning: pull_request_target is a very dangerous trigger")
 		warningMsg := "pull_request_target is a very dangerous trigger.\n" +
 			"This event runs with full write permissions and access to all repository secrets.\n" +
@@ -111,6 +141,7 @@ func (c *Compiler) validatePullRequestTargetTrigger(workflowData *WorkflowData, 
 			"the workflow elevated access even for PRs from untrusted fork contributors.\n" +
 			"Even with checkout: false, consider whether pull_request_target is truly necessary.\n" +
 			"If you only need to react to PR events without write access, use pull_request instead.\n" +
+			"To acknowledge this risk only, set on.pull_request_target.acknowledge-risk: true.\n" +
 			"See: https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/"
 		fmt.Fprintln(os.Stderr, formatCompilerMessage(markdownPath, "warning", warningMsg))
 		c.IncrementWarningCount()
@@ -125,10 +156,9 @@ func (c *Compiler) validatePullRequestTargetTrigger(workflowData *WorkflowData, 
 		return nil
 	}
 
-	// Explicit checkout configurations that are pinned to the base repository/ref are considered
-	// safe for pull_request_target because they do not execute untrusted PR head code.
-	if hasOnlyTrustedPullRequestTargetCheckouts(workflowData.CheckoutConfigs) {
-		pullRequestTargetLog.Print("checkout config is pinned to trusted base repository/ref, skipping insecure-checkout error")
+	// Every checkout must target a supported base ref or a declared literal repository/ref pair.
+	if hasOnlyTrustedPullRequestTargetCheckouts(workflowData.CheckoutConfigs, allowedCheckouts) {
+		pullRequestTargetLog.Print("checkout config is restricted to trusted repository/ref pairs, skipping insecure-checkout error")
 		return nil
 	}
 
@@ -145,12 +175,12 @@ func (c *Compiler) validatePullRequestTargetTrigger(workflowData *WorkflowData, 
 		"checkout: false\n\n" +
 		"2) Check out only the trusted base repo/ref:\n" +
 		"checkout:\n" +
-		"  repository: ${{ github.repository }}\n" +
 		"  ref: ${{ github.event.pull_request.base.sha }}\n\n" +
 		"3) Check out only the trusted base repository and omit ref:\n" +
-		"checkout:\n" +
-		"  repository: ${{ github.repository }}\n\n" +
+		"checkout: {}\n\n" +
 		"You can also use 'ref: ${{ github.event.pull_request.base.ref }}'.\n" +
+		"For a fixed external checkout, declare its literal repository/ref pair in\n" +
+		"on.pull_request_target.allowed-checkouts and configure checkout to match exactly.\n" +
 		"See: https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/"
 
 	if effectiveStrictMode {
@@ -164,49 +194,54 @@ func (c *Compiler) validatePullRequestTargetTrigger(workflowData *WorkflowData, 
 	return nil
 }
 
-func hasOnlyTrustedPullRequestTargetCheckouts(configs []*CheckoutConfig) bool {
+func dangerouslyAllowsRolesReadAndPullRequestTarget(workflowData *WorkflowData) bool {
+	value, found := getFeatureValueCaseInsensitive(
+		workflowData.Features,
+		string(constants.DangerouslyAllowRolesReadAndPullRequestTargetFeatureFlag),
+	)
+	enabled, isBoolean := value.(bool)
+	return found && isBoolean && enabled
+}
+
+func hasOnlyTrustedPullRequestTargetCheckouts(configs []*CheckoutConfig, allowedCheckouts []any) bool {
 	if len(configs) == 0 {
 		return false
 	}
 	for _, cfg := range configs {
-		if !isTrustedPullRequestTargetCheckout(cfg) {
+		if !isTrustedPullRequestTargetCheckout(cfg) && !isAllowedPullRequestTargetCheckout(cfg, allowedCheckouts) {
 			return false
 		}
 	}
 	return true
 }
 
-func isTrustedPullRequestTargetCheckout(cfg *CheckoutConfig) bool {
-	if cfg == nil {
+func isAllowedPullRequestTargetCheckout(cfg *CheckoutConfig, allowedCheckouts []any) bool {
+	if cfg == nil || cfg.Wiki || len(cfg.Fetch) > 0 {
 		return false
 	}
-
-	repository := strings.TrimSpace(cfg.Repository)
-	if repository != "" && !matchesGitHubExpression(repository, "github.repository") {
+	// Fail closed even when called without schema validation. Never allow expressions
+	// or PR refs merely because the same string appears in the policy.
+	if !checkoutpolicy.LiteralPair(cfg.Repository, cfg.Ref) {
 		return false
 	}
-
-	ref := strings.TrimSpace(cfg.Ref)
-	return ref == "" || matchesAnyGitHubExpression(ref,
-		"github.event.pull_request.base.sha", // immutable commit SHA
-		"github.event.pull_request.base.ref", // mutable branch tip, still trusted base code
-	)
-}
-
-func matchesAnyGitHubExpression(value string, expectedExpressions ...string) bool {
-	for _, expected := range expectedExpressions {
-		if matchesGitHubExpression(value, expected) {
+	for _, entry := range allowedCheckouts {
+		pair, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		repository, repositoryOK := pair["repository"].(string)
+		ref, refOK := pair["ref"].(string)
+		if repositoryOK && refOK && repository == cfg.Repository && ref == cfg.Ref {
 			return true
 		}
 	}
 	return false
 }
 
-func matchesGitHubExpression(value string, expectedExpression string) bool {
-	trimmed := strings.TrimSpace(value)
-	matches := pullRequestTargetGitHubExpressionPattern.FindStringSubmatch(trimmed)
-	if len(matches) != 2 {
+func isTrustedPullRequestTargetCheckout(cfg *CheckoutConfig) bool {
+	if cfg == nil || len(cfg.Fetch) > 0 {
 		return false
 	}
-	return strings.TrimSpace(matches[1]) == expectedExpression
+
+	return checkoutpolicy.Base(cfg.Repository, cfg.Ref)
 }

@@ -22,11 +22,8 @@ func writeStepTokenWorkflow(t *testing.T, name string, content string) string {
 	return workflowFile
 }
 
-// TestSameJobStepTokenMintedInEveryConsumingJobCompiles verifies that a same-job
-// steps.<id>.outputs.token expression compiles when the minting step is injected into
-// the agent job (top-level pre-steps) and into the safe_outputs and conclusion jobs
-// (jobs.<job>.pre-steps).
-func TestSameJobStepTokenMintedInEveryConsumingJobCompiles(t *testing.T) {
+// User-provided token-minting actions must not execute in conclusion.
+func TestSameJobStepTokenMintedInConclusionRejected(t *testing.T) {
 	workflowFile := writeStepTokenWorkflow(t, "minted", `---
 on:
   workflow_dispatch:
@@ -59,18 +56,7 @@ jobs:
 `)
 
 	compiler := NewCompiler()
-	require.NoError(t, compiler.CompileWorkflow(workflowFile))
-
-	lockContent, err := os.ReadFile(filepath.Join(filepath.Dir(workflowFile), "minted.lock.yml"))
-	require.NoError(t, err)
-	lockYAML := string(lockContent)
-
-	for _, jobName := range []string{"safe_outputs", "conclusion"} {
-		section := extractJobSection(lockYAML, jobName)
-		require.NotEmpty(t, section, "expected %s job section", jobName)
-		assert.Contains(t, section, "id: octosts")
-		assert.Contains(t, section, "${{ steps.octosts.outputs.token || secrets.CUSTOM_PAT || secrets.GITHUB_TOKEN }}")
-	}
+	require.ErrorContains(t, compiler.CompileWorkflow(workflowFile), "jobs.conclusion cannot run user-provided steps")
 }
 
 // TestSameJobStepTokenMissingInConsumingJobFails verifies that a token reference which is
@@ -100,15 +86,12 @@ safe-outputs:
 	compiler := NewCompiler()
 	err := compiler.CompileWorkflow(workflowFile)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `has no step with id "octosts"`)
-	assert.Contains(t, err.Error(), "pre-steps:")
+	assert.Contains(t, err.Error(), "conclusion accepts compiler-generated steps only")
+	assert.Contains(t, err.Error(), "safe-outputs.github-app")
 }
 
-// TestSameJobStepTokenMintedAfterConsumerFails verifies that safe-outputs.steps, which run
-// after the safe_outputs checkout and git credential steps, are reported as too late for a
-// token consumed by those steps.
-func TestSameJobStepTokenMintedAfterConsumerFails(t *testing.T) {
-	workflowFile := writeStepTokenWorkflow(t, "late", `---
+func TestSameJobStepTokenMissingInSafeOutputMentionResolutionFails(t *testing.T) {
+	workflowFile := writeStepTokenWorkflow(t, "missing-agent", `---
 on:
   workflow_dispatch:
 permissions:
@@ -116,30 +99,73 @@ permissions:
   id-token: write
 engine: claude
 strict: false
-pre-steps:
-  - name: Mint token (agent)
-    id: octosts
-    uses: `+stsMintStep+`
 safe-outputs:
-  push-to-pull-request-branch:
-  steps:
-    - name: Mint token (too late)
-      id: octosts
-      uses: `+stsMintStep+`
-  github-token: ${{ steps.octosts.outputs.token || secrets.GITHUB_TOKEN }}
+  add-comment:
+  mentions:
+    allowed-teams: [my-org/my-team]
+    github-token: ${{ steps.octosts.outputs.token || secrets.GITHUB_TOKEN }}
+---
+
+# Missing safe-output mention-resolution token
+`)
+
+	err := NewCompiler().CompileWorkflow(workflowFile)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `job "safe_outputs" has no step with id "octosts"`)
+	assert.Contains(t, err.Error(), "safe-outputs.mentions.github-token")
+	assert.Contains(t, err.Error(), "pre-steps:")
+}
+
+func TestSameJobStepTokenMentionsOnlyMintedInAgentCompiles(t *testing.T) {
+	workflowFile := writeStepTokenWorkflow(t, "mentions-only", `---
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+engine: claude
+strict: false
+safe-outputs:
+  add-comment:
+  mentions:
+    allowed-teams: [my-org/my-team]
+    github-token: ${{ steps.mention_mint.outputs.token }}
 jobs:
-  conclusion:
+  safe_outputs:
     pre-steps:
-      - name: Mint token (conclusion)
-        id: octosts
+      - name: Mint mention token
+        id: mention_mint
         uses: `+stsMintStep+`
 ---
 
-# Late same-job token minting
+# Mention-only same-job token
 `)
 
+	require.NoError(t, NewCompiler().CompileWorkflow(workflowFile))
+	lockContent, err := os.ReadFile(filepath.Join(filepath.Dir(workflowFile), "mentions-only.lock.yml"))
+	require.NoError(t, err)
+	lockYAML := string(lockContent)
+	agent := extractJobSection(lockYAML, "agent")
+	assert.NotContains(t, agent, "steps.mention_mint.outputs.token")
+	safeOutputs := extractJobSection(lockYAML, "safe_outputs")
+	assert.Contains(t, safeOutputs, "GH_AW_MENTIONS_GITHUB_TOKEN: ${{ steps.mention_mint.outputs.token }}")
+	assert.Less(t, jobStepIDDeclarationIndex(safeOutputs, "mention_mint"), jobStepOutputConsumptionIndex(safeOutputs, "mention_mint"))
+	assert.NotContains(t, extractJobSection(lockYAML, "conclusion"), "steps.mention_mint.outputs.token")
+}
+
+// TestSameJobStepTokenMintedAfterConsumerFails verifies that safe-outputs.steps, which run
+// after the safe_outputs checkout and git credential steps, are reported as too late for a
+// token consumed by those steps.
+func TestSameJobStepTokenMintedAfterConsumerFails(t *testing.T) {
 	compiler := NewCompiler()
-	err := compiler.CompileWorkflow(workflowFile)
+	require.NoError(t, compiler.jobManager.AddJob(&Job{
+		Name: "safe_outputs",
+		Steps: []string{
+			"      - name: Consume token\n        env:\n          GH_TOKEN: ${{ steps.octosts.outputs.token }}\n        run: echo consuming\n",
+			"      - name: Mint token\n        id: octosts\n        uses: " + stsMintStep + "\n",
+		},
+	}))
+	err := compiler.validateSafeOutputStepTokenReferences(&WorkflowData{SafeOutputs: &SafeOutputsConfig{GitHubToken: "${{ steps.octosts.outputs.token }}"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "after the first step that consumes the token")
 	assert.Contains(t, err.Error(), "safe_outputs")
@@ -148,6 +174,9 @@ jobs:
 func TestCollectSafeOutputStepTokenIDs(t *testing.T) {
 	config := &SafeOutputsConfig{
 		GitHubToken: "${{ steps.global_mint.outputs.token || secrets.GITHUB_TOKEN }}",
+		Mentions: &MentionsConfig{
+			GitHubToken: "${{ steps.mention_mint.outputs.token }}",
+		},
 		CreateIssues: &CreateIssuesConfig{
 			BaseSafeOutputConfig: BaseSafeOutputConfig{
 				GitHubToken: "${{ steps.issue_mint.outputs.token }}",
@@ -161,7 +190,8 @@ func TestCollectSafeOutputStepTokenIDs(t *testing.T) {
 	}
 
 	ids := collectSafeOutputStepTokenIDs(config)
-	assert.Len(t, ids, 2)
+	assert.Len(t, ids, 3)
+	assert.Contains(t, ids, "mention_mint")
 	assert.Contains(t, ids, "global_mint")
 	assert.Contains(t, ids, "issue_mint")
 

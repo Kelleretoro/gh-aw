@@ -46,8 +46,11 @@ var compileOrchestrationLog = logger.New("cli:compile_pipeline")
 // scanner in order, without short-circuiting, and without depending on the
 // underlying external tool binaries/Docker images being available.
 var (
-	runBatchActionlintOnFiles                 = RunActionlintOnFiles
-	runBatchZizmorOnFiles                     = RunZizmorOnFiles
+	runBatchActionlintOnFiles   = RunActionlintOnFiles
+	runBatchZizmorOnFiles       = RunZizmorOnFiles
+	runBatchDryRunZizmorOnFiles = func(files []string, verbose, strict bool) error {
+		return runZizmorOnFilesWithOptions(files, verbose, strict, zizmorResultOptions{dryRun: true})
+	}
 	runBatchPoutineOnDirectory                = RunPoutineOnDirectory
 	runBatchRunnerGuardOnDirectory            = RunRunnerGuardOnDirectory
 	runBatchSyftOnLockFiles                   = RunSyftOnLockFiles
@@ -68,6 +71,9 @@ func compileSpecificFiles( //nolint:largefunc // Orchestrates the full targeted 
 	validationResults *[]ValidationResult,
 ) ([]*workflow.WorkflowData, error) {
 	compileOrchestrationLog.Printf("Compiling %d specific workflow files", len(config.MarkdownFiles))
+	if err := prepareDryRunScannerBaseline(ctx, &config, config.MarkdownFiles, "", compiler); err != nil {
+		return nil, err
+	}
 
 	batchMode := !config.Verbose && len(config.MarkdownFiles) > 1
 	compiler.SetBatchMode(batchMode)
@@ -140,11 +146,12 @@ func compileSpecificFiles( //nolint:largefunc // Orchestrates the full targeted 
 		// Compile regular workflow file (disable per-file security tools)
 		fileResult := compileWorkflowFile(
 			ctx, compiler, resolvedFile, compileWorkflowFileOptions{
-				verbose:    config.Verbose,
-				jsonOutput: config.JSONOutput,
-				noEmit:     config.NoEmit,
-				strict:     config.Strict,
-				validate:   shouldValidate,
+				verbose:        config.Verbose,
+				jsonOutput:     config.JSONOutput,
+				noEmit:         config.NoEmit,
+				strict:         config.Strict,
+				validate:       shouldValidate,
+				failOnWarnings: config.DryRun,
 				// zizmor, poutine, actionlint disabled per-file (batched instead)
 			},
 		)
@@ -204,7 +211,12 @@ func compileSpecificFiles( //nolint:largefunc // Orchestrates the full targeted 
 		*validationResults = append(*validationResults, fileResult.validationResult)
 	}
 
+	workflowDir := ""
+	if config.DryRun {
+		workflowDir = config.dryRunWorkflowDir
+	}
 	strictGrantErr, batchToolErr := runBatchExternalTools(ctx, config, batchToolsOptions{
+		workflowDir:            workflowDir,
 		lockFilesForActionlint: lockFilesForActionlint,
 		lockFilesForZizmor:     lockFilesForZizmor,
 		lockFilesForDirTools:   lockFilesForDirTools,
@@ -233,9 +245,13 @@ func compileSpecificFiles( //nolint:largefunc // Orchestrates the full targeted 
 	displaySafeUpdateWarnings(compiler, config.JSONOutput)
 
 	// Post-processing
-	if err := runPostProcessing(ctx, compiler, workflowDataList, compiledLockFiles, config, compiledCount); err != nil {
-		return workflowDataList, err
+	if !config.NoEmit {
+		if err := runPostProcessing(ctx, compiler, workflowDataList, compiledLockFiles, config, compiledCount); err != nil {
+			return workflowDataList, err
+		}
 	}
+
+	developmentErr := enforceDevelopmentDiagnostics(config, compiler, stats, validationResults, strictGrantErr, batchToolErr)
 
 	// Output results
 	if err := outputResults(stats, validationResults, config); err != nil {
@@ -255,7 +271,7 @@ func compileSpecificFiles( //nolint:largefunc // Orchestrates the full targeted 
 		return workflowDataList, errors.New("compilation failed")
 	}
 
-	return workflowDataList, nil
+	return workflowDataList, developmentErr
 }
 
 // compileAllFilesInDirectory compiles all workflow files in a directory
@@ -297,6 +313,9 @@ func compileAllFilesInDirectory( //nolint:largefunc // Orchestrates the full dir
 
 	if len(mdFiles) == 0 {
 		return nil, fmt.Errorf("no workflow markdown files found in %s (workflow files must start with a frontmatter opener on the first line)", workflowsDir)
+	}
+	if err := prepareDryRunScannerBaseline(ctx, &config, mdFiles, workflowsDir, compiler); err != nil {
+		return nil, err
 	}
 
 	compileOrchestrationLog.Printf("Found %d markdown files to compile", len(mdFiles))
@@ -354,11 +373,12 @@ func compileAllFilesInDirectory( //nolint:largefunc // Orchestrates the full dir
 		// Compile regular workflow file (disable per-file security tools)
 		fileResult := compileWorkflowFile(
 			ctx, compiler, file, compileWorkflowFileOptions{
-				verbose:    config.Verbose,
-				jsonOutput: config.JSONOutput,
-				noEmit:     config.NoEmit,
-				strict:     config.Strict,
-				validate:   shouldValidate,
+				verbose:        config.Verbose,
+				jsonOutput:     config.JSONOutput,
+				noEmit:         config.NoEmit,
+				strict:         config.Strict,
+				validate:       shouldValidate,
+				failOnWarnings: config.DryRun,
 				// zizmor, poutine, actionlint disabled per-file (batched instead)
 			},
 		)
@@ -418,8 +438,12 @@ func compileAllFilesInDirectory( //nolint:largefunc // Orchestrates the full dir
 		*validationResults = append(*validationResults, fileResult.validationResult)
 	}
 
+	dryRunWorkflowDir := ""
+	if config.DryRun {
+		dryRunWorkflowDir = config.dryRunWorkflowDir
+	}
 	strictGrantErr, batchToolErr := runBatchExternalTools(ctx, config, batchToolsOptions{
-		workflowDir:            workflowsDir,
+		workflowDir:            firstNonEmpty(dryRunWorkflowDir, workflowsDir),
 		lockFilesForActionlint: lockFilesForActionlint,
 		lockFilesForZizmor:     lockFilesForZizmor,
 		lockFilesForDirTools:   lockFilesForDirTools,
@@ -469,9 +493,13 @@ func compileAllFilesInDirectory( //nolint:largefunc // Orchestrates the full dir
 	}
 
 	// Post-processing
-	if err := runPostProcessingForDirectory(ctx, compiler, workflowDataList, config, workflowsDir, gitRoot, successCount, errorCount); err != nil {
-		return workflowDataList, err
+	if !config.NoEmit {
+		if err := runPostProcessingForDirectory(ctx, compiler, workflowDataList, config, workflowsDir, gitRoot, successCount, errorCount); err != nil {
+			return workflowDataList, err
+		}
 	}
+
+	developmentErr := enforceDevelopmentDiagnostics(config, compiler, stats, validationResults, strictGrantErr, batchToolErr)
 
 	// Output results.
 	// Populate MarkdownFiles so that outputResults can collect per-workflow stats
@@ -494,10 +522,13 @@ func compileAllFilesInDirectory( //nolint:largefunc // Orchestrates the full dir
 		return workflowDataList, errors.New("compilation failed")
 	}
 
-	return workflowDataList, nil
+	return workflowDataList, developmentErr
 }
 
 type batchToolsOptions struct {
+	reportResult           func(string, int, error)
+	filterResult           func(string, error) error
+	dryRunZizmor           bool
 	workflowDir            string
 	lockFilesForActionlint []string
 	lockFilesForZizmor     []string
@@ -510,6 +541,16 @@ type batchToolsOptions struct {
 	shellcheckResources    []workflow.ShellScriptResource
 }
 
+func (opts batchToolsOptions) recordResult(tool string, inputs int, err error) error {
+	if opts.filterResult != nil {
+		err = opts.filterResult(tool, err)
+	}
+	if opts.reportResult != nil {
+		opts.reportResult(tool, inputs, err)
+	}
+	return err
+}
+
 // runBatchExternalTools executes all enabled batch analysis tools sequentially without short-circuiting
 // when individual tools report findings or errors.
 func runBatchLinters(ctx context.Context, config CompileConfig, opts batchToolsOptions) error {
@@ -519,7 +560,9 @@ func runBatchLinters(ctx context.Context, config CompileConfig, opts batchToolsO
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := runBatchActionlintOnFiles(ctx, opts.lockFilesForActionlint, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+		err := runBatchActionlintOnFiles(ctx, opts.lockFilesForActionlint, config.Verbose && !config.JSONOutput, config.Strict)
+		err = opts.recordResult("actionlint", len(opts.lockFilesForActionlint), err)
+		if err != nil {
 			if config.Strict && firstErr == nil {
 				firstErr = err
 			}
@@ -530,7 +573,14 @@ func runBatchLinters(ctx context.Context, config CompileConfig, opts batchToolsO
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := runBatchZizmorOnFiles(opts.lockFilesForZizmor, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+		var err error
+		if opts.dryRunZizmor || config.DryRun && config.dryRunBaseline != nil {
+			err = runBatchDryRunZizmorOnFiles(opts.lockFilesForZizmor, config.Verbose && !config.JSONOutput, config.Strict)
+		} else {
+			err = runBatchZizmorOnFiles(opts.lockFilesForZizmor, config.Verbose && !config.JSONOutput, config.Strict)
+		}
+		err = opts.recordResult("zizmor", len(opts.lockFilesForZizmor), err)
+		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -551,7 +601,9 @@ func runBatchDirScanners(ctx context.Context, config CompileConfig, opts batchTo
 		if workflowDir == "" && len(opts.lockFilesForDirTools) > 0 {
 			workflowDir = filepath.Dir(opts.lockFilesForDirTools[0])
 		}
-		if err := runBatchDirectoryTool("poutine", workflowDir, config.Verbose && !config.JSONOutput, config.Strict, runBatchPoutineOnDirectory); err != nil {
+		err := runBatchDirectoryTool("poutine", workflowDir, config.Verbose && !config.JSONOutput, config.Strict, runBatchPoutineOnDirectory)
+		err = opts.recordResult("poutine", len(opts.lockFilesForDirTools), err)
+		if err != nil {
 			if config.Strict && firstErr == nil {
 				firstErr = err
 			}
@@ -566,7 +618,9 @@ func runBatchDirScanners(ctx context.Context, config CompileConfig, opts batchTo
 		if workflowDir == "" && len(opts.lockFilesForDirTools) > 0 {
 			workflowDir = filepath.Dir(opts.lockFilesForDirTools[0])
 		}
-		if err := runBatchDirectoryTool("runner-guard", workflowDir, config.Verbose && !config.JSONOutput, config.Strict, runBatchRunnerGuardOnDirectory); err != nil {
+		err := runBatchDirectoryTool("runner-guard", workflowDir, config.Verbose && !config.JSONOutput, config.Strict, runBatchRunnerGuardOnDirectory)
+		err = opts.recordResult("runner-guard", len(opts.lockFilesForDirTools), err)
+		if err != nil {
 			if config.Strict && firstErr == nil {
 				firstErr = err
 			}
@@ -587,7 +641,9 @@ func runBatchContainerScanners(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := runBatchSyftOnLockFiles(opts.lockFilesForSyft, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+		err := runBatchSyftOnLockFiles(opts.lockFilesForSyft, config.Verbose && !config.JSONOutput, config.Strict)
+		err = opts.recordResult("syft", len(opts.lockFilesForSyft), err)
+		if err != nil {
 			if config.Strict && containerErr == nil {
 				containerErr = err
 			}
@@ -598,7 +654,9 @@ func runBatchContainerScanners(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := runBatchGrypeOnLockFiles(opts.lockFilesForGrype, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+		err := runBatchGrypeOnLockFiles(opts.lockFilesForGrype, config.Verbose && !config.JSONOutput, config.Strict)
+		err = opts.recordResult("grype", len(opts.lockFilesForGrype), err)
+		if err != nil {
 			if config.Strict && containerErr == nil {
 				containerErr = err
 			}
@@ -609,17 +667,21 @@ func runBatchContainerScanners(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := runBatchGrantOnLockFiles(opts.lockFilesForGrant, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+		err := runBatchGrantOnLockFiles(opts.lockFilesForGrant, config.Verbose && !config.JSONOutput, config.Strict)
+		err = opts.recordResult("grant", len(opts.lockFilesForGrant), err)
+		if err != nil {
 			if config.Strict {
-				stats.Errors++
-				*validationResults = append(*validationResults, ValidationResult{
-					Workflow: "grant",
-					Valid:    false,
-					Errors: []ValidationIssue{{
-						Type:    "grant_error",
-						Message: err.Error(),
-					}},
-				})
+				if !config.DryRun {
+					stats.Errors++
+					*validationResults = append(*validationResults, ValidationResult{
+						Workflow: "grant",
+						Valid:    false,
+						Errors: []ValidationIssue{{
+							Type:    "grant_error",
+							Message: err.Error(),
+						}},
+					})
+				}
 				if strictGrantErr == nil {
 					strictGrantErr = err
 				}
@@ -637,7 +699,9 @@ func runBatchScriptLinters(ctx context.Context, config CompileConfig, opts batch
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := runBatchYamllintOnFiles(opts.lockFilesForYamllint, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+		err := runBatchYamllintOnFiles(opts.lockFilesForYamllint, config.Verbose && !config.JSONOutput, config.Strict)
+		err = opts.recordResult("yamllint", len(opts.lockFilesForYamllint), err)
+		if err != nil {
 			if config.Strict && firstErr == nil {
 				firstErr = err
 			}
@@ -648,7 +712,9 @@ func runBatchScriptLinters(ctx context.Context, config CompileConfig, opts batch
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := runBatchShellcheckOnLockFilesAndResources(ctx, opts.lockFilesForShellcheck, opts.shellcheckResources, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+		err := runBatchShellcheckOnLockFilesAndResources(ctx, opts.lockFilesForShellcheck, opts.shellcheckResources, config.Verbose && !config.JSONOutput, config.Strict)
+		err = opts.recordResult("shellcheck", len(opts.lockFilesForShellcheck)+len(opts.shellcheckResources), err)
+		if err != nil {
 			if config.Strict && firstErr == nil {
 				firstErr = err
 			}
@@ -665,6 +731,25 @@ func runBatchExternalTools(
 	stats *CompilationStats,
 	validationResults *[]ValidationResult,
 ) (strictGrantErr error, batchToolErr error) {
+	if config.DryRun {
+		if config.dryRunBaseline != nil {
+			opts.filterResult = func(tool string, err error) error {
+				diff, filteredErr := config.dryRunBaseline.filter(tool, err)
+				if config.dryRunReport != nil && diff != nil {
+					check := config.dryRunReport.Scanners[tool]
+					check.Differential = diff
+					config.dryRunReport.Scanners[tool] = check
+				}
+				return filteredErr
+			}
+		}
+		opts.reportResult = func(tool string, inputs int, err error) {
+			recordDryRunScannerResult(config.dryRunReport, tool, inputs, err)
+			if err != nil {
+				appendDevelopmentBatchDiagnostics(tool, appendValidationErrors(nil, tool+"_error", err), stats, validationResults)
+			}
+		}
+	}
 	if err := runBatchLinters(ctx, config, opts); err != nil && batchToolErr == nil {
 		batchToolErr = err
 	}
@@ -932,12 +1017,17 @@ func runPostProcessingForDirectory(
 	// Keep invoking generators for empty workflowDataList so stale generated files are cleaned up.
 	if !config.NoEmit && config.WorkflowDir == "" {
 		absWorkflowDir := getAbsoluteWorkflowDir(workflowsDir, gitRoot)
-		if err := generateMaintenanceWorkflowWrapper(ctx, compiler, workflowDataList, absWorkflowDir, gitRoot, config.Verbose, config.Strict); err != nil {
+		if err := generateMaintenanceWorkflowWrapper(ctx, compiler, workflowDataList, absWorkflowDir, gitRoot, config.Verbose, config.Strict, config.NoLogo); err != nil {
 			if config.Strict {
 				return err
 			}
 		}
-		if err := generateCentralSlashCommandWorkflowWrapper(ctx, workflowDataList, absWorkflowDir, gitRoot, config.Strict); err != nil {
+		if err := generateWorkQueueEventWorkflowWrapper(ctx, workflowDataList, absWorkflowDir, gitRoot, config.Strict, config.NoLogo); err != nil {
+			if config.Strict {
+				return err
+			}
+		}
+		if err := generateCentralSlashCommandWorkflowWrapper(ctx, workflowDataList, absWorkflowDir, gitRoot, config.Strict, config.NoLogo); err != nil {
 			if config.Strict {
 				return err
 			}
@@ -964,6 +1054,20 @@ func outputResults(
 	validationResults *[]ValidationResult,
 	config CompileConfig,
 ) error {
+	if !config.DryRun && len(config.modelValidationWarnings) > 0 {
+		issues := modelInventoryWarnings(config)
+		*validationResults = append(*validationResults, ValidationResult{
+			Scope: "batch", Workflow: "models", Valid: true, Errors: []ValidationIssue{}, Warnings: issues,
+		})
+		stats.Warnings += len(issues)
+		if !config.JSONOutput {
+			for _, issue := range issues {
+				fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(issue.Message))
+			}
+		}
+	}
+	appendDryRunCompileReport(config, stats, validationResults)
+
 	// Collect and display stats if requested
 	if config.Stats && !config.NoEmit && !config.JSONOutput {
 		var statsList []*WorkflowStats

@@ -53,6 +53,9 @@ imports:
       azure-client-id: adb907fd-188c-4029-b67f-2559d96b2f1b
       azure-tenant-id: 398a6654-997b-47e9-b12b-9515b896b4de
   - shared/smoke-test-brevity.md
+  - uses: shared/session-artifact-check.md
+    with:
+      session-artifact: copilot-events
 network:
   allowed:
     - defaults
@@ -75,7 +78,7 @@ tools:
   cli-proxy: true
 runtimes:
   go:
-    version: "1.26"
+    version: "1.27.3"
 safe-outputs:
     allowed-domains: [default-safe-outputs]
     upload-artifact:
@@ -110,6 +113,7 @@ safe-outputs:
     remove-labels:
       allowed: [smoke]
     set-issue-type:
+      target: "*"
     dispatch-workflow:
       workflows:
         - haiku-printer

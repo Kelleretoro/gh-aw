@@ -16,11 +16,12 @@ import (
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/gitutil"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/scanfindings"
 )
 
 var actionlintLog = logger.New("cli:actionlint")
 
-// actionlintVersion caches the actionlint version to avoid repeated Docker calls
+// actionlintVersion caches the actionlint version to avoid repeated subprocess calls.
 var actionlintVersion string
 
 const actionlintShellMetacharacters = " \t\n'\"`$&;|*?[](){}<>!#"
@@ -171,7 +172,7 @@ func displayActionlintSummary() {
 	fmt.Fprintf(os.Stderr, "\n%s\n", separator)
 }
 
-// getActionlintVersion fetches and caches the actionlint version from Docker.
+// getActionlintVersion fetches and caches the local or Docker actionlint version.
 // The provided context allows caller-driven cancellation.
 func getActionlintVersion(ctx context.Context) (string, error) {
 	// Return cached version if already fetched
@@ -179,20 +180,18 @@ func getActionlintVersion(ctx context.Context) (string, error) {
 		return actionlintVersion, nil
 	}
 
-	actionlintLog.Print("Fetching actionlint version from Docker")
+	actionlintLog.Print("Fetching actionlint version")
 
-	// Run docker command to get version with a 30 second timeout
+	// Fetch the version with a 30 second timeout.
 	versionCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(
-		versionCtx,
-		"docker",
-		"run",
-		"--rm",
-		ActionlintImage,
-		"--version",
-	)
+	var cmd *exec.Cmd
+	if localPath := localScannerPath(versionCtx, "actionlint"); localPath != "" {
+		cmd = exec.CommandContext(versionCtx, localPath, "--version")
+	} else {
+		cmd = exec.CommandContext(versionCtx, "docker", "run", "--rm", ActionlintImage, "--version")
+	}
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -213,7 +212,7 @@ func getActionlintVersion(ctx context.Context) (string, error) {
 	return version, nil
 }
 
-// runActionlintOnFiles runs the actionlint linter on one or more .lock.yml files using Docker.
+// runActionlintOnFiles runs actionlint locally when compatible, otherwise using Docker.
 // The provided context allows caller-driven cancellation.
 func runActionlintOnFiles(ctx context.Context, lockFiles []string, verbose bool, strict bool) error {
 	return runActionlintOnFilesWithOptions(ctx, lockFiles, verbose, strict, actionlintRunOptions{
@@ -284,7 +283,41 @@ func runActionlintOnFilesWithOptions(ctx context.Context, lockFiles []string, ve
 	if shouldParseOutput && actionlintStats != nil {
 		actionlintStats.TotalWorkflows += len(lockFiles)
 	}
-	return handleActionlintExecutionError(runResult.err, strict, lockFiles, totalErrors, parseErr, runResult.stdout)
+	err = handleActionlintExecutionError(runResult.err, strict, lockFiles, totalErrors, parseErr, runResult.stdout)
+	if shouldParseOutput && parseErr == nil && totalErrors > 0 {
+		return withActionlintFindings(err, runResult.stdout)
+	}
+	return err
+}
+
+func withActionlintFindings(err error, output string) error {
+	var native []actionlintError
+	if decodeErr := json.Unmarshal([]byte(output), &native); decodeErr != nil {
+		return fmt.Errorf("actionlint output could not be parsed: %w", decodeErr)
+	}
+	diagnostics := make([]scannerDiagnostic, 0, len(native))
+	sources := make(scannerSources)
+	for _, issue := range native {
+		severity := scanfindings.SeverityHigh
+		if !isHighSeverityActionlintError(issue) {
+			severity = scanfindings.SeverityLow
+		}
+		finding := scanfindings.Finding{
+			RuleID: issue.Kind, Severity: severity, Message: issue.Message,
+			File: issue.Filepath, Line: issue.Line, Column: issue.Column,
+		}
+		identity := sources.findingIdentity(finding)
+		if issue.Kind == "shellcheck" {
+			if stableIdentity, ok := sources.shellcheckIdentity(issue); ok {
+				identity = stableIdentity
+			}
+		}
+		diagnostics = append(diagnostics, scannerDiagnostic{Finding: finding, Identity: identity})
+	}
+	if err == nil || len(diagnostics) == 0 {
+		return err
+	}
+	return &scannerFindingsError{err: err, diagnostics: diagnostics}
 }
 
 func maybePrintActionlintVersion(ctx context.Context) {
@@ -321,13 +354,13 @@ func runActionlintCommand(ctx context.Context, gitRoot string, lockFiles, relPat
 	runCtx, cancel := context.WithTimeout(ctx, timeoutDuration)
 	defer cancel()
 
+	cmd := buildActionlintCommand(runCtx, gitRoot, relPaths, options)
 	verboseHint := ""
 	if verbose {
-		verboseHint = buildActionlintDockerCommand(gitRoot, relPaths, options)
+		verboseHint = formatActionlintCommand(cmd.Args)
 	}
 	printActionlintRunMessage(lockFiles, relPaths, verboseHint, options)
 
-	cmd := exec.CommandContext(runCtx, "docker", buildActionlintDockerArgs(gitRoot, relPaths, options)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -342,6 +375,15 @@ func runActionlintCommand(ctx context.Context, gitRoot string, lockFiles, relPat
 	}
 }
 
+func buildActionlintCommand(ctx context.Context, gitRoot string, relPaths []string, options actionlintRunOptions) *exec.Cmd {
+	if localPath := localScannerPath(ctx, "actionlint"); localPath != "" {
+		cmd := exec.CommandContext(ctx, localPath, buildActionlintArgs(relPaths, options)...)
+		cmd.Dir = gitRoot
+		return cmd
+	}
+	return exec.CommandContext(ctx, "docker", buildActionlintDockerArgs(gitRoot, relPaths, options)...)
+}
+
 func buildActionlintDockerArgs(gitRoot string, relPaths []string, options actionlintRunOptions) []string {
 	dockerArgs := []string{
 		"run",
@@ -349,27 +391,30 @@ func buildActionlintDockerArgs(gitRoot string, relPaths []string, options action
 		"-v", gitRoot + ":/workdir",
 		"-w", "/workdir",
 		ActionlintImage,
-		"-format", "{{json .}}",
 	}
-	if !options.IncludeShellcheck {
-		dockerArgs = append(dockerArgs, "-shellcheck=")
-	}
-	if !options.IncludePyflakes {
-		dockerArgs = append(dockerArgs, "-pyflakes=")
-	}
-	for _, ignorePattern := range options.IgnorePatterns {
-		dockerArgs = append(dockerArgs, "-ignore", ignorePattern)
-	}
-	return append(dockerArgs, relPaths...)
+	return append(dockerArgs, buildActionlintArgs(relPaths, options)...)
 }
 
-func buildActionlintDockerCommand(gitRoot string, relPaths []string, options actionlintRunOptions) string {
-	args := buildActionlintDockerArgs(gitRoot, relPaths, options)
+func buildActionlintArgs(relPaths []string, options actionlintRunOptions) []string {
+	args := []string{"-format", "{{json .}}"}
+	if !options.IncludeShellcheck {
+		args = append(args, "-shellcheck=")
+	}
+	if !options.IncludePyflakes {
+		args = append(args, "-pyflakes=")
+	}
+	for _, ignorePattern := range options.IgnorePatterns {
+		args = append(args, "-ignore", ignorePattern)
+	}
+	return append(args, relPaths...)
+}
+
+func formatActionlintCommand(args []string) string {
 	formattedArgs := append([]string(nil), args...)
 	for i, arg := range formattedArgs {
 		formattedArgs[i] = actionlintShellQuoteArg(arg)
 	}
-	return "docker " + strings.Join(formattedArgs, " ")
+	return strings.Join(formattedArgs, " ")
 }
 
 func actionlintShellQuoteArg(arg string) string {
@@ -405,7 +450,7 @@ func actionlintContextError(result actionlintCommandResult, lockFiles []string) 
 		if actionlintStats != nil {
 			actionlintStats.IntegrationErrors++
 		}
-		return fmt.Errorf("actionlint timed out after %d minutes on %s - this may indicate a Docker or network issue",
+		return fmt.Errorf("actionlint timed out after %d minutes on %s - this may indicate a tooling or subprocess issue",
 			int(result.timeoutDuration.Minutes()), actionlintFileDescription(lockFiles))
 	}
 	if errors.Is(result.ctxErr, context.Canceled) {

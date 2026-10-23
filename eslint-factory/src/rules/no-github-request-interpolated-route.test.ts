@@ -10,6 +10,26 @@ const cjsRuleTester = new RuleTester({
 });
 
 describe("no-github-request-interpolated-route", () => {
+  for (const sourceType of ["module", "script", "commonjs"] as const) {
+    it(`resolves only stable top-level routes in ${sourceType}`, () => {
+      const tester = new RuleTester({ languageOptions: { ecmaVersion: 2022, sourceType } });
+      tester.run("no-github-request-interpolated-route", noGithubRequestInterpolatedRouteRule, {
+        valid: [
+          "let route = `GET /repos/${owner}/${repo}`; function run() { github.request(route, {}); }",
+          "var route = `GET /repos/${owner}/${repo}`; function run() { github.request(route, {}); }",
+          "const route = `GET /repos/${owner}/${repo}`; route = 'GET /repos'; function run() { github.request(route, {}); }",
+          "const route = `GET /repos/${owner}/${repo}`; function run(route) { github.request(route, {}); }",
+          "const route = 'GET /repos/{owner}/{repo}'; function run() { github.request(route, {}); }",
+        ],
+        invalid: [
+          { code: "const route = `GET /repos/${owner}/${repo}`; function run() { github.request(route, {}); }", errors: [{ messageId: "interpolatedRoute" }] },
+          { code: "const route = `GET /repos/${owner}/${repo}`; github.request(route, {});", errors: [{ messageId: "interpolatedRoute" }] },
+          { code: "const route = 'GET /repos/' + owner + '/' + repo; function run() { github.request(route, {}); }", errors: [{ messageId: "interpolatedRoute" }] },
+        ],
+      });
+    });
+  }
+
   it("uses the correct docs URL", () => {
     expect(noGithubRequestInterpolatedRouteRule.meta.docs.url).toBe("https://github.com/github/gh-aw/tree/main/eslint-factory#no-github-request-interpolated-route");
   });
@@ -255,6 +275,37 @@ describe("no-github-request-interpolated-route", () => {
               data: { kind: "string concatenation expression", client: "myClient" },
             },
           ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: fallback and ternary client aliases are recognized", () => {
+    cjsRuleTester.run("no-github-request-interpolated-route", noGithubRequestInterpolatedRouteRule, {
+      valid: [
+        `const client = options.targetGithubClient || github; client.request("GET /repos/{owner}/{repo}", { owner, repo });`,
+        `const client = options.targetGithubClient || otherClient; client.request(\`GET /repos/\${owner}/\${repo}\`, {});`,
+      ],
+      invalid: [
+        {
+          code: "const fallbackClient = options.targetGithubClient || github; fallbackClient.request(`GET /repos/${owner}/${repo}`, { owner, repo });",
+          errors: [{ messageId: "interpolatedRoute", data: { kind: "template literal with interpolations", client: "fallbackClient" } }],
+        },
+        {
+          code: "const client = github || otherClient; client.request(`GET /repos/${owner}/${repo}`, {});",
+          errors: [{ messageId: "interpolatedRoute", data: { kind: "template literal with interpolations", client: "client" } }],
+        },
+        {
+          code: `const client = useTarget ? targetClient : github; client.request("GET /repos/" + owner + "/" + repo, {});`,
+          errors: [{ messageId: "interpolatedRoute", data: { kind: "string concatenation expression", client: "client" } }],
+        },
+        {
+          code: "const client = useTarget ? github : targetClient; client.request(`GET /repos/${owner}/${repo}`, {});",
+          errors: [{ messageId: "interpolatedRoute", data: { kind: "template literal with interpolations", client: "client" } }],
+        },
+        {
+          code: "const client = options.client ?? context.github; client.request(`GET /repos/${owner}/${repo}`, {});",
+          errors: [{ messageId: "interpolatedRoute", data: { kind: "template literal with interpolations", client: "client" } }],
         },
       ],
     });

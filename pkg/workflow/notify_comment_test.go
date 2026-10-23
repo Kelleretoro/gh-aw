@@ -10,7 +10,22 @@ import (
 	"testing"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/stretchr/testify/assert"
 )
+
+func TestUsageActivityGenerationIncludesJobResults(t *testing.T) {
+	for _, hasGuardrail := range []bool{false, true} {
+		for _, reuseJobDurations := range []bool{false, true} {
+			steps := strings.Join(buildUsageActivityGenerationStep(hasGuardrail, reuseJobDurations, func(action string) string { return action }), "")
+			assert.NotContains(t, steps, "GH_AW_JOB_RESULTS:", "result-only metadata is inherited from the conclusion job environment")
+			assert.Equal(t, reuseJobDurations, strings.Contains(steps, "GH_AW_JOB_DURATIONS: ${{ steps.report_failed_jobs.outputs.job_durations }}"))
+			assert.Contains(t, steps, "        env:\n")
+			assert.Contains(t, steps, "GH_AW_ADMISSION_RESULT: ${{ needs.activation.outputs.admission-result }}")
+			assert.Equal(t, hasGuardrail, strings.Contains(steps, "GH_AW_DAILY_AI_CREDITS_GUARDRAIL_STATUS:"))
+			assert.NotContains(t, steps[strings.Index(steps, "          script:"):], "${{ toJSON(needs) }}")
+		}
+	}
+}
 
 func TestConclusionJob(t *testing.T) {
 	tests := []struct {
@@ -247,6 +262,9 @@ func TestConclusionJob(t *testing.T) {
 				if !strings.Contains(stepsYAML, "GH_AW_AGENT_CONCLUSION") {
 					t.Errorf("[%s] Expected GH_AW_AGENT_CONCLUSION environment variable in conclusion job", tt.name)
 				}
+				if !strings.Contains(stepsYAML, `GH_AW_DEFAULT_CHECKOUT_USES_TRIGGER_REF: "true"`) {
+					t.Errorf("[%s] Expected compiler metadata for the default checkout ref in conclusion job", tt.name)
+				}
 			} else {
 				if job != nil {
 					t.Errorf("Expected no conclusion job, but got one: %v", job)
@@ -269,6 +287,31 @@ func TestConclusionJobRunsForSkillInstallFailures(t *testing.T) {
 	if !strings.Contains(condition, "needs.activation.outputs.skill_install_failure_count != ''") ||
 		!strings.Contains(condition, "needs.activation.outputs.skill_install_failure_count != '0'") {
 		t.Errorf("Expected conclusion condition to include skill installation failures, got: %q", condition)
+	}
+}
+
+func TestDefaultCheckoutUsesTriggerRef(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     *WorkflowData
+		trial    bool
+		expected bool
+	}{
+		{name: "default checkout", data: &WorkflowData{}, expected: true},
+		{name: "checkout ref override", data: &WorkflowData{CheckoutConfigs: []*CheckoutConfig{{Ref: "main"}}}},
+		{name: "additional repository checkout", data: &WorkflowData{CheckoutConfigs: []*CheckoutConfig{{Repository: "owner/other"}}}, expected: true},
+		{name: "wiki checkout", data: &WorkflowData{CheckoutConfigs: []*CheckoutConfig{{Wiki: true}}}},
+		{name: "disabled checkout", data: &WorkflowData{CheckoutDisabled: true}},
+		{name: "custom checkout", data: &WorkflowData{CustomSteps: "      - uses: actions/checkout@v4\n"}},
+		{name: "trial checkout", data: &WorkflowData{}, trial: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			compiler := NewCompiler()
+			compiler.trialMode = tt.trial
+			assert.Equal(t, tt.expected, compiler.defaultCheckoutUsesTriggerRef(tt.data))
+		})
 	}
 }
 
@@ -389,6 +432,58 @@ func TestConclusionJobSafeOutputsResult(t *testing.T) {
 			}
 			if !tt.expectEnvVar && hasEnvVar {
 				t.Errorf("Did not expect GH_AW_SAFE_OUTPUTS_RESULT env var when safe_outputs is not in job list, but it was present")
+			}
+		})
+	}
+}
+
+func TestConclusionJobActivationCommentLinks(t *testing.T) {
+	// The conclusion job re-renders the activation comment, so it must receive the links
+	// (e.g. created pull requests) that the safe_outputs job appended to that comment.
+	compiler := NewCompiler()
+	statusCommentTrue := true
+	envVarDeclaration := "GH_AW_ACTIVATION_COMMENT_LINKS: ${{ needs.safe_outputs.outputs.activation_comment_links }}"
+
+	tests := []struct {
+		name         string
+		safeOutputs  *SafeOutputsConfig
+		expectEnvVar bool
+	}{
+		{
+			name:         "present with create-pull-request",
+			safeOutputs:  &SafeOutputsConfig{CreatePullRequests: &CreatePullRequestsConfig{}},
+			expectEnvVar: true,
+		},
+		{
+			name:         "present with push-to-pull-request-branch",
+			safeOutputs:  &SafeOutputsConfig{PushToPullRequestBranch: &PushToPullRequestBranchConfig{}},
+			expectEnvVar: true,
+		},
+		{
+			name:         "absent without PR-related safe outputs",
+			safeOutputs:  &SafeOutputsConfig{AddComments: &AddCommentsConfig{}},
+			expectEnvVar: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workflowData := &WorkflowData{
+				Name:          "Test Workflow",
+				AIReaction:    "eyes",
+				StatusComment: &statusCommentTrue,
+				SafeOutputs:   tt.safeOutputs,
+			}
+			job, err := compiler.buildConclusionJob(workflowData, string(constants.AgentJobName), []string{"safe_outputs"})
+			if err != nil {
+				t.Fatalf("Failed to build conclusion job: %v", err)
+			}
+			if job == nil {
+				t.Fatal("Expected conclusion job to be created")
+			}
+			hasEnvVar := strings.Contains(strings.Join(job.Steps, ""), envVarDeclaration)
+			if hasEnvVar != tt.expectEnvVar {
+				t.Errorf("Expected env var presence %v, got %v", tt.expectEnvVar, hasEnvVar)
 			}
 		})
 	}
@@ -1289,6 +1384,27 @@ func TestConclusionJobReportFailureAsIssueTemplatableExpression(t *testing.T) {
 	}
 }
 
+func TestConclusionUsageArtifactIncludesDetectionOutcome(t *testing.T) {
+	compiler := NewCompiler()
+	data := &WorkflowData{SafeOutputs: &SafeOutputsConfig{ThreatDetection: &ThreatDetectionConfig{}}}
+	job, err := compiler.buildConclusionJob(data, string(constants.AgentJobName), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := strings.Join(job.Steps, "")
+	for _, expected := range []string{
+		"Download detection artifact",
+		"GH_AW_DETECTION_JOB_RESULT: ${{ needs.detection.result }}",
+		"GH_AW_DETECTION_CONCLUSION: ${{ needs.detection.outputs.detection_conclusion }}",
+		"GH_AW_DETECTION_REASON: ${{ needs.detection.outputs.detection_reason }}",
+		"/tmp/gh-aw/usage/detection/detection_result.json",
+	} {
+		if !strings.Contains(steps, expected) {
+			t.Errorf("expected conclusion step to contain %q", expected)
+		}
+	}
+}
+
 func TestConclusionJobIncludesUsageArtifactSteps(t *testing.T) {
 	compiler := NewCompiler()
 	workflowData := &WorkflowData{
@@ -1316,6 +1432,11 @@ func TestConclusionJobIncludesUsageArtifactSteps(t *testing.T) {
 		t.Fatalf("Failed to read collect_usage_artifact_files.sh: %v", err)
 	}
 	script := string(scriptBytes)
+	assert.Contains(t, allSteps, "/tmp/gh-aw/usage/aw_session.jsonl")
+	assert.NotRegexp(t, `(?m)^\s*node(?:\s|$)|[;&|]\s*node(?:\s|$)`, script)
+	assert.Contains(t, script, "if ! command -v node >/dev/null 2>&1; then")
+	assert.NotRegexp(t, `(?m)(?:^|[;&|]\s*)(?:if\s+)?(?:!\s*)?node\s`, script)
+	assert.Less(t, strings.Index(allSteps, "Process no-op messages"), strings.Index(allSteps, "Collect usage artifact files"), "collect after conclusion handlers")
 	generatorPath := filepath.Join("..", "..", "actions", "setup", "js", "generate_usage_activity_summary.cjs")
 	generatorBytes, err := os.ReadFile(generatorPath)
 	if err != nil {
@@ -1327,6 +1448,16 @@ func TestConclusionJobIncludesUsageArtifactSteps(t *testing.T) {
 
 	if !strings.Contains(allSteps, "Collect usage artifact files") {
 		t.Errorf("Expected conclusion job to collect usage artifact files.\nGenerated steps:\n%s", allSteps)
+	}
+	if !strings.Contains(allSteps, "name: Generate usage activity summary and unified session") ||
+		!strings.Contains(allSteps, "uses: actions/github-script@") {
+		t.Errorf("Expected conclusion job to generate usage summaries with actions/github-script.\nGenerated steps:\n%s", allSteps)
+	}
+	if !strings.Contains(allSteps, "require('"+SetupActionDestination+"/generate_usage_artifacts.cjs')") {
+		t.Errorf("Expected conclusion job to load usage artifact generation from the setup action directory.\nGenerated steps:\n%s", allSteps)
+	}
+	if !strings.Contains(allSteps, "setupGlobals(core, github, context, exec, io, getOctokit)") {
+		t.Errorf("Expected conclusion job to initialize GitHub Actions globals for required generators.\nGenerated steps:\n%s", allSteps)
 	}
 	if !strings.Contains(allSteps, `collect_usage_artifact_files.sh`) {
 		t.Errorf("Expected 'Collect usage artifact files' step to invoke collect_usage_artifact_files.sh.\nGenerated steps:\n%s", allSteps)
@@ -1371,6 +1502,12 @@ func TestConclusionJobIncludesUsageArtifactSteps(t *testing.T) {
 	if !strings.Contains(allSteps, "/tmp/gh-aw/usage/agent/token_usage.jsonl") {
 		t.Errorf("Expected usage artifact to include agent token usage path.\nGenerated steps:\n%s", allSteps)
 	}
+	if !strings.Contains(allSteps, "/tmp/gh-aw/usage/agent/model-routing.jsonl") {
+		t.Errorf("Expected usage artifact to include agent model-routing path.\nGenerated steps:\n%s", allSteps)
+	}
+	if !strings.Contains(allSteps, "/tmp/gh-aw/usage/agent/model-routing.jsonl") {
+		t.Errorf("Expected usage artifact to include agent model-routing path.\nGenerated steps:\n%s", allSteps)
+	}
 	if !strings.Contains(allSteps, "/tmp/gh-aw/usage/agent/execution.json") {
 		t.Errorf("Expected usage artifact to include agent execution evidence path.\nGenerated steps:\n%s", allSteps)
 	}
@@ -1404,15 +1541,18 @@ func TestConclusionJobIncludesUsageArtifactSteps(t *testing.T) {
 	if strings.Contains(allSteps, "name: safe-outputs-items") {
 		t.Errorf("Expected safe-outputs-items download not to use exact artifact name downloads.\nGenerated steps:\n%s", allSteps)
 	}
-	// Verify download step appears before collect step so the manifest is available
-	// when generate_usage_activity_summary.cjs runs.
+	// Verify downloads and collection precede summary generation so inputs are available.
 	downloadIdx := strings.Index(allSteps, "Download Safe Outputs Items Manifest")
 	collectIdx := strings.Index(allSteps, "Collect usage artifact files")
 	if downloadIdx == -1 || collectIdx == -1 || downloadIdx >= collectIdx {
 		t.Errorf("Expected 'Download Safe Outputs Items Manifest' to appear before 'Collect usage artifact files'.\ndownloadIdx=%d collectIdx=%d\nGenerated steps:\n%s", downloadIdx, collectIdx, allSteps)
 	}
+	generationIdx := strings.Index(allSteps, "Generate usage activity summary and unified session")
+	if generationIdx == -1 || collectIdx >= generationIdx {
+		t.Errorf("Expected usage generation to run after file collection.\ncollectIdx=%d generationIdx=%d\nGenerated steps:\n%s", collectIdx, generationIdx, allSteps)
+	}
 	uploadIdx := strings.Index(allSteps, "Upload usage artifact")
-	if collectIdx == -1 || uploadIdx == -1 || collectIdx >= uploadIdx || !strings.Contains(allSteps[collectIdx:uploadIdx], "continue-on-error: true") {
+	if generationIdx == -1 || uploadIdx == -1 || generationIdx >= uploadIdx || !strings.Contains(allSteps[generationIdx:uploadIdx], "continue-on-error: true") {
 		t.Errorf("Expected unavailable working-set data not to fail the conclusion job.\nGenerated steps:\n%s", allSteps)
 	}
 
@@ -1428,14 +1568,17 @@ func TestConclusionJobIncludesUsageArtifactSteps(t *testing.T) {
 		!strings.Contains(script, "elif [ -f /tmp/gh-aw/detection_usage.jsonl ]; then") {
 		t.Errorf("Expected collect script to prefer detection_usage.jsonl from the downloaded detection artifact with a legacy fallback.\nScript:\n%s", script)
 	}
-	if !strings.Contains(script, "cp /tmp/gh-aw/agent/graders/grader_manifest.json /tmp/gh-aw/usage/graders/grader_manifest.json") {
-		t.Errorf("Expected collect script to copy grader manifest into usage.\nScript:\n%s", script)
-	}
-	if !strings.Contains(script, "cp /tmp/gh-aw/agent/graders/grader_results.json /tmp/gh-aw/usage/graders/grader_results.json") {
-		t.Errorf("Expected collect script to copy grader results into usage.\nScript:\n%s", script)
+	if strings.Contains(script, "/agent/graders/") {
+		t.Errorf("Graders must be computed from the collected session, not copied from agent artifacts.\nScript:\n%s", script)
 	}
 	if !strings.Contains(script, "/tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl") {
 		t.Errorf("Expected collect script to include firewall audit token usage path for agent.\nScript:\n%s", script)
+	}
+	if !strings.Contains(script, "cp /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/model-routing.jsonl /tmp/gh-aw/usage/agent/model-routing.jsonl") {
+		t.Errorf("Expected collect script to copy agent model-routing logs into the compact usage artifact.\nScript:\n%s", script)
+	}
+	if !strings.Contains(script, "cp /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/model-routing.jsonl /tmp/gh-aw/usage/agent/model-routing.jsonl") {
+		t.Errorf("Expected collect script to copy agent model-routing logs into the compact usage artifact.\nScript:\n%s", script)
 	}
 	// Verify the authoritative source is copied even when empty so its presence is
 	// distinguishable from missing accounting.
@@ -1472,20 +1615,11 @@ func TestConclusionJobIncludesUsageArtifactSteps(t *testing.T) {
 	if !strings.Contains(script, "cp /tmp/gh-aw/evals/execution.json /tmp/gh-aw/usage/evals/execution.json") {
 		t.Errorf("Expected collect script to copy evals execution evidence into usage artifact staging.\nScript:\n%s", script)
 	}
-	if !strings.Contains(script, "generate_usage_activity_summary.cjs") {
-		t.Errorf("Expected collect script to generate activity summary aggregates.\nScript:\n%s", script)
-	}
 	if !strings.Contains(generator, "calculateWorkingSetFromJSONL") || !strings.Contains(generator, "summary.working_set = workingSet") {
 		t.Errorf("Expected usage activity generator to calculate and persist working-set rebuild metrics.\nGenerator:\n%s", generator)
 	}
-	if !strings.Contains(script, `node "${RUNNER_TEMP}/gh-aw/actions/generate_usage_activity_summary.cjs"`) {
-		t.Errorf("Expected collect script to use quoted shell-safe RUNNER_TEMP form to prevent word-splitting (SC2086).\nScript:\n%s", script)
-	}
-	if strings.Contains(script, "node ${RUNNER_TEMP}/gh-aw/actions/generate_usage_activity_summary.cjs") {
-		t.Errorf("Collect script must use double-quoted RUNNER_TEMP to prevent word-splitting (SC2086).\nScript:\n%s", script)
-	}
-	if strings.Contains(script, "node ${{ runner.temp }}/gh-aw/actions/generate_usage_activity_summary.cjs") {
-		t.Errorf("Collect script must not inline ${{ runner.temp }} in shell code.\nScript:\n%s", script)
+	if !strings.Contains(generator, "module.exports = {\n  main,") {
+		t.Errorf("Expected usage activity generator to export its main function for github-script.\nGenerator:\n%s", generator)
 	}
 }
 
@@ -1547,8 +1681,83 @@ func TestConclusionJobIncludesEvalsInUsageArtifact(t *testing.T) {
 	}
 }
 
+func TestConclusionJobIncludesExperimentsInUsageArtifact(t *testing.T) {
+	compiler := NewCompiler()
+	workflowData := &WorkflowData{
+		Name:        "Test Workflow",
+		WorkflowID:  "my-workflow",
+		On:          "issues",
+		SafeOutputs: &SafeOutputsConfig{NoOp: &NoOpConfig{}},
+		Experiments: map[string][]string{"style": {"concise", "detailed"}},
+	}
+
+	job, err := compiler.buildConclusionJob(workflowData, string(constants.AgentJobName), []string{})
+	if err != nil {
+		t.Fatalf("Failed to build conclusion job: %v", err)
+	}
+	if job == nil {
+		t.Fatal("Expected conclusion job to be created")
+	}
+
+	allSteps := strings.Join(job.Steps, "\n")
+	if !strings.Contains(allSteps, "id: download-experiment-artifact") {
+		t.Errorf("Expected conclusion job to download the experiment artifact.\nGenerated steps:\n%s", allSteps)
+	}
+	if !strings.Contains(allSteps, "pattern: "+experimentArtifactDownloadName(workflowData)) {
+		t.Errorf("Expected experiment artifact download to use the experiment artifact name.\nGenerated steps:\n%s", allSteps)
+	}
+	if !strings.Contains(allSteps, "path: /tmp/gh-aw/experiments/") {
+		t.Errorf("Expected experiment artifact to be downloaded into the experiments directory.\nGenerated steps:\n%s", allSteps)
+	}
+	downloadIdx := strings.Index(allSteps, "Download experiment artifact")
+	collectIdx := strings.Index(allSteps, "Collect usage artifact files")
+	if downloadIdx == -1 || collectIdx == -1 || downloadIdx > collectIdx {
+		t.Errorf("Expected experiment artifact download before usage collection.\nGenerated steps:\n%s", allSteps)
+	}
+	for _, path := range []string{
+		"/tmp/gh-aw/usage/experiment/state.jsonl",
+		"/tmp/gh-aw/usage/experiment/state.json",
+		"/tmp/gh-aw/usage/experiment/assignments.json",
+	} {
+		if !strings.Contains(allSteps, path) {
+			t.Errorf("Expected usage artifact upload to include %s.\nGenerated steps:\n%s", path, allSteps)
+		}
+	}
+
+	scriptBytes, err := os.ReadFile(filepath.Join("..", "..", "actions", "setup", "sh", "collect_usage_artifact_files.sh"))
+	if err != nil {
+		t.Fatalf("Failed to read collect_usage_artifact_files.sh: %v", err)
+	}
+	script := string(scriptBytes)
+	if !strings.Contains(script, `cp "/tmp/gh-aw/experiments/$file" "/tmp/gh-aw/usage/experiment/$file"`) {
+		t.Errorf("Expected collect script to stage experiment files into the usage artifact.\nScript:\n%s", script)
+	}
+	if !strings.Contains(script, "cp /tmp/gh-aw/evals/evals/execution.json /tmp/gh-aw/usage/evals/execution.json") {
+		t.Errorf("Expected collect script to stage nested evals execution evidence.\nScript:\n%s", script)
+	}
+}
+
+func TestConclusionJobOmitsExperimentDownloadWithoutExperiments(t *testing.T) {
+	compiler := NewCompiler()
+	workflowData := &WorkflowData{
+		Name:        "Test Workflow",
+		On:          "issues",
+		SafeOutputs: &SafeOutputsConfig{NoOp: &NoOpConfig{}},
+	}
+	job, err := compiler.buildConclusionJob(workflowData, string(constants.AgentJobName), []string{})
+	if err != nil {
+		t.Fatalf("Failed to build conclusion job: %v", err)
+	}
+	if job == nil {
+		t.Fatal("Expected conclusion job to be created")
+	}
+	if strings.Contains(strings.Join(job.Steps, "\n"), "download-experiment-artifact") {
+		t.Errorf("Expected no experiment artifact download when no experiments are declared")
+	}
+}
+
 func TestUsageArtifactDownloadsUseExactNamesWithDownloadArtifactV3(t *testing.T) {
-	steps := strings.Join(buildUsageArtifactUploadSteps("", true, func(string) string {
+	steps := strings.Join(buildUsageArtifactUploadSteps("", true, "", false, func(string) string {
 		return "actions/download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59 # v3.1.0"
 	}), "")
 
@@ -1562,6 +1771,25 @@ func TestUsageArtifactDownloadsUseExactNamesWithDownloadArtifactV3(t *testing.T)
 	}
 	if strings.Contains(steps, "merge-multiple: true") {
 		t.Errorf("Expected download-artifact v3 usage downloads not to use merge-multiple.\nGenerated steps:\n%s", steps)
+	}
+}
+
+func TestUsageArtifactDoesNotReceiveAgentLedgerCompaction(t *testing.T) {
+	steps := strings.Join(buildUsageArtifactUploadSteps("", false, "", false, func(action string) string { return action }), "")
+	if strings.Contains(steps, "GH_AW_LEDGER_COMPACTION") {
+		t.Fatalf("expected agent workflows not to wire ledger compaction (owned by agentic maintenance):\n%s", steps)
+	}
+}
+
+func TestUsageArtifactCollectionIncludesDetectionEnvironment(t *testing.T) {
+	steps := strings.Join(buildUsageArtifactCollectionStep(true), "")
+	if strings.Count(steps, "        env:\n") != 1 {
+		t.Fatalf("expected one environment mapping for collection inputs:\n%s", steps)
+	}
+	for _, key := range []string{"GH_AW_DETECTION_JOB_RESULT", "GH_AW_DETECTION_CONCLUSION", "GH_AW_DETECTION_REASON"} {
+		if !strings.Contains(steps, key+":") {
+			t.Errorf("expected collection environment to include %s:\n%s", key, steps)
+		}
 	}
 }
 
@@ -1645,6 +1873,8 @@ func TestConclusionJobNeedsPreActivationFromMessages(t *testing.T) {
 			}
 
 			preActName := string(constants.PreActivationJobName)
+			env := buildRenderedJobEnv(job)
+			assert.Equal(t, tt.expectPreActNeeds, strings.Contains(env["GH_AW_JOB_RESULTS"], "${{ needs.pre_activation.result }}"))
 			if tt.expectPreActNeeds {
 				if !slices.Contains(job.Needs, preActName) {
 					t.Errorf("Expected pre_activation in conclusion job needs, got: %v", job.Needs)
@@ -1763,13 +1993,13 @@ func TestConclusionJobActionsWritePermissionForDailyAICCache(t *testing.T) {
 }
 
 // TestConclusionJobIssuesWritePermissionDerivedFromConfig verifies that the conclusion job's
-// issues: write (and actions: read) permissions are derived from the resolved safe-outputs
+// issues: write permissions are derived from the resolved safe-outputs
 // configuration rather than emitted unconditionally. See github/gh-aw#54548.
 func TestConclusionJobIssuesWritePermissionDerivedFromConfig(t *testing.T) {
 	falseVal := "false"
 	falseTemplatable := TemplatableBool("false")
 
-	t.Run("no issues: write or actions: read when all conclusion issue-writing paths are disabled", func(t *testing.T) {
+	t.Run("no issues: write but actions: read for durations when issue-writing paths are disabled", func(t *testing.T) {
 		compiler := NewCompiler()
 		falseReportFailedJobs := TemplatableBool("false")
 		workflowData := &WorkflowData{
@@ -1793,9 +2023,8 @@ func TestConclusionJobIssuesWritePermissionDerivedFromConfig(t *testing.T) {
 		if strings.Contains(job.Permissions, "issues: write") {
 			t.Errorf("conclusion job should NOT have 'issues: write' when every issue-creating mechanism is disabled, got: %q", job.Permissions)
 		}
-		if strings.Contains(job.Permissions, "actions: read") {
-			t.Errorf("conclusion job should NOT have 'actions: read' when report-failed-jobs is disabled, got: %q", job.Permissions)
-		}
+		assert.Contains(t, job.Permissions, "actions: read")
+		assert.NotContains(t, strings.Join(job.Steps, ""), "GH_AW_JOB_DURATIONS:")
 	})
 
 	t.Run("no issues: write when default threat detection is enabled but issue-writing paths are disabled", func(t *testing.T) {
@@ -1823,9 +2052,7 @@ func TestConclusionJobIssuesWritePermissionDerivedFromConfig(t *testing.T) {
 		if strings.Contains(job.Permissions, "issues: write") {
 			t.Errorf("conclusion job should NOT have 'issues: write' when only threat detection is enabled, got: %q", job.Permissions)
 		}
-		if strings.Contains(job.Permissions, "actions: read") {
-			t.Errorf("conclusion job should NOT have 'actions: read' when report-failed-jobs is disabled, got: %q", job.Permissions)
-		}
+		assert.Contains(t, job.Permissions, "actions: read")
 		if !strings.Contains(job.Permissions, "contents: write") {
 			t.Errorf("conclusion job should preserve update-release permissions, got: %q", job.Permissions)
 		}
@@ -1911,14 +2138,19 @@ func TestConclusionJobIssuesWritePermissionDerivedFromConfig(t *testing.T) {
 func TestConclusionReportFailedJobsExpression(t *testing.T) {
 	compiler := NewCompiler()
 	reportFailedJobs := TemplatableBool("${{ inputs.report-failed-jobs }}")
-	steps := compiler.buildConclusionReportFailedJobsStep(&WorkflowData{
+	steps, err := compiler.buildConclusionReportFailedJobsStep(&WorkflowData{
 		Name: "Test Workflow",
 		SafeOutputs: &SafeOutputsConfig{
 			ReportFailedJobs: &reportFailedJobs,
 		},
 	}, string(constants.AgentJobName))
+	if err != nil {
+		t.Fatalf("Failed to build failed-job reporting step: %v", err)
+	}
 
 	output := strings.Join(steps, "")
+	assert.NotContains(t, output, "GH_AW_JOB_RESULTS:", "failed-job reporting inherits result-only metadata from the conclusion job environment")
+	assert.NotContains(t, output, "GH_AW_JOB_DISPLAY_NAMES:", "failed-job reporting inherits the final emitted-name inventory from the conclusion job environment")
 	if !strings.Contains(output, "GH_AW_REPORT_FAILED_JOBS: ${{ inputs.report-failed-jobs }}") {
 		t.Errorf("report-failed-jobs expression was not emitted unquoted: %q", output)
 	}

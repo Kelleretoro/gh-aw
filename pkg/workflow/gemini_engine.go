@@ -23,7 +23,7 @@ func NewGeminiEngine() *GeminiEngine {
 		BaseEngine: BaseEngine{
 			id:               "gemini",
 			displayName:      "Google Gemini CLI",
-			description:      "Google Gemini CLI with headless mode and LLM gateway support",
+			description:      "Deprecated Google Gemini CLI; use the experimental agy engine where supported",
 			experimental:     false,
 			ghSkillAgentName: "gemini-cli",
 			capabilities: EngineCapabilities{
@@ -259,6 +259,9 @@ func (e *GeminiEngine) GetExecutionSteps(workflowData *WorkflowData, logFile str
 
 		npmPathSetup := GetNpmBinPathSetup()
 		geminiCommandWithPath := fmt.Sprintf("%s && %s", npmPathSetup, geminiCommand)
+		if isNVXRuntime(workflowData) {
+			geminiCommandWithPath = fmt.Sprintf("%s && %s", GetMicroVMNpmCLIPathSetup(workflowData), geminiCommandWithPath)
+		}
 		// Add MCP CLI bin directory to PATH when cli-proxy is enabled
 		if mcpCLIPath := GetMCPCLIPathSetup(workflowData); mcpCLIPath != "" {
 			geminiCommandWithPath = fmt.Sprintf("%s && %s", mcpCLIPath, geminiCommandWithPath)
@@ -336,7 +339,7 @@ touch %s
 	// When the firewall (AWF) is enabled with --enable-api-proxy, point Gemini CLI at the
 	// LLM gateway sidecar instead of the real googleapis.com endpoint.
 	if firewallEnabled {
-		env["GEMINI_API_BASE_URL"] = fmt.Sprintf("http://host.docker.internal:%d", constants.GeminiLLMGatewayPort)
+		env["GEMINI_API_BASE_URL"] = llmGatewayBaseURL(constants.GeminiLLMGatewayPort, workflowData)
 
 		// Set git identity environment variables so the first git commit succeeds inside the
 		// container. AWF's --env-all forwards these to the container, ensuring git does not
@@ -347,6 +350,7 @@ touch %s
 	// Add safe outputs env
 	applySafeOutputEnvToMap(env, workflowData)
 	applyDefaultMaxAICreditsEnvToMap(env, workflowData)
+	applyAWFRuntimeAgentTimeoutEnvToMap(env, workflowData)
 
 	// Propagate W3C trace context so engine spans nest under the gh-aw.agent.setup span.
 	applyTraceContextEnvToMap(env)

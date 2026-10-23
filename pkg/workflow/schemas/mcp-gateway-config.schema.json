@@ -46,7 +46,7 @@
           "type": "string",
           "description": "Container image for the MCP server (e.g., 'ghcr.io/example/mcp-server:latest'). This field is required for stdio servers per MCP Gateway Specification section 4.1.2.",
           "minLength": 1,
-          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9./_-]*(:([a-zA-Z0-9._-]+|latest))?$"
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9./_-]*(:([a-zA-Z0-9._-]+|latest))?(@sha256:[a-fA-F0-9]{64})?$"
         },
         "entrypoint": {
           "type": "string",
@@ -128,6 +128,11 @@
           "format": "uri",
           "pattern": "^https?://.+",
           "minLength": 1
+        },
+        "caCertFile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "PEM CA file trusted only for this HTTP server, in addition to system trust. The launcher resolves the host file and mounts it read-only at a gateway-private path."
         },
         "headers": {
           "type": "object",

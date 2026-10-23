@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -264,6 +265,10 @@ func (c *Compiler) extractAgentSandboxConfig(agentVal any) *AgentSandboxConfig {
 		}
 	}
 
+	if digest, ok := agentObj["checksums-sha256"].(string); ok {
+		agentConfig.ChecksumsSHA256 = digest
+	}
+
 	// Extract platform (AWF platform.type override)
 	if platformVal, hasPlatform := agentObj["platform"]; hasPlatform {
 		if platformStr, ok := platformVal.(string); ok {
@@ -333,6 +338,16 @@ func (c *Compiler) extractAgentSandboxConfig(agentVal any) *AgentSandboxConfig {
 		}
 	}
 
+	if nvxVal, hasNVX := agentObj["nvx"]; hasNVX {
+		if encoded, err := json.Marshal(nvxVal); err == nil {
+			var nvxConfig AgentNVXConfig
+			if err := json.Unmarshal(encoded, &nvxConfig); err == nil {
+				agentConfig.NVX = &nvxConfig
+				frontmatterExtractionSecurityLog.Print("Extracted sandbox.agent.nvx configuration")
+			}
+		}
+	}
+
 	// Extract allow-host-ports (additional host TCP ports for the AWF sandbox)
 	if portsVal, hasPorts := agentObj["allow-host-ports"]; hasPorts {
 		if portsSlice, ok := portsVal.([]any); ok {
@@ -359,6 +374,7 @@ func (c *Compiler) extractAgentSandboxConfig(agentVal any) *AgentSandboxConfig {
 		if imagesObj, ok := imagesVal.(map[string]any); ok {
 			agentConfig.Images = make(map[string]string, len(imagesObj))
 			for role, value := range imagesObj {
+				role = sandboxImageRoleFromFrontmatter(role)
 				if valueStr, ok := value.(string); ok {
 					agentConfig.Images[role] = strings.TrimSpace(valueStr)
 					continue
@@ -407,7 +423,7 @@ func (c *Compiler) extractAgentSandboxConfig(agentVal any) *AgentSandboxConfig {
 		}
 	}
 
-	// Extract targets (per-provider API proxy target overrides, e.g. authHeader, extraHeaders)
+	// Extract targets (per-provider API proxy target overrides)
 	if targetsVal, hasTargets := agentObj["targets"]; hasTargets {
 		if targetsObj, ok := targetsVal.(map[string]any); ok {
 			agentConfig.Targets = make(map[string]*AgentAPIProxyTargetConfig)
@@ -417,10 +433,10 @@ func (c *Compiler) extractAgentSandboxConfig(agentVal any) *AgentSandboxConfig {
 					continue
 				}
 				targetConfig := &AgentAPIProxyTargetConfig{}
-				if authHeader, ok := targetObj["authHeader"].(string); ok {
+				if authHeader, ok := targetObj["auth-header"].(string); ok {
 					targetConfig.AuthHeader = authHeader
 				}
-				if extraHeaders, ok := targetObj["extraHeaders"].(map[string]any); ok {
+				if extraHeaders, ok := targetObj["extra-headers"].(map[string]any); ok {
 					targetConfig.ExtraHeaders = make(map[string]string)
 					for k, v := range extraHeaders {
 						if s, ok := v.(string); ok {
@@ -428,7 +444,7 @@ func (c *Compiler) extractAgentSandboxConfig(agentVal any) *AgentSandboxConfig {
 						}
 					}
 				}
-				if extraBodyFields, ok := targetObj["extraBodyFields"].(map[string]any); ok {
+				if extraBodyFields, ok := targetObj["extra-body-fields"].(map[string]any); ok {
 					targetConfig.ExtraBodyFields = make(map[string]string)
 					for k, v := range extraBodyFields {
 						if s, ok := v.(string); ok {
@@ -436,7 +452,7 @@ func (c *Compiler) extractAgentSandboxConfig(agentVal any) *AgentSandboxConfig {
 						}
 					}
 				}
-				if sessionId, ok := targetObj["sessionId"].(string); ok {
+				if sessionId, ok := targetObj["session-id"].(string); ok {
 					targetConfig.SessionId = sessionId
 				}
 				agentConfig.Targets[provider] = targetConfig
@@ -531,8 +547,8 @@ func (c *Compiler) extractMCPGatewayConfig(mcpVal any) *MCPGatewayRuntimeConfig 
 		}
 	}
 
-	// Extract entrypointArgs (for container only)
-	if entrypointArgsVal, hasEntrypointArgs := mcpObj["entrypointArgs"]; hasEntrypointArgs {
+	// Extract entrypoint-args (for container only)
+	if entrypointArgsVal, hasEntrypointArgs := mcpObj["entrypoint-args"]; hasEntrypointArgs {
 		if entrypointArgsSlice, ok := entrypointArgsVal.([]any); ok {
 			for _, arg := range entrypointArgsSlice {
 				if argStr, ok := arg.(string); ok {
@@ -606,18 +622,13 @@ func (c *Compiler) extractMCPGatewayConfig(mcpVal any) *MCPGatewayRuntimeConfig 
 		}
 	}
 
-	// Extract trustedBots / trusted-bots (additional bot identities to pass to the gateway)
-	for _, key := range []string{"trustedBots", "trusted-bots"} {
-		if trustedBotsVal, hasTrustedBots := mcpObj[key]; hasTrustedBots {
-			if trustedBotsSlice, ok := trustedBotsVal.([]any); ok {
-				for _, bot := range trustedBotsSlice {
-					if botStr, ok := bot.(string); ok {
-						mcpConfig.TrustedBots = append(mcpConfig.TrustedBots, botStr)
-					}
+	// Frontmatter uses trusted-bots; trustedBots is the generated gateway JSON field.
+	if trustedBotsVal, hasTrustedBots := mcpObj["trusted-bots"]; hasTrustedBots {
+		if trustedBotsSlice, ok := trustedBotsVal.([]any); ok {
+			for _, bot := range trustedBotsSlice {
+				if botStr, ok := bot.(string); ok {
+					mcpConfig.TrustedBots = append(mcpConfig.TrustedBots, botStr)
 				}
-			}
-			if len(mcpConfig.TrustedBots) > 0 {
-				break
 			}
 		}
 	}
@@ -660,8 +671,8 @@ func (c *Compiler) extractSRTConfig(configVal any) *SandboxRuntimeConfig { //nol
 		if networkObj, ok := networkVal.(map[string]any); ok {
 			netConfig := &SRTNetworkConfig{}
 
-			// Extract allowedDomains
-			if allowedDomains, hasAllowed := networkObj["allowedDomains"]; hasAllowed {
+			// Extract allowed-domains
+			if allowedDomains, hasAllowed := networkObj["allowed-domains"]; hasAllowed {
 				if domainsSlice, ok := allowedDomains.([]any); ok {
 					for _, domain := range domainsSlice {
 						if domainStr, ok := domain.(string); ok {
@@ -671,8 +682,8 @@ func (c *Compiler) extractSRTConfig(configVal any) *SandboxRuntimeConfig { //nol
 				}
 			}
 
-			// Extract blockedDomains
-			if blockedDomains, hasBlocked := networkObj["blockedDomains"]; hasBlocked {
+			// Extract blocked-domains
+			if blockedDomains, hasBlocked := networkObj["blocked-domains"]; hasBlocked {
 				if domainsSlice, ok := blockedDomains.([]any); ok {
 					for _, domain := range domainsSlice {
 						if domainStr, ok := domain.(string); ok {
@@ -682,8 +693,8 @@ func (c *Compiler) extractSRTConfig(configVal any) *SandboxRuntimeConfig { //nol
 				}
 			}
 
-			// Extract allowUnixSockets
-			if unixSockets, hasUnixSockets := networkObj["allowUnixSockets"]; hasUnixSockets {
+			// Extract allow-unix-sockets
+			if unixSockets, hasUnixSockets := networkObj["allow-unix-sockets"]; hasUnixSockets {
 				if socketsSlice, ok := unixSockets.([]any); ok {
 					for _, socket := range socketsSlice {
 						if socketStr, ok := socket.(string); ok {
@@ -693,15 +704,15 @@ func (c *Compiler) extractSRTConfig(configVal any) *SandboxRuntimeConfig { //nol
 				}
 			}
 
-			// Extract allowLocalBinding
-			if allowLocalBinding, hasAllowLocalBinding := networkObj["allowLocalBinding"]; hasAllowLocalBinding {
+			// Extract allow-local-binding
+			if allowLocalBinding, hasAllowLocalBinding := networkObj["allow-local-binding"]; hasAllowLocalBinding {
 				if bindingBool, ok := allowLocalBinding.(bool); ok {
 					netConfig.AllowLocalBinding = bindingBool
 				}
 			}
 
-			// Extract allowAllUnixSockets
-			if allowAllUnixSockets, hasAllowAllUnixSockets := networkObj["allowAllUnixSockets"]; hasAllowAllUnixSockets {
+			// Extract allow-all-unix-sockets
+			if allowAllUnixSockets, hasAllowAllUnixSockets := networkObj["allow-all-unix-sockets"]; hasAllowAllUnixSockets {
 				if unixSocketsBool, ok := allowAllUnixSockets.(bool); ok {
 					netConfig.AllowAllUnixSockets = unixSocketsBool
 				}
@@ -716,8 +727,8 @@ func (c *Compiler) extractSRTConfig(configVal any) *SandboxRuntimeConfig { //nol
 		if filesystemObj, ok := filesystemVal.(map[string]any); ok {
 			fsConfig := &SRTFilesystemConfig{}
 
-			// Extract denyRead
-			if denyRead, hasDenyRead := filesystemObj["denyRead"]; hasDenyRead {
+			// Extract deny-read
+			if denyRead, hasDenyRead := filesystemObj["deny-read"]; hasDenyRead {
 				if pathsSlice, ok := denyRead.([]any); ok {
 					fsConfig.DenyRead = []string{}
 					for _, path := range pathsSlice {
@@ -728,8 +739,8 @@ func (c *Compiler) extractSRTConfig(configVal any) *SandboxRuntimeConfig { //nol
 				}
 			}
 
-			// Extract allowWrite
-			if allowWrite, hasAllowWrite := filesystemObj["allowWrite"]; hasAllowWrite {
+			// Extract allow-write
+			if allowWrite, hasAllowWrite := filesystemObj["allow-write"]; hasAllowWrite {
 				if pathsSlice, ok := allowWrite.([]any); ok {
 					fsConfig.AllowWrite = []string{}
 					for _, path := range pathsSlice {
@@ -740,8 +751,8 @@ func (c *Compiler) extractSRTConfig(configVal any) *SandboxRuntimeConfig { //nol
 				}
 			}
 
-			// Extract denyWrite
-			if denyWrite, hasDenyWrite := filesystemObj["denyWrite"]; hasDenyWrite {
+			// Extract deny-write
+			if denyWrite, hasDenyWrite := filesystemObj["deny-write"]; hasDenyWrite {
 				if pathsSlice, ok := denyWrite.([]any); ok {
 					fsConfig.DenyWrite = []string{}
 					for _, path := range pathsSlice {
@@ -756,8 +767,8 @@ func (c *Compiler) extractSRTConfig(configVal any) *SandboxRuntimeConfig { //nol
 		}
 	}
 
-	// Extract ignoreViolations
-	if ignoreViolations, hasIgnoreViolations := configObj["ignoreViolations"]; hasIgnoreViolations {
+	// Extract ignore-violations
+	if ignoreViolations, hasIgnoreViolations := configObj["ignore-violations"]; hasIgnoreViolations {
 		if violationsObj, ok := ignoreViolations.(map[string]any); ok {
 			violations := make(map[string][]string)
 			for key, value := range violationsObj {
@@ -775,8 +786,8 @@ func (c *Compiler) extractSRTConfig(configVal any) *SandboxRuntimeConfig { //nol
 		}
 	}
 
-	// Extract enableWeakerNestedSandbox
-	if enableWeakerNestedSandbox, hasEnableWeaker := configObj["enableWeakerNestedSandbox"]; hasEnableWeaker {
+	// Extract enable-weaker-nested-sandbox
+	if enableWeakerNestedSandbox, hasEnableWeaker := configObj["enable-weaker-nested-sandbox"]; hasEnableWeaker {
 		if weakerBool, ok := enableWeakerNestedSandbox.(bool); ok {
 			srtConfig.EnableWeakerNestedSandbox = weakerBool
 		}

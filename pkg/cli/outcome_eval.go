@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +17,6 @@ import (
 	"github.com/github/gh-aw/pkg/intent"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/repoutil"
-	"github.com/github/gh-aw/pkg/workflow"
 )
 
 var outcomeEvalLog = logger.New("cli:outcome_eval")
@@ -26,6 +27,7 @@ var objectiveMappingGHAPIGraphQL = ghAPIGraphQL
 // OutcomeReport is the result of evaluating one safe output item.
 type OutcomeReport struct {
 	OutcomeEvaluation
+	ItemID             string   `json:"item_id,omitempty" console:"-"`
 	Type               string   `json:"type" console:"header:Type"`
 	ObjectURL          string   `json:"object_url,omitempty" console:"header:URL,omitempty"`
 	ObjectNumber       int      `json:"object_number,omitempty" console:"header:#,omitempty"`
@@ -53,6 +55,7 @@ type OutcomeSummary struct {
 	Rejected                int               `json:"rejected" console:"header:Rejected"`
 	Ignored                 int               `json:"ignored" console:"header:Ignored"`
 	Pending                 int               `json:"pending" console:"header:Pending"`
+	Unknown                 int               `json:"unknown" console:"header:Unknown"`
 	AcceptedStrong          int               `json:"accepted_strong,omitempty"`
 	AcceptedMedium          int               `json:"accepted_medium,omitempty"`
 	AcceptedWeak            int               `json:"accepted_weak,omitempty"`
@@ -103,6 +106,7 @@ var outcomeEvaluators = map[string]outcomeEvaluator{
 // EvaluateOutcomes checks the current state of all safe output items from a run.
 // The mapping parameter is required and defines how labels map to objective values.
 func EvaluateOutcomes(ctx context.Context, items []CreatedItemReport, repoOverride string, mapping *github.ObjectiveMapping) []OutcomeReport {
+	ctx = withOutcomeAPICache(ctx)
 	outcomeEvalLog.Printf("Evaluating outcomes: items=%d, repo_override=%q", len(items), repoOverride)
 	if repoOverride == "" {
 		slug, err := GetCurrentRepoSlug()
@@ -113,24 +117,24 @@ func EvaluateOutcomes(ctx context.Context, items []CreatedItemReport, repoOverri
 	}
 
 	reports := make([]OutcomeReport, 0, len(items))
+	occurrences := make(map[[sha256.Size]byte]int)
 	skipped := 0
 	for _, item := range items {
-		if item.Type == "noop" || item.Type == "missing_tool" || item.Type == "missing_data" || item.Type == "report_incomplete" {
+		if item.Type == "noop" || item.Type == "report_missing_tool" || item.Type == "missing_tool" || item.Type == "report_missing_data" || item.Type == "missing_data" || item.Type == "report_incomplete" {
 			skipped++
 			continue
 		}
-		repo := item.Repo
-		if repo == "" {
-			repo = repoOverride
-		}
+		repo := resolveItemRepo(item, repoOverride)
 		eval, ok := outcomeEvaluators[item.Type]
 		if !ok {
 			outcomeEvalLog.Printf("No evaluator registered for type %q, using generic sticky", item.Type)
 			eval = evalGenericSticky
 		}
+		itemID := outcomeItemID(item, occurrences)
 		report := eval(ctx, item, repo)
+		report.ItemID = itemID
 		report.CreatedAt = item.Timestamp
-		report.CheckedAt = time.Now().UTC().Format(time.RFC3339)
+		report.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		report.OutcomeEvaluation = normalizeOutcomeEvaluation(report)
 
 		// Compute objective value from issue/PR labels
@@ -142,6 +146,18 @@ func EvaluateOutcomes(ctx context.Context, items []CreatedItemReport, repoOverri
 	return reports
 }
 
+func outcomeItemID(item CreatedItemReport, occurrences map[[sha256.Size]byte]int) string {
+	source, err := json.Marshal(item)
+	if err != nil {
+		outcomeEvalLog.Printf("Cannot identify safe output item: %v", err)
+		return ""
+	}
+	digest := sha256.Sum256(source)
+	// Only indistinguishable source records need an occurrence number.
+	occurrences[digest]++
+	return fmt.Sprintf("item-sha256-%x-%d", digest, occurrences[digest])
+}
+
 // ComputeOutcomeSummary aggregates outcome reports into a summary.
 // The mapping parameter is required and defines how labels map to objective values.
 func ComputeOutcomeSummary(reports []OutcomeReport, mapping *github.ObjectiveMapping) OutcomeSummary {
@@ -149,36 +165,7 @@ func ComputeOutcomeSummary(reports []OutcomeReport, mapping *github.ObjectiveMap
 	var times []float64
 	for _, r := range reports {
 		eval := normalizeOutcomeEvaluation(r)
-		switch eval.OutcomeStatus {
-		case OutcomeStatusAccepted:
-			s.Accepted++
-			switch eval.EvidenceStrength {
-			case EvidenceStrong:
-				s.AcceptedStrong++
-			case EvidenceMedium:
-				s.AcceptedMedium++
-			case EvidenceWeak:
-				s.AcceptedWeak++
-			}
-			if r.ZeroTouch {
-				s.ZeroTouch++
-			}
-		case OutcomeStatusRejected:
-			s.Rejected++
-		case OutcomeStatusIgnored:
-			s.Ignored++
-		case OutcomeStatusPending:
-			s.Pending++
-		}
-		if eval.Signal == "target_exists_only" {
-			s.FallbackExistsOnlyCount++
-		}
-		switch eval.OutcomeStatus {
-		case OutcomeStatusLifecycle, OutcomeStatusLifecycleClose:
-			s.Lifecycle++
-		case OutcomeStatusError:
-			s.Errors++
-		}
+		s.countOutcome(r, eval)
 		if r.TimeToOutcomeHours > 0 {
 			times = append(times, r.TimeToOutcomeHours)
 		}
@@ -217,9 +204,9 @@ func ComputeOutcomeSummary(reports []OutcomeReport, mapping *github.ObjectiveMap
 // escapeOwnerRepo URL-path-encodes each component of an "owner/repo" string to
 // prevent path traversal when the value is interpolated into an API URL.
 func escapeOwnerRepo(ownerRepo string) string {
-	parts := strings.SplitN(ownerRepo, "/", 2)
-	if len(parts) == 2 {
-		return url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1])
+	owner, repo, found := strings.Cut(ownerRepo, "/")
+	if found {
+		return strings.Join([]string{url.PathEscape(owner), url.PathEscape(repo)}, "/")
 	}
 	return url.PathEscape(ownerRepo)
 }
@@ -249,23 +236,12 @@ func ghAPIGet(ctx context.Context, endpoint string, repo string) (map[string]any
 	if err := validateAPIEndpoint(endpoint); err != nil {
 		return nil, fmt.Errorf("invalid endpoint %q: %w", endpoint, err)
 	}
-	ownerRepo, host := repoutil.NormalizeRepoForAPI(repo)
-	outcomeEvalLog.Printf("gh api GET: repo=%s, endpoint=%s, host=%q", ownerRepo, endpoint, host)
+	ownerRepo, _ := repoutil.NormalizeRepoForAPI(repo)
 	args := []string{"api", fmt.Sprintf("repos/%s/%s", escapeOwnerRepo(ownerRepo), escapeEndpoint(endpoint))}
-	var output []byte
-	var err error
-	if host != "" {
-		output, err = workflow.RunGHContextWithHost(ctx, "Checking outcome...", host, args...)
-	} else {
-		output, err = workflow.RunGH("Checking outcome...", args...)
-	}
+	result, err := requestOutcomeJSON[map[string]any](ctx, repo, args)
 	if err != nil {
 		outcomeEvalLog.Printf("gh api GET failed: endpoint=%s, err=%v", endpoint, err)
 		return nil, fmt.Errorf("gh api %s: %w", endpoint, err)
-	}
-	var result map[string]any
-	if err := json.Unmarshal(output, &result); err != nil {
-		return nil, fmt.Errorf("parsing response for %s: %w", endpoint, err)
 	}
 	return result, nil
 }
@@ -275,21 +251,22 @@ func ghAPIGetArray(ctx context.Context, endpoint string, repo string) ([]map[str
 	if err := validateAPIEndpoint(endpoint); err != nil {
 		return nil, fmt.Errorf("invalid endpoint %q: %w", endpoint, err)
 	}
-	ownerRepo, host := repoutil.NormalizeRepoForAPI(repo)
-	args := []string{"api", fmt.Sprintf("repos/%s/%s", escapeOwnerRepo(ownerRepo), escapeEndpoint(endpoint))}
-	var output []byte
-	var err error
-	if host != "" {
-		output, err = workflow.RunGHContextWithHost(ctx, "Checking outcome...", host, args...)
-	} else {
-		output, err = workflow.RunGH("Checking outcome...", args...)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
+	if labels, ok := outcomeCachedLabels(ctx, endpoint, repo); ok {
+		return labels, nil
+	}
+	ownerRepo, _ := repoutil.NormalizeRepoForAPI(repo)
+	args := []string{"api", fmt.Sprintf("repos/%s/%s", escapeOwnerRepo(ownerRepo), escapeEndpoint(endpoint)),
+		"--method", "GET", "-f", "per_page=100", "--paginate", "--slurp"}
+	pages, err := requestOutcomeJSON[[][]map[string]any](ctx, repo, args)
 	if err != nil {
 		return nil, fmt.Errorf("gh api %s: %w", endpoint, err)
 	}
 	var result []map[string]any
-	if err := json.Unmarshal(output, &result); err != nil {
-		return nil, fmt.Errorf("parsing response for %s: %w", endpoint, err)
+	for _, page := range pages {
+		result = append(result, page...)
 	}
 	return result, nil
 }
@@ -320,23 +297,13 @@ func buildGraphQLArgs(query string, variables map[string]any) ([]string, error) 
 // ghAPIGraphQL calls the GitHub GraphQL API via gh cli and returns the parsed JSON.
 // Values are passed as GraphQL variables rather than interpolated into the query text.
 func ghAPIGraphQL(ctx context.Context, query string, variables map[string]any, repo string) (map[string]any, error) {
-	ownerRepo, host := repoutil.NormalizeRepoForAPI(repo)
 	args, err := buildGraphQLArgs(query, variables)
 	if err != nil {
 		return nil, err
 	}
-	var output []byte
-	if host != "" {
-		output, err = workflow.RunGHContextWithHost(ctx, "Checking outcome...", host, args...)
-	} else {
-		output, err = workflow.RunGH("Checking outcome...", args...)
-	}
+	result, err := requestOutcomeJSON[map[string]any](ctx, repo, args)
 	if err != nil {
 		return nil, fmt.Errorf("gh api graphql: %w", err)
-	}
-	var result map[string]any
-	if err := json.Unmarshal(output, &result); err != nil {
-		return nil, fmt.Errorf("parsing graphql response for %s: %w", ownerRepo, err)
 	}
 	return result, nil
 }
@@ -354,12 +321,17 @@ func timeBetween(from, to string) float64 {
 // parseNumberFromURL extracts a number from a GitHub URL like
 // https://github.com/owner/repo/pull/42 or .../issues/108
 func parseNumberFromURL(url string) int {
-	parts := strings.Split(url, "/")
-	for i := range slices.Backward(parts) {
-		var n int
-		if _, err := fmt.Sscanf(parts[i], "%d", &n); err == nil && n > 0 {
-			return n
+	clean, _, _ := strings.Cut(url, "#")
+	clean, _, _ = strings.Cut(clean, "?")
+	nextIsNumber := false
+	for part := range strings.SplitSeq(clean, "/") {
+		if nextIsNumber {
+			n, err := strconv.Atoi(part)
+			if err == nil && n > 0 {
+				return n
+			}
 		}
+		nextIsNumber = part == "issues" || part == "pull" || part == "discussions"
 	}
 	return 0
 }
@@ -372,29 +344,49 @@ func parseRepoFromURL(url string) string {
 	if !found {
 		return ""
 	}
-	parts := strings.SplitN(rest, "/", 3)
-	if len(parts) >= 2 {
-		return parts[0] + "/" + parts[1]
+	owner, tail, found := strings.Cut(rest, "/")
+	if found {
+		repo, _, _ := strings.Cut(tail, "/")
+		return strings.Join([]string{owner, repo}, "/")
 	}
 	return ""
 }
 
 // isBotUser returns true if the login looks like a bot account.
 func isBotUser(login string) bool {
+	login = strings.ToLower(login)
 	return strings.HasSuffix(login, "[bot]") || login == "github-actions" || login == "copilot-swe-agent"
 }
 
-// resolveItemRepo returns the repo to use for API calls, preferring the item's repo field.
+// resolveItemRepo prefers the item's repository, inheriting its URL or run host when hostless.
 func resolveItemRepo(item CreatedItemReport, repoOverride string) string {
-	if item.Repo != "" {
+	repo, host := repoutil.NormalizeRepoForAPI(item.Repo)
+	if host != "" {
 		return item.Repo
 	}
-	if item.URL != "" {
-		if r := parseRepoFromURL(item.URL); r != "" {
-			return r
+	_, host = repoutil.NormalizeRepoForAPI(repoOverride)
+	if objectURL, err := url.Parse(item.URL); err == nil && objectURL.Host != "" &&
+		(objectURL.Scheme == "https" || objectURL.Scheme == "http") {
+		owner, rest, found := strings.Cut(strings.Trim(objectURL.Path, "/"), "/")
+		repository, _, _ := strings.Cut(rest, "/")
+		if found && owner != "" && repository != "" {
+			if repo == "" {
+				repo = strings.Join([]string{owner, repository}, "/")
+			}
+			// An explicit object URL can target a different host from the run.
+			if objectURL.Host != "github.com" || host != "" {
+				return strings.Join([]string{objectURL.Host, repo}, "/")
+			}
+			return repo
 		}
 	}
-	return repoOverride
+	if repo == "" {
+		return repoOverride
+	}
+	if host != "" {
+		return strings.Join([]string{host, repo}, "/")
+	}
+	return repo
 }
 
 // resolveItemNumber returns the object number, trying item.Number first then URL parsing.
@@ -422,7 +414,7 @@ func enrichOutcomeWithObjectiveValue(ctx context.Context, report *OutcomeReport,
 	}
 
 	// Skip types that don't have associated labels on issues/PRs
-	if report.Type == "noop" || report.Type == "missing_tool" || report.Type == "missing_data" || report.Type == "report_incomplete" {
+	if report.Type == "noop" || report.Type == "report_missing_tool" || report.Type == "missing_tool" || report.Type == "report_missing_data" || report.Type == "missing_data" || report.Type == "report_incomplete" {
 		return
 	}
 
@@ -530,15 +522,15 @@ func loadPullRequestIntentData(ctx context.Context, report OutcomeReport, repo s
 	if err != nil {
 		return intent.PullRequestData{}, err
 	}
-	data, _ := result["data"].(map[string]any)
-	repository, _ := data["repository"].(map[string]any)
-	pullRequest, _ := repository["pullRequest"].(map[string]any)
+	data := outcomeValue[map[string]any](result["data"])
+	repository := outcomeValue[map[string]any](data["repository"])
+	pullRequest := outcomeValue[map[string]any](repository["pullRequest"])
 	prData := intent.PullRequestData{URL: report.ObjectURL}
 	if nodeID, ok := pullRequest["id"].(string); ok {
 		prData.NodeID = nodeID
 	}
-	closingRefs, _ := pullRequest["closingIssuesReferences"].(map[string]any)
-	nodes, _ := closingRefs["nodes"].([]any)
+	closingRefs := outcomeValue[map[string]any](pullRequest["closingIssuesReferences"])
+	nodes := outcomeValue[[]any](closingRefs["nodes"])
 	if len(nodes) == 0 {
 		labels, labelErr := objectiveMappingGHAPIGetArray(ctx, fmt.Sprintf("issues/%d/labels", report.ObjectNumber), repo)
 		if labelErr != nil {
@@ -548,30 +540,14 @@ func loadPullRequestIntentData(ctx context.Context, report OutcomeReport, repo s
 		return prData, nil
 	}
 
-	prData.ClosingIssues = make([]intent.RootReference, 0, len(nodes))
-	for _, node := range nodes {
-		rootNode, _ := node.(map[string]any)
-		root := intent.RootReference{Type: "issue"}
-		if nodeID, ok := rootNode["id"].(string); ok {
-			root.NodeID = nodeID
-		}
-		if url, ok := rootNode["url"].(string); ok {
-			root.URL = url
-		}
-		if labels, ok := rootNode["labels"].(map[string]any); ok {
-			if labelNodes, ok := labels["nodes"].([]any); ok {
-				root.Labels = labelsToStringsFromNodes(labelNodes)
-			}
-		}
-		prData.ClosingIssues = append(prData.ClosingIssues, root)
-	}
+	prData.ClosingIssues = outcomeClosingIssueReferences(nodes)
 
 	return prData, nil
 }
 
 func labelsToStringsFromNodes(nodes []any) []string {
 	return collectLabelNames(nodes, func(node any) (string, bool) {
-		labelMap, _ := node.(map[string]any)
+		labelMap := outcomeValue[map[string]any](node)
 		name, ok := labelMap["name"].(string)
 		return name, ok
 	})
@@ -596,4 +572,63 @@ func collectLabelNames[T any](labels []T, nameOf func(T) (string, bool)) []strin
 		}
 	}
 	return result
+}
+
+func (s *OutcomeSummary) countOutcome(r OutcomeReport, eval OutcomeEvaluation) {
+	switch eval.OutcomeStatus {
+	case OutcomeStatusAccepted:
+		s.Accepted++
+		switch eval.EvidenceStrength {
+		case EvidenceStrong:
+			s.AcceptedStrong++
+		case EvidenceMedium:
+			s.AcceptedMedium++
+		case EvidenceWeak:
+			s.AcceptedWeak++
+		}
+		if r.ZeroTouch {
+			s.ZeroTouch++
+		}
+	case OutcomeStatusRejected:
+		s.Rejected++
+	case OutcomeStatusIgnored:
+		s.Ignored++
+	case OutcomeStatusPending:
+		s.Pending++
+	case OutcomeStatusUnknown:
+		s.Unknown++
+	}
+	if eval.Signal == "target_exists_only" {
+		s.FallbackExistsOnlyCount++
+	}
+	switch eval.OutcomeStatus {
+	case OutcomeStatusLifecycle, OutcomeStatusLifecycleClose:
+		s.Lifecycle++
+	case OutcomeStatusError:
+		s.Errors++
+	}
+
+}
+
+func outcomeClosingIssueReferences(nodes []any) []intent.RootReference {
+	var prData intent.PullRequestData
+	prData.ClosingIssues = make([]intent.RootReference, 0, len(nodes))
+	for _, node := range nodes {
+		rootNode := outcomeValue[map[string]any](node)
+		root := intent.RootReference{Type: "issue"}
+		if nodeID, ok := rootNode["id"].(string); ok {
+			root.NodeID = nodeID
+		}
+		if url, ok := rootNode["url"].(string); ok {
+			root.URL = url
+		}
+		if labels, ok := rootNode["labels"].(map[string]any); ok {
+			if labelNodes, ok := labels["nodes"].([]any); ok {
+				root.Labels = labelsToStringsFromNodes(labelNodes)
+			}
+		}
+		prData.ClosingIssues = append(prData.ClosingIssues, root)
+	}
+
+	return prData.ClosingIssues
 }

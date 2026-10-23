@@ -18,6 +18,8 @@ safe-outputs:
 
 This separation provides an audit trail, limits blast radius if an agent misbehaves, supports compliance approval gates, and defends against prompt injection. Safe outputs add one extra job but provide critical safety guarantees.
 
+The compiler adds `actions: read` to support its generated workflow freshness check. By contrast, `copilot-requests: write` is an authored top-level permission that workflow authors opt into for organization-billed Copilot inference; it is not added as a compiler default.
+
 ## Permission Scopes
 
 Key read permission scopes include:
@@ -26,7 +28,7 @@ Key read permission scopes include:
 - `issues` (issue management)
 - `pull-requests` (PR management)
 - `discussions` (discussions and comments)
-- `actions` (workflow control)
+- `actions` (workflow control; gh-aw uses `actions: read` for its generated workflow freshness check)
 - `checks` (checks and statuses)
 - `deployments` (deployment management)
 - `packages` (package management)
@@ -79,6 +81,10 @@ permissions:
 ```
 
 This permission does not require safe-outputs.
+
+The compiler emits an informational reminder to validate OIDC audiences and
+cloud-provider trust policies. The reminder does not count as a warning or
+block warnings-as-errors validation, including `gh aw compile --dry-run`.
 
 ### Special Permission: `copilot-requests: write`
 

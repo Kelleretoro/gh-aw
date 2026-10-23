@@ -62,6 +62,9 @@ var mcpRendererLog = logger.New("workflow:mcp_renderer")
 // for built-in tool names and typical custom mcp-server keys.
 var safeMCPServerIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
+// Trusted bot identities are emitted into the same unquoted heredoc as server IDs.
+var safeMCPTrustedBotRE = regexp.MustCompile(`^[A-Za-z0-9_-]+(\[bot\])?$`)
+
 // isSafeMCPServerID reports whether id can be safely embedded inside an unquoted bash heredoc
 // without triggering shell expansion.
 func isSafeMCPServerID(id string) bool {
@@ -161,7 +164,10 @@ func RenderJSONMCPConfig( //nolint:largefunc // Existing renderer keeps MCP JSON
 
 		switch toolName {
 		case "github":
-			githubTool, _ := tools["github"].(map[string]any)
+			githubTool, ok := tools["github"].(map[string]any)
+			if !ok {
+				githubTool = nil
+			}
 			options.Renderers.RenderGitHub(&configBuilder, githubTool, isLast, workflowData)
 		case "cache-memory":
 			options.Renderers.RenderCacheMemory(&configBuilder, isLast, workflowData)
@@ -169,6 +175,14 @@ func RenderJSONMCPConfig( //nolint:largefunc // Existing renderer keeps MCP JSON
 			options.Renderers.RenderAgenticWorkflows(&configBuilder, isLast)
 		case "safe-outputs":
 			options.Renderers.RenderSafeOutputs(&configBuilder, isLast, workflowData)
+		case "ledger":
+			if options.Renderers.RenderLedger != nil {
+				options.Renderers.RenderLedger(&configBuilder, isLast, workflowData)
+			}
+		case "work-queue":
+			if options.Renderers.RenderWorkQueue != nil {
+				options.Renderers.RenderWorkQueue(&configBuilder, isLast, workflowData)
+			}
 		case "mcp-scripts":
 			if options.Renderers.RenderMCPScripts != nil {
 				options.Renderers.RenderMCPScripts(&configBuilder, workflowData.MCPScripts, isLast)
@@ -216,6 +230,9 @@ func RenderJSONMCPConfig( //nolint:largefunc // Existing renderer keeps MCP JSON
 		if len(options.GatewayConfig.TrustedBots) > 0 {
 			configBuilder.WriteString(",\n              \"trustedBots\": [")
 			for i, bot := range options.GatewayConfig.TrustedBots {
+				if !safeMCPTrustedBotRE.MatchString(bot) {
+					return fmt.Errorf("sandbox.mcp.trusted-bots: invalid identity %q; use only ASCII letters, digits, hyphens, or underscores, optionally followed by [bot] (for example, github-actions[bot])", bot)
+				}
 				if i > 0 {
 					configBuilder.WriteString(", ")
 				}

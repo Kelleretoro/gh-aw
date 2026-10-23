@@ -1,8 +1,9 @@
 # Dockerfile for GitHub Agentic Workflows compiler
-# Provides a minimal container with gh-aw, gh CLI, git, and jq
+# Provides gh-aw, gh CLI, and native strict compilation dependencies
 
-# Use Alpine for minimal size (official distribution)
-FROM alpine:3.24
+# Use Google's Docker Hub mirror to avoid unauthenticated pull limits and auth outages.
+# Keep the official Alpine digest so the mirrored image is identical.
+FROM mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # Install required dependencies
 RUN apk add --no-cache \
@@ -11,7 +12,11 @@ RUN apk add --no-cache \
     bash \
     curl \
     ca-certificates \
+    shellcheck \
     github-cli
+
+# Fail the image build if strict compilation's native scanner is unavailable.
+RUN shellcheck --version
 
 # Accept build argument for binary name (defaults to linux-amd64)
 ARG BINARY=gh-aw-linux-amd64

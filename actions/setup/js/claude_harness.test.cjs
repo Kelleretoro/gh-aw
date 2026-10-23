@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { spawnSync } from "child_process";
 import { createRequire } from "module";
 import fs from "fs";
@@ -28,6 +28,9 @@ const {
   buildMissingToolPermissionIssuePayload,
   resolveRetryConfig,
   resolveStartupRetryLimit,
+  buildClaudeChildEnv,
+  removeClaudeRoutingOverrides,
+  applyClaudeSettingsEnv,
 } = require("./claude_harness.cjs");
 
 const agentTempDir = "/tmp/gh-aw/agent";
@@ -36,6 +39,7 @@ const harnessChildEnv = {
   GH_AW_HARNESS_INITIAL_DELAY_MS: "1",
   GH_AW_HARNESS_MAX_DELAY_MS: "1",
   GH_AW_SKIP_REFLECT: "true",
+  GH_AW_CLAUDE_ALLOW_FRESH_RESTART: "true",
 };
 
 function makeHarnessTempDir(name) {
@@ -43,7 +47,7 @@ function makeHarnessTempDir(name) {
   return fs.mkdtempSync(path.join(agentTempDir, name));
 }
 
-function runHarnessWithStub({ stubScript, prompt = "fix the bug", extraArgs = [], extraEnv = {} }) {
+function runHarnessWithStub({ stubScript, prompt = "fix the bug", extraArgs = [], extraEnv = {}, reflectData }) {
   const tempDir = makeHarnessTempDir("claude-harness-");
   const stubPath = path.join(tempDir, "stub.cjs");
   const promptPath = path.join(tempDir, "prompt.txt");
@@ -51,40 +55,434 @@ function runHarnessWithStub({ stubScript, prompt = "fix the bug", extraArgs = []
   fs.writeFileSync(stubPath, stubScript, "utf8");
   fs.writeFileSync(promptPath, prompt, "utf8");
 
-  const result = spawnSync(process.execPath, ["claude_harness.cjs", process.execPath, stubPath, "--print", ...extraArgs, "--prompt-file", promptPath], {
-    cwd: path.dirname(require.resolve("./claude_harness.cjs")),
-    env: { ...harnessChildEnv, ...extraEnv, CLAUDE_HARNESS_STUB_CALLS: callsPath },
-    encoding: "utf8",
-    timeout: 45000,
-  });
-  const calls = fs
-    .readFileSync(callsPath, "utf8")
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map(line => JSON.parse(line));
-  return { result, calls };
+  const env = { ...harnessChildEnv, GH_AW_AWF_CONFIG_PATH: path.join(tempDir, "missing-awf-config.json"), ...extraEnv, CLAUDE_HARNESS_STUB_CALLS: callsPath };
+  try {
+    if (reflectData) {
+      const preloadPath = path.join(tempDir, "reflect-fixture.cjs");
+      fs.writeFileSync(preloadPath, `require(${JSON.stringify(require.resolve("./awf_reflect.cjs"))}).fetchAWFReflect = async () => ({ ok: true, reflectData: ${JSON.stringify(reflectData)} });`, "utf8");
+      env.NODE_OPTIONS = `${env.NODE_OPTIONS || ""} --require=${JSON.stringify(preloadPath)}`;
+    }
+    const result = spawnSync(process.execPath, ["claude_harness.cjs", process.execPath, stubPath, "--print", ...extraArgs, "--prompt-file", promptPath], {
+      cwd: path.dirname(require.resolve("./claude_harness.cjs")),
+      env,
+      encoding: "utf8",
+      timeout: 45000,
+    });
+    const calls = fs.existsSync(callsPath)
+      ? fs
+          .readFileSync(callsPath, "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map(line => JSON.parse(line))
+      : [];
+    return { result, calls };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 describe("claude_harness.cjs", () => {
+  describe("threat detection model aliases", () => {
+    const reflectData = {
+      endpoints: [{ provider: "anthropic", configured: true, port: 10001, models: ["claude-haiku-4-5-20251001", "claude-sonnet-5"] }],
+      model_aliases: { detection: ["small"], small: ["anthropic/claude-haiku-*"] },
+    };
+    const stubScript = `
+      const fs = require("fs");
+      fs.appendFileSync(process.env.CLAUDE_HARNESS_STUB_CALLS, JSON.stringify({
+        args: process.argv.slice(2), model: process.env.ANTHROPIC_MODEL
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done" }) + "\\n");
+    `;
+
+    it.each([{ extraArgs: ["--model", "detection"] }, { extraArgs: ["--model=detection"] }])("resolves $extraArgs before invoking Claude, including CLI overrides", ({ extraArgs }) => {
+      for (const model of ["detection", "claude-sonnet-5", ""]) {
+        const { result, calls } = runHarnessWithStub({
+          stubScript,
+          reflectData,
+          extraArgs,
+          extraEnv: { GH_AW_PHASE: "detection", GH_AW_LLM_PROVIDER: "anthropic", ANTHROPIC_MODEL: model, GH_AW_SAFE_OUTPUTS: "", GH_AW_HARNESS_MAX_RETRIES: "0" },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(calls).toHaveLength(1);
+        expect(calls[0].model).toBe("claude-haiku-4-5-20251001");
+        expect(calls[0].args).toContainEqual(expect.stringContaining("claude-haiku-4-5-20251001"));
+        expect(calls[0].args.join(" ")).not.toContain("detection");
+      }
+    });
+
+    it.each([
+      { extraArgs: [], model: "detection", resolved: "claude-haiku-4-5-20251001" },
+      { extraArgs: ["--model", "claude-sonnet-5"], model: "detection", resolved: "claude-sonnet-5" },
+      { extraArgs: ["--model=claude-sonnet-5"], model: "detection", resolved: "claude-sonnet-5" },
+      { extraArgs: ["--", "--model", "literal-prompt"], model: "detection", resolved: "claude-haiku-4-5-20251001" },
+    ])("preserves explicit models and option boundaries: $extraArgs", ({ extraArgs, model, resolved }) => {
+      const { result, calls } = runHarnessWithStub({
+        stubScript,
+        reflectData,
+        extraArgs,
+        extraEnv: { GH_AW_PHASE: "detection", GH_AW_LLM_PROVIDER: "anthropic", ANTHROPIC_MODEL: model, GH_AW_SAFE_OUTPUTS: "", GH_AW_HARNESS_MAX_RETRIES: "0" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ model: resolved, args: ["--print", ...extraArgs] });
+    });
+
+    it("does not launch Claude when the detection alias cannot resolve", () => {
+      const { result, calls } = runHarnessWithStub({
+        stubScript,
+        reflectData: { ...reflectData, endpoints: [{ ...reflectData.endpoints[0], models: ["claude-sonnet-5"] }] },
+        extraArgs: ["--model", "detection"],
+        extraEnv: { GH_AW_PHASE: "detection", GH_AW_LLM_PROVIDER: "anthropic", ANTHROPIC_MODEL: "claude-sonnet-5", GH_AW_SAFE_OUTPUTS: "", GH_AW_HARNESS_MAX_RETRIES: "0" },
+      });
+      expect(result.status).not.toBe(0);
+      expect(calls).toHaveLength(0);
+      expect(result.stderr).toContain("detection");
+    });
+  });
+
+  describe("explicit provider overrides for CLI models", () => {
+    const reflectData = {
+      endpoints: [{ provider: "anthropic", configured: true, port: 10001, models: ["claude-opus-5"] }],
+      model_aliases: { opus: ["anthropic/claude-opus-*"] },
+    };
+    const stubScript = `
+      const fs = require("fs");
+      fs.appendFileSync(process.env.CLAUDE_HARNESS_STUB_CALLS, JSON.stringify({
+        args: process.argv.slice(2), model: process.env.ANTHROPIC_MODEL
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done" }) + "\\n");
+    `;
+
+    it.each([{ extraArgs: ["--model", "copilot/opus"] }, { extraArgs: ["--model=copilot/opus"] }])("resolves $extraArgs against the explicitly selected Anthropic catalog", ({ extraArgs }) => {
+      const { result, calls } = runHarnessWithStub({
+        stubScript,
+        reflectData,
+        extraArgs,
+        extraEnv: {
+          GH_AW_PHASE: "detection",
+          GH_AW_LLM_PROVIDER: "anthropic",
+          GH_AW_LLM_PROVIDER_EXPLICIT: "1",
+          GH_AW_SAFE_OUTPUTS: "",
+          GH_AW_HARNESS_MAX_RETRIES: "0",
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ model: "claude-opus-5" });
+      expect(calls[0].args).toContainEqual(expect.stringContaining("claude-opus-5"));
+      expect(calls[0].args.join(" ")).not.toContain("copilot/");
+    });
+  });
+
+  describe("Copilot inference environment", () => {
+    const reflectData = {
+      endpoints: [
+        { provider: "anthropic", configured: false, port: 10001 },
+        { provider: "copilot", configured: true, port: 43123, models_url: "http://api-proxy:43123/models" },
+      ],
+    };
+
+    it.each(["auto", "copilot/auto"])("starts the real harness with an unset bootstrap URL and %s resolved in environment and CLI model inputs", model => {
+      const reflect = { endpoints: [{ ...reflectData.endpoints[1], models: ["gpt-6.1-sol", "claude-sonnet-5"] }] };
+      const stubScript = `
+        const fs = require("fs");
+        fs.appendFileSync(process.env.CLAUDE_HARNESS_STUB_CALLS, JSON.stringify({
+          args: process.argv.slice(2), model: process.env.ANTHROPIC_MODEL, baseUrl: process.env.ANTHROPIC_BASE_URL
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done" }) + "\\n");
+      `;
+      for (const extraArgs of [[], ["--model", model], [`--model=${model}`]]) {
+        const { result, calls } = runHarnessWithStub({
+          stubScript,
+          reflectData: reflect,
+          extraArgs,
+          extraEnv: { GH_AW_LLM_PROVIDER: "github", ANTHROPIC_MODEL: model, GH_AW_SAFE_OUTPUTS: "", GH_AW_HARNESS_MAX_RETRIES: "0" },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({ model: "claude-sonnet-5", baseUrl: "http://api-proxy:43123" });
+        if (extraArgs.length > 0) expect(calls[0].args.join(" ")).toContain("claude-sonnet-5");
+        expect(calls[0].args.join(" ")).not.toContain(model);
+      }
+    });
+
+    it.each(["github", "copilot", "github-copilot", "github_models"])("routes Claude's native Messages API to the reflected Copilot endpoint for %s", async provider => {
+      const env = { GH_AW_LLM_PROVIDER: provider, ANTHROPIC_MODEL: "copilot/claude-haiku-4.5", ANTHROPIC_API_KEY: "sandbox-placeholder", ANTHROPIC_BASE_URL: "http://host.docker.internal:10002" };
+      const child = await buildClaudeChildEnv(reflectData, env, () => {});
+      expect(child.ANTHROPIC_BASE_URL).toBe("http://api-proxy:43123");
+      expect(child.ANTHROPIC_MODEL).toBe("claude-haiku-4.5");
+      expect(child.ANTHROPIC_API_KEY).toBe("sandbox-placeholder");
+      expect(env.ANTHROPIC_MODEL).toBe("copilot/claude-haiku-4.5");
+    });
+
+    it("does not pass execution evidence metadata to the engine child", async () => {
+      const child = await buildClaudeChildEnv(
+        null,
+        {
+          GH_AW_AWF_EXECUTION_COMPONENT: "agent",
+          GH_AW_AWF_EXECUTION_EVIDENCE_FILE: "/tmp/evidence.json",
+        },
+        () => {}
+      );
+
+      expect(child).not.toHaveProperty("GH_AW_AWF_EXECUTION_COMPONENT");
+      expect(child).not.toHaveProperty("GH_AW_AWF_EXECUTION_EVIDENCE_FILE");
+    });
+
+    it.each(["auto", "copilot/auto"])("resolves the %s environment model before native Messages inference", async model => {
+      const env = { GH_AW_LLM_PROVIDER: "github", ANTHROPIC_MODEL: model, ANTHROPIC_API_KEY: "sandbox-placeholder" };
+      const reflect = { endpoints: [{ ...reflectData.endpoints[1], models: ["gpt-6.1-sol", "claude-sonnet-5", "claude-sonnet-4.6"] }] };
+      const logs = [];
+      const child = await buildClaudeChildEnv(reflect, env, message => logs.push(message));
+      expect(child).toMatchObject({ ANTHROPIC_MODEL: "claude-sonnet-5", ANTHROPIC_BASE_URL: "http://api-proxy:43123", ANTHROPIC_API_KEY: "sandbox-placeholder" });
+      expect(env.ANTHROPIC_MODEL).toBe(model);
+      expect(logs.join("\n")).toContain("Claude auto model selection");
+    });
+
+    it.each(["auto", "copilot/auto"])("resolves a %s fallback without changing the provisioned Copilot route", async model => {
+      const reflect = { endpoints: [{ ...reflectData.endpoints[1], models: ["claude-haiku-4.5"] }] };
+      const child = await buildClaudeChildEnv(reflect, { GH_AW_LLM_PROVIDER: "github", GH_AW_MODEL_FALLBACK: model }, () => {});
+      expect(child.ANTHROPIC_MODEL).toBe("claude-haiku-4.5");
+    });
+
+    it("maps native Anthropic auto to sonnet without requiring Copilot credentials or reflection", async () => {
+      const env = { GH_AW_LLM_PROVIDER: "anthropic", ANTHROPIC_MODEL: "auto", ANTHROPIC_BASE_URL: "https://custom.example/anthropic" };
+      expect(await buildClaudeChildEnv(null, env, () => {})).toMatchObject({ ...env, ANTHROPIC_MODEL: "sonnet" });
+    });
+
+    describe("recorded /reflect from run 38945917145", () => {
+      const reflectFixtures = require("./fixtures/model_resolution_reflect.cjs");
+      let tmpDir;
+      beforeEach(() => {
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-model-resolution-"));
+      });
+      afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+      const envFor = model => ({ GH_AW_LLM_PROVIDER: "github", ANTHROPIC_MODEL: model, GH_AW_TMP_DIR: tmpDir, GH_AW_AWF_CONFIG_PATH: path.join(tmpDir, "missing-awf-config.json") });
+      const records = () => JSON.parse(fs.readFileSync(path.join(tmpDir, "agent/model-resolution.json"), "utf8"));
+      const withoutModels = (reflect, pattern) => {
+        const endpoint = reflect.endpoints.find(entry => entry.provider === "copilot");
+        endpoint.models = endpoint.models.filter(model => !pattern.test(model));
+        return reflect;
+      };
+
+      it("resolves copilot/opus to the newest live Opus", async () => {
+        const logs = [];
+        const child = await buildClaudeChildEnv(reflectFixtures.ddgReflect(), envFor("copilot/opus"), message => logs.push(message));
+        expect(child.ANTHROPIC_MODEL).toBe("claude-opus-5.5");
+        expect(child.ANTHROPIC_BASE_URL).toBe("http://api-proxy:10002");
+        expect(logs.filter(line => line.startsWith("model resolution: engine=claude"))).toEqual([expect.stringContaining("configured=copilot/opus resolved=claude-opus-5.5")]);
+        expect(records()).toEqual([{ engine: "claude", role: "main", configured_model: "copilot/opus", resolved_model: "claude-opus-5.5", provider: "copilot", status: "resolved", cause: null }]);
+      });
+
+      it("auto keeps its Sonnet, Opus, Haiku order", async () => {
+        const reflect = reflectFixtures.ddgReflect();
+        expect((await buildClaudeChildEnv(reflect, envFor("copilot/auto"), () => {})).ANTHROPIC_MODEL).toBe("claude-sonnet-5.5");
+        withoutModels(reflect, /sonnet/);
+        expect((await buildClaudeChildEnv(reflect, envFor("copilot/auto"), () => {})).ANTHROPIC_MODEL).toBe("claude-opus-5.5");
+        withoutModels(reflect, /opus/);
+        expect((await buildClaudeChildEnv(reflect, envFor("auto"), () => {})).ANTHROPIC_MODEL).toBe("claude-haiku-5.5");
+      });
+
+      // gpt-5-mini is both a built-in alias and a live id in the recorded /reflect; the
+      // "absent" case removes it from a copy of the recording.
+      it("a live exact id wins over an alias with the same name", async () => {
+        for (const model of ["copilot/gpt-5-mini", "gpt-5-mini"]) {
+          expect((await buildClaudeChildEnv(reflectFixtures.ddgReflect(), envFor(model), () => {})).ANTHROPIC_MODEL).toBe("gpt-5-mini");
+          expect(records().at(-1)).toEqual({ engine: "claude", role: "main", configured_model: model, resolved_model: "gpt-5-mini", provider: "copilot", status: "exact", cause: null });
+        }
+        expect((await buildClaudeChildEnv(reflectFixtures.withoutCopilotModels(["gpt-5-mini"]), envFor("gpt-5-mini"), () => {})).ANTHROPIC_MODEL).toBe("gpt-5.4-mini");
+      });
+
+      it("workflow-defined alias overrides built-in", async () => {
+        const reflect = reflectFixtures.withCopilotModels(["claude-opus-6"]);
+        expect((await buildClaudeChildEnv(reflect, envFor("opus"), () => {})).ANTHROPIC_MODEL).toBe("claude-opus-6");
+        reflect.model_aliases = { ...reflect.model_aliases, opus: ["copilot/claude-opus-5*"] };
+        expect((await buildClaudeChildEnv(reflect, envFor("opus"), () => {})).ANTHROPIC_MODEL).toBe("claude-opus-5.5");
+      });
+
+      // Incomplete discovery is derived from the recorded file (models_fetch_complete: false,
+      // Copilot models: null); no recorded run with this shape exists.
+      it("incomplete discovery passes exact ids through and fails aliases after one refetch", async () => {
+        const exact = await buildClaudeChildEnv(reflectFixtures.incompleteDiscovery(), envFor("copilot/claude-opus-5"), () => {});
+        expect(exact.ANTHROPIC_MODEL).toBe("claude-opus-5");
+        const refetchReflectData = vi.fn().mockResolvedValue(reflectFixtures.incompleteDiscovery());
+        await expect(buildClaudeChildEnv(reflectFixtures.incompleteDiscovery(), envFor("copilot/opus"), () => {}, { refetchReflectData })).rejects.toMatchObject({ name: "ModelAliasResolutionError", reason: "catalog_unavailable" });
+        expect(refetchReflectData).toHaveBeenCalledTimes(1);
+        expect(records().at(-1)).toMatchObject({ engine: "claude", configured_model: "copilot/opus", status: "failed", cause: "catalog_unavailable" });
+      });
+    });
+
+    // sandbox.agent: false (no AWF): the alias map arrives through GH_AW_MODEL_ALIASES only.
+    it("native Claude without AWF never launches Claude Code's own opus for a workflow-defined opus", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-no-awf-"));
+      try {
+        const env = {
+          GH_AW_LLM_PROVIDER: "anthropic",
+          ANTHROPIC_MODEL: "opus",
+          GH_AW_TMP_DIR: tmpDir,
+          GH_AW_AWF_CONFIG_PATH: path.join(tmpDir, "missing-awf-config.json"),
+          GH_AW_MODEL_ALIASES: JSON.stringify({ opus: ["anthropic/claude-opus-4-7"] }),
+        };
+        await expect(buildClaudeChildEnv(null, env, () => {})).rejects.toMatchObject({ name: "ModelAliasResolutionError", reason: "catalog_unavailable" });
+        expect(JSON.parse(fs.readFileSync(path.join(tmpDir, "agent/model-resolution.json"), "utf8"))).toEqual([
+          { engine: "claude", role: "main", configured_model: "opus", resolved_model: null, provider: "anthropic", status: "failed", cause: "catalog_unavailable" },
+        ]);
+        // With /reflect, the same map resolves to the workflow's pin.
+        const reflect = { endpoints: [{ provider: "anthropic", configured: true, models: ["claude-opus-4-7", "claude-opus-5"] }] };
+        expect((await buildClaudeChildEnv(reflect, env, () => {})).ANTHROPIC_MODEL).toBe("claude-opus-4-7");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each(["auto", "copilot/auto"])("fails before inference when %s has no advertised Claude model", async model => {
+      await expect(buildClaudeChildEnv({ endpoints: [{ ...reflectData.endpoints[1], models: ["gpt-6.1-sol"] }] }, { GH_AW_LLM_PROVIDER: "github", ANTHROPIC_MODEL: model }, () => {})).rejects.toThrow("requires an advertised Claude");
+    });
+
+    it.each([undefined, null, { endpoints: [{ provider: "anthropic", configured: true, port: 10001 }] }, { endpoints: [{ provider: "copilot", configured: false, port: 10002 }] }])(
+      "fails closed without a configured reflected Copilot endpoint",
+      async reflect => {
+        await expect(buildClaudeChildEnv(reflect, { GH_AW_LLM_PROVIDER: "github", ANTHROPIC_BASE_URL: "https://api.anthropic.com" }, () => {})).rejects.toThrow("configured Copilot endpoint");
+      }
+    );
+
+    it("preserves the Anthropic environment when reflection is unavailable", async () => {
+      const env = { GH_AW_LLM_PROVIDER: "anthropic", ANTHROPIC_MODEL: "claude-haiku-4.5", ANTHROPIC_BASE_URL: "https://custom.example/anthropic" };
+      expect(await buildClaudeChildEnv(undefined, env, () => {})).toMatchObject(env);
+    });
+
+    it("normalizes a dynamically selected fallback model on the provisioned route", async () => {
+      const child = await buildClaudeChildEnv(reflectData, { GH_AW_LLM_PROVIDER: "github", GH_AW_MODEL_FALLBACK: "copilot/claude-sonnet-4.6" }, () => {});
+      expect(child.ANTHROPIC_MODEL).toBe("claude-sonnet-4.6");
+    });
+
+    it("rejects a dynamic provider switch without provisioning Copilot credentials", async () => {
+      await expect(buildClaudeChildEnv(null, { ANTHROPIC_MODEL: "copilot/claude-haiku-4.5" }, () => {})).rejects.toThrow("engine.model-provider: github");
+    });
+
+    it("preserves explicit provider overrides and custom Anthropic model slugs", async () => {
+      const env = { GH_AW_LLM_PROVIDER: "anthropic", GH_AW_LLM_PROVIDER_EXPLICIT: "1", ANTHROPIC_MODEL: "copilot/claude-sonnet-4-6", ANTHROPIC_BASE_URL: "https://custom.example/anthropic" };
+      expect(await buildClaudeChildEnv(null, env, () => {})).toMatchObject({ ANTHROPIC_MODEL: "claude-sonnet-4-6", ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL });
+      expect(await buildClaudeChildEnv(null, { ANTHROPIC_MODEL: "anthropic/custom-model" }, () => {})).toMatchObject({ ANTHROPIC_MODEL: "anthropic/custom-model" });
+    });
+  });
+
+  describe("AWF model routing", () => {
+    const routedReflect = {
+      endpoints: [{ provider: "github", configured: true, port: 43123, base_url: "http://api-proxy:43123", models: ["claude-opus-5"] }],
+      routing: {
+        status: "selected",
+        selection: { provider: "github", model: "github-copilot/claude-opus-5", wire_model: "claude-opus-5", effort: "xhigh", endpoint: "/v1/messages" },
+      },
+    };
+
+    it("applies the routed model and effort and removes fixed overrides", async () => {
+      const messages = [];
+      const env = {
+        GH_AW_MODEL_ROUTING: "1",
+        GH_AW_LLM_PROVIDER: "github",
+        ANTHROPIC_MODEL: "fixed-model",
+        CLAUDE_CODE_EFFORT_LEVEL: "low",
+        GH_AW_MODEL_FALLBACK: "fallback-model",
+      };
+      const child = await buildClaudeChildEnv(routedReflect, env, message => messages.push(message));
+      expect(child).toMatchObject({ ANTHROPIC_MODEL: "claude-opus-5", CLAUDE_CODE_EFFORT_LEVEL: "xhigh" });
+      expect(child.GH_AW_MODEL_FALLBACK).toBeUndefined();
+      expect(messages[0]).toContain("inference routing: mode=awf-routed model=claude-opus-5 effort=xhigh");
+      expect(removeClaudeRoutingOverrides(["--model", "fixed", "--effort=low", "--print"])).toEqual(["--print"]);
+    });
+
+    it("uses the Messages endpoint for a routed model selected on Chat Completions", async () => {
+      const reflect = {
+        ...routedReflect,
+        endpoints: [{ ...routedReflect.endpoints[0], routing_models: [{ model_id: "claude-opus-5", candidate_metadata_complete: true, supported_endpoints: ["/chat/completions", "/v1/messages"] }] }],
+        routing: { ...routedReflect.routing, selection: { ...routedReflect.routing.selection, effort: "max", endpoint: "/chat/completions" } },
+      };
+      const messages = [];
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-routing-outcome-"));
+      try {
+        const child = await buildClaudeChildEnv(reflect, { GH_AW_MODEL_ROUTING: "1", GH_AW_LLM_PROVIDER: "github", GH_AW_TMP_DIR: tmpDir }, message => messages.push(message));
+        expect(child).toMatchObject({ ANTHROPIC_MODEL: "claude-opus-5", CLAUDE_CODE_EFFORT_LEVEL: "max" });
+        expect(messages[0]).toContain("endpoint=/v1/messages selected_endpoint=/chat/completions");
+        expect(JSON.parse(fs.readFileSync(path.join(tmpDir, "agent", "awf-routing-outcome.json"), "utf8"))).toMatchObject({
+          endpoint: "/v1/messages",
+          selected_endpoint: "/chat/completions",
+        });
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("starts the harness with the routed model and refuses an endpoint mismatch", () => {
+      const stubScript = `
+        const fs = require("fs");
+        fs.appendFileSync(process.env.CLAUDE_HARNESS_STUB_CALLS, JSON.stringify({
+          args: process.argv.slice(2), model: process.env.ANTHROPIC_MODEL, effort: process.env.CLAUDE_CODE_EFFORT_LEVEL
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done" }) + "\\n");
+      `;
+      const success = runHarnessWithStub({
+        stubScript,
+        reflectData: routedReflect,
+        extraArgs: ["--model", "fixed-model", "--effort", "low"],
+        extraEnv: { GH_AW_MODEL_ROUTING: "1", GH_AW_LLM_PROVIDER: "github", ANTHROPIC_MODEL: "fixed-model", GH_AW_SAFE_OUTPUTS: "", GH_AW_HARNESS_MAX_RETRIES: "0" },
+      });
+      expect(success.result.status, success.result.stderr).toBe(0);
+      expect(success.calls[0]).toMatchObject({ model: "claude-opus-5", effort: "xhigh" });
+      expect(success.calls[0].args).not.toContain("fixed-model");
+      expect(success.calls[0].args).not.toContain("--effort");
+
+      const mismatch = runHarnessWithStub({
+        stubScript,
+        reflectData: {
+          ...routedReflect,
+          endpoints: [{ ...routedReflect.endpoints[0], routing_models: [{ model_id: "claude-opus-5", candidate_metadata_complete: true, supported_endpoints: ["/responses"] }] }],
+          routing: { ...routedReflect.routing, selection: { ...routedReflect.routing.selection, endpoint: "/responses" } },
+        },
+        extraEnv: { GH_AW_MODEL_ROUTING: "1", GH_AW_LLM_PROVIDER: "github", GH_AW_SAFE_OUTPUTS: "" },
+      });
+      expect(mismatch.result.status).not.toBe(0);
+      expect(mismatch.result.stderr).toContain("advertises endpoints [/responses]");
+      expect(mismatch.calls).toHaveLength(0);
+    });
+
+    it.each([
+      [{ endpoints: routedReflect.endpoints, routing: { status: "pending" } }, "pending"],
+      [{ endpoints: routedReflect.endpoints, routing: { ...routedReflect.routing, selection: { ...routedReflect.routing.selection, endpoint: "/responses" } } }, "candidate metadata is incomplete"],
+      [{ ...routedReflect, endpoints: [{ ...routedReflect.endpoints[0], models: ["gpt-5.6-sol"] }] }, "unavailable Copilot wire model"],
+    ])("fails closed when routing is invalid: %s", async (reflect, error) => {
+      await expect(buildClaudeChildEnv(reflect, { GH_AW_MODEL_ROUTING: "1", GH_AW_LLM_PROVIDER: "github" }, () => {})).rejects.toThrow(error);
+    });
+
+    it("rejects efforts Claude Code cannot represent", async () => {
+      const reflect = {
+        ...routedReflect,
+        routing: { ...routedReflect.routing, selection: { ...routedReflect.routing.selection, effort: "minimal" } },
+      };
+      await expect(buildClaudeChildEnv(reflect, { GH_AW_MODEL_ROUTING: "1", GH_AW_LLM_PROVIDER: "github" }, () => {})).rejects.toThrow('"minimal"');
+    });
+  });
+
   describe("resolveClaudePromptFileArgs", () => {
-    it("replaces --prompt-file with ['--', content] as the last two positional args", () => {
+    it("separates prompt content from child arguments", () => {
       const promptFile = path.join(os.tmpdir(), `claude-harness-prompt-${Date.now()}.txt`);
       fs.writeFileSync(promptFile, "fix the bug", "utf8");
       try {
         const result = resolveClaudePromptFileArgs(["--print", "--prompt-file", promptFile, "--output-format", "stream-json"]);
-        expect(result).toEqual(["--print", "--output-format", "stream-json", "--", "fix the bug"]);
+        expect(result).toEqual({ args: ["--print", "--output-format", "stream-json"], prompt: "fix the bug" });
       } finally {
         fs.rmSync(promptFile);
       }
     });
 
-    it("appends -- and prompt content as the last two args", () => {
+    it("reads a prompt without adding a positional argument", () => {
       const promptFile = path.join(os.tmpdir(), `claude-harness-prompt-${Date.now()}.txt`);
       fs.writeFileSync(promptFile, "my task", "utf8");
       try {
         const result = resolveClaudePromptFileArgs(["--prompt-file", promptFile]);
-        expect(result).toEqual(["--", "my task"]);
+        expect(result).toEqual({ args: [], prompt: "my task" });
       } finally {
         fs.rmSync(promptFile);
       }
@@ -92,13 +490,11 @@ describe("claude_harness.cjs", () => {
 
     it("passes through args that have no --prompt-file", () => {
       const result = resolveClaudePromptFileArgs(["--print", "--output-format", "json"]);
-      expect(result).toEqual(["--print", "--output-format", "json"]);
+      expect(result).toEqual({ args: ["--print", "--output-format", "json"], prompt: null });
     });
 
-    it("preserves args when --prompt-file is provided without a path", () => {
-      const result = resolveClaudePromptFileArgs(["--print", "--prompt-file"]);
-      // When no path follows --prompt-file, it is preserved as-is
-      expect(result).toEqual(["--print", "--prompt-file"]);
+    it("rejects --prompt-file without a path", () => {
+      expect(() => resolveClaudePromptFileArgs(["--print", "--prompt-file"])).toThrow("--prompt-file requires");
     });
 
     it("throws when the prompt file does not exist", () => {
@@ -115,17 +511,13 @@ describe("claude_harness.cjs", () => {
       }
     });
 
-    it("places -- between --mcp-config and prompt to prevent ENAMETOOLONG (Claude Code 2.x variadic flag)", () => {
-      // Claude Code 2.x treats any non-flag positional argument that follows
-      // --mcp-config as a second config file path. A large prompt without the --
-      // separator would exceed PATH_MAX (~4096 bytes) and fail with ENAMETOOLONG.
+    it("never puts a large prompt after variadic --mcp-config", () => {
       const promptFile = path.join(os.tmpdir(), `claude-harness-prompt-${Date.now()}.txt`);
       const longPrompt = "<system>".padEnd(5000, "x");
       fs.writeFileSync(promptFile, longPrompt, "utf8");
       try {
         const result = resolveClaudePromptFileArgs(["--mcp-config", "/tmp/mcp-servers.json", "--prompt-file", promptFile]);
-        // The -- must immediately precede the prompt content, not adjacent to --mcp-config.
-        expect(result).toEqual(["--mcp-config", "/tmp/mcp-servers.json", "--", longPrompt]);
+        expect(result).toEqual({ args: ["--mcp-config", "/tmp/mcp-servers.json"], prompt: longPrompt });
       } finally {
         fs.rmSync(promptFile);
       }
@@ -200,7 +592,7 @@ describe("claude_harness.cjs", () => {
   describe("classifiableOutput", () => {
     it("drops user events while preserving result events and plain text", () => {
       const userEvent = JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: "not logged in" }] } });
-      const resultEvent = JSON.stringify({ type: "result", result: "not logged in" });
+      const resultEvent = JSON.stringify({ type: "result", errors: ["not logged in"] });
 
       expect(classifiableOutput(`${userEvent}\n${resultEvent}\nplain-text error`)).toBe(`${resultEvent}\nplain-text error`);
       expect(isRateLimitError(classifiableOutput(JSON.stringify({ type: "user", result: "rate limiting" })))).toBe(false);
@@ -234,7 +626,7 @@ describe("claude_harness.cjs", () => {
       const resultEvent = JSON.stringify({ type: "result", result: "not logged in" });
 
       expect(isAuthenticationFailedError(classifiableOutput(userEvent))).toBe(false);
-      expect(isAuthenticationFailedError(classifiableOutput(resultEvent))).toBe(true);
+      expect(isAuthenticationFailedError(classifiableOutput(resultEvent))).toBe(false);
       expect(isAuthenticationFailedError(classifiableOutput("not logged in"))).toBe(true);
     });
 
@@ -343,11 +735,11 @@ describe("claude_harness.cjs", () => {
 
     it("distinguishes initialization output from assistant progress", () => {
       expect(hasClaudeSessionProgress('{"type":"system","subtype":"init"}\nAPI Error: Connection refused')).toBe(false);
-      expect(hasClaudeSessionProgress('{"type":"assistant","message":{"content":[{"type":"text","text":"Working"}]}}')).toBe(true);
+      expect(hasClaudeSessionProgress('{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"Working"}]}}')).toBe(true);
     });
 
     it("detects progress when connection refused appears after an assistant line", () => {
-      const output = '{"type":"assistant","message":{}}\nAPI Error: Connection refused';
+      const output = '{"type":"assistant","session_id":"test-session","message":{}}\nAPI Error: Connection refused';
       expect(hasClaudeSessionProgress(output)).toBe(true);
     });
   });
@@ -409,16 +801,16 @@ describe("claude_harness.cjs", () => {
       expect(hasNumerousPermissionDeniedIssues(classifiableOutput(output))).toBe(false);
     });
 
-    it("builds missing_tool payload for permission issues", () => {
+    it("builds report_missing_tool payload for permission issues", () => {
       const payload = JSON.parse(buildMissingToolPermissionIssuePayload());
-      expect(payload.type).toBe("missing_tool");
+      expect(payload.type).toBe("report_missing_tool");
       expect(payload.reason).toContain("missing tool/permission issue");
       expect(payload.denied_commands).toEqual([]);
     });
 
-    it("builds missing_tool payload with denied commands", () => {
+    it("builds report_missing_tool payload with denied commands", () => {
       const payload = JSON.parse(buildMissingToolPermissionIssuePayload(["go version", "ls /usr/local/go"]));
-      expect(payload.type).toBe("missing_tool");
+      expect(payload.type).toBe("report_missing_tool");
       expect(payload.denied_commands).toEqual(["go version", "ls /usr/local/go"]);
     });
   });
@@ -465,6 +857,37 @@ describe("claude_harness.cjs", () => {
   });
 
   describe("shouldRetryWithContinue", () => {
+    it("normalizes repository-variable model arguments on initial, resume and fresh retry runs", () => {
+      const model = "copilot/claude-haiku-4.5";
+      const stubScript = `
+const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+const args = process.argv.slice(2);
+const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
+if (priorCalls === 0) {
+  process.stdout.write('{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"Working"}]}}\\n');
+  process.stderr.write("API Error: Connection refused\\n");
+  process.exit(1);
+}
+if (priorCalls === 1) {
+  process.stderr.write("Error: No deferred tool marker found in the resumed session.\\n");
+  process.exit(1);
+}
+process.exit(0);
+`;
+      const { result, calls } = runHarnessWithStub({
+        stubScript,
+        extraArgs: ["--model", model],
+        extraEnv: { GH_AW_MODEL_AGENT_CLAUDE: model, GH_AW_LLM_PROVIDER: "anthropic", GH_AW_LLM_PROVIDER_EXPLICIT: "1" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls.map(call => call.args.includes("--resume"))).toEqual([false, true, false]);
+      for (const call of calls) {
+        expect(call.args[call.args.indexOf("--model") + 1]).toBe("claude-haiku-4.5");
+      }
+    }, 50000);
+
     it("does not use --continue for signal-style termination exit codes", () => {
       for (const exitCode of [137, 143]) {
         const result = shouldRetryWithContinue({
@@ -499,15 +922,15 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 
 if (priorCalls === 0) {
-  process.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"partial execution before retry"}]}}\\n');
+  process.stdout.write('{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"partial execution before retry"}]}}\\n');
   process.exit(1);
 }
 
 if (priorCalls === 1) {
-  if (!args.includes("--continue")) {
+  if (!args.includes("--resume")) {
     process.stderr.write("expected --continue on first retry\\n");
     process.exit(9);
   }
@@ -515,7 +938,7 @@ if (priorCalls === 1) {
   process.exit(1);
 }
 
-if (args.includes("--continue")) {
+if (args.includes("--resume")) {
   process.stderr.write("fresh retry unexpectedly used --continue\\n");
   process.exit(9);
 }
@@ -525,8 +948,8 @@ process.exit(0);
       const { result, calls } = runHarnessWithStub({ stubScript });
 
       expect(result.status, result.stderr).toBe(0);
-      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, true, false]);
-      expect(calls[2].args).toContain("fix the bug");
+      expect(calls.map(call => call.args.includes("--resume"))).toEqual([false, true, false]);
+      expect(calls[2].stdin).toBe("fix the bug");
       expect(result.stderr).toContain("failure_reason=harness_retry_path_invalid");
     }, 50000);
 
@@ -536,15 +959,15 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 
 if (priorCalls === 0) {
-  process.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"partial execution before retry"}]}}\\n');
+  process.stdout.write('{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"partial execution before retry"}]}}\\n');
   process.exit(1);
 }
 
 if (priorCalls === 1) {
-  if (!args.includes("--continue")) {
+  if (!args.includes("--resume")) {
     process.stderr.write("expected --continue on first retry\\n");
     process.exit(9);
   }
@@ -552,7 +975,7 @@ if (priorCalls === 1) {
   process.exit(1);
 }
 
-if (args.includes("--continue")) {
+if (args.includes("--resume")) {
   process.stderr.write("fresh retry unexpectedly used --continue\\n");
   process.exit(9);
 }
@@ -562,8 +985,8 @@ process.exit(0);
       const { result, calls } = runHarnessWithStub({ stubScript });
 
       expect(result.status, result.stderr).toBe(0);
-      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, true, false]);
-      expect(calls[2].args).toContain("fix the bug");
+      expect(calls.map(call => call.args.includes("--resume"))).toEqual([false, true, false]);
+      expect(calls[2].stdin).toBe("fix the bug");
       expect(result.stderr).toContain("invalid JSON request body");
     }, 50000);
 
@@ -573,15 +996,15 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 
 if (priorCalls === 0) {
-  process.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"partial execution before retry"}]}}\\n');
+  process.stdout.write('{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"partial execution before retry"}]}}\\n');
   process.exit(1);
 }
 
 if (priorCalls === 1) {
-  if (args.filter(arg => arg === "--continue").length !== 1) {
+  if (args.filter(arg => arg === "--resume").length !== 1) {
     process.stderr.write("expected exactly one --continue on first retry\\n");
     process.exit(9);
   }
@@ -589,7 +1012,7 @@ if (priorCalls === 1) {
   process.exit(1);
 }
 
-if (args.includes("--continue")) {
+if (args.includes("--resume")) {
   process.stderr.write("fresh retry unexpectedly used --continue\\n");
   process.exit(9);
 }
@@ -599,7 +1022,7 @@ process.exit(0);
       const { result, calls } = runHarnessWithStub({ stubScript, extraArgs: ["--continue"] });
 
       expect(result.status, result.stderr).toBe(0);
-      expect(calls.map(call => call.args.includes("--continue"))).toEqual([true, true, false]);
+      expect(calls.map(call => call.args.includes("--resume"))).toEqual([false, true, false]);
     }, 50000);
 
     it("uses a fresh retry after signal-style termination even when output is classified as an auth failure", () => {
@@ -608,7 +1031,7 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 
 if (priorCalls === 0) {
   process.stdout.write('{"type":"user","message":{"content":[{"type":"tool_result","content":"not logged in"}]}}\\n');
@@ -616,7 +1039,7 @@ if (priorCalls === 0) {
   process.exit(143);
 }
 
-if (args.includes("--continue")) {
+if (args.includes("--resume")) {
   process.stderr.write("signal retry unexpectedly used --continue\\n");
   process.exit(9);
 }
@@ -626,10 +1049,10 @@ process.exit(0);
       const { result, calls } = runHarnessWithStub({ stubScript });
 
       expect(result.status, result.stderr).toBe(0);
-      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, false]);
-      expect(calls[1].args).toContain("fix the bug");
+      expect(calls.map(call => call.args.includes("--resume"))).toEqual([false, false]);
+      expect(calls[1].stdin).toBe("fix the bug");
       expect(result.stderr).toContain("failure_reason=cancelled_or_timed_out");
-      expect(result.stderr).toContain("isAuthenticationFailedError=true");
+      expect(result.stderr).toContain("isAuthenticationFailedError=false");
     }, 30000);
 
     it("retries a connection-refused failure before the first assistant response as a fresh run", () => {
@@ -638,7 +1061,7 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 if (priorCalls === 0) {
   process.stderr.write('{"type":"system","subtype":"init"}\\nAPI Error: Connection refused\\n');
   process.exit(1);
@@ -652,8 +1075,8 @@ process.exit(0);
       });
 
       expect(result.status, result.stderr).toBe(0);
-      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, false]);
-      expect(calls[1].args).toContain("fix the bug");
+      expect(calls.map(call => call.args.includes("--resume"))).toEqual([false, false]);
+      expect(calls[1].stdin).toBe("fix the bug");
       expect(result.stderr).toContain("connection refused before first assistant response");
     });
 
@@ -663,9 +1086,9 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 if (priorCalls === 0) {
-  process.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"Working"}]}}\\n');
+  process.stdout.write('{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"Working"}]}}\\n');
   process.stderr.write("API Error: Connection refused\\n");
   process.exit(1);
 }
@@ -678,7 +1101,7 @@ process.exit(0);
       });
 
       expect(result.status, result.stderr).toBe(0);
-      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, true]);
+      expect(calls.map(call => call.args.includes("--resume"))).toEqual([false, true]);
     });
 
     it("keeps resuming with --continue when a later continue attempt is refused during its own startup", () => {
@@ -687,9 +1110,9 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 if (priorCalls === 0) {
-  process.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"Working"}]}}\\n');
+  process.stdout.write('{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"Working"}]}}\\n');
   process.stderr.write("API Error: Connection refused\\n");
   process.exit(1);
 }
@@ -707,7 +1130,7 @@ process.exit(0);
 
       expect(result.status, result.stderr).toBe(0);
       expect(calls.length).toBe(3);
-      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, true, true]);
+      expect(calls.map(call => call.args.includes("--resume"))).toEqual([false, true, true]);
     });
 
     it("retries one no-output startup failure as a fresh run by default", () => {
@@ -716,7 +1139,7 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 if (priorCalls === 0) process.exit(1);
 process.stdout.write("startup retry succeeded\\n");
 process.exit(0);
@@ -724,7 +1147,7 @@ process.exit(0);
       const { result, calls } = runHarnessWithStub({ stubScript });
       expect(result.status, result.stderr).toBe(0);
       expect(calls.length).toBe(2);
-      expect(calls[1].args.includes("--continue")).toBe(false);
+      expect(calls[1].args.includes("--resume")).toBe(false);
       expect(result.stderr).toContain("no output produced — retrying startup as fresh run");
     });
 
@@ -734,12 +1157,12 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 if (priorCalls === 0) {
   process.stderr.write("mcp gateway startup failed before Claude launched\\n");
   process.exit(1);
 }
-process.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"started"}]}}\\n');
+process.stdout.write('{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"started"}]}}\\n');
 process.exit(0);
 `;
       const { result, calls } = runHarnessWithStub({ stubScript });
@@ -754,8 +1177,8 @@ process.exit(0);
 const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
-if (args.includes("--continue")) {
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
+if (args.includes("--resume")) {
   process.stderr.write("startup retry unexpectedly used --continue\\n");
   process.exit(9);
 }
@@ -768,7 +1191,7 @@ process.exit(1);
       });
       expect(result.status).toBe(1);
       expect(calls).toHaveLength(2);
-      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, false]);
+      expect(calls.map(call => call.args.includes("--resume"))).toEqual([false, false]);
       expect(result.stderr).toContain("output produced but no Claude session progress — not retrying (startup retry budget exhausted: 1/1)");
     });
 
@@ -776,7 +1199,7 @@ process.exit(1);
       const stubScript = `
 const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
-fs.appendFileSync(callsPath, JSON.stringify({ args: process.argv.slice(2) }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args: process.argv.slice(2), stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 process.exit(1);
 `;
       const { result, calls } = runHarnessWithStub({
@@ -785,7 +1208,7 @@ process.exit(1);
       });
       expect(result.status).toBe(1);
       expect(calls.length).toBe(1);
-      expect(calls[0].args).toContain("fix the bug");
+      expect(calls[0].stdin).toBe("fix the bug");
       expect(result.stderr).toContain("startup retry budget exhausted: 0/0");
     });
 
@@ -795,7 +1218,7 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 if (priorCalls > 0) {
   process.stderr.write("unexpected retry after max_runs_exceeded\\n");
   process.exit(9);
@@ -818,7 +1241,7 @@ const fs = require("fs");
 const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
 const args = process.argv.slice(2);
 const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
-fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+fs.appendFileSync(callsPath, JSON.stringify({ args, stdin: fs.readFileSync(0, "utf8") }) + "\\n", "utf8");
 if (priorCalls > 0) {
   process.stderr.write("unexpected retry after max_runs_exceeded\\n");
   process.exit(9);
@@ -1205,5 +1628,246 @@ process.exit(1);`,
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("without trusted firewall audit confirmation");
     });
+  });
+});
+
+describe("applyClaudeSettingsEnv", () => {
+  const settings = '{"modelOverrides":{"claude-haiku-4-5":"claude-haiku-4.5"}}';
+
+  it("appends --settings from GH_AW_CLAUDE_SETTINGS", () => {
+    expect(applyClaudeSettingsEnv(["--print", "--model", "claude-haiku-4.5"], { GH_AW_CLAUDE_SETTINGS: settings })).toEqual(["--print", "--model", "claude-haiku-4.5", "--settings", settings]);
+  });
+
+  it("leaves args unchanged when the variable is unset or empty", () => {
+    expect(applyClaudeSettingsEnv(["--print"], {})).toEqual(["--print"]);
+    expect(applyClaudeSettingsEnv(["--print"], { GH_AW_CLAUDE_SETTINGS: "  " })).toEqual(["--print"]);
+  });
+
+  it("keeps caller-provided --settings in either form", () => {
+    expect(applyClaudeSettingsEnv(["--settings", "{}"], { GH_AW_CLAUDE_SETTINGS: settings })).toEqual(["--settings", "{}"]);
+    expect(applyClaudeSettingsEnv(["--settings={}"], { GH_AW_CLAUDE_SETTINGS: settings })).toEqual(["--settings={}"]);
+  });
+});
+
+describe("Claude sub-agent models before spawn (github/gh-aw#70667)", () => {
+  const runs = require("./fixtures/claude_codex_subagent_runs.cjs");
+  const { writeInlineSubAgents } = require("./extract_inline_sub_agents.cjs");
+  const typistAgent = () => fs.readFileSync(path.join(runs.typistAgentsDir, "duplicate-type-finder.md"), "utf8");
+  // The stub records the agent files Claude Code would load from the project and whether
+  // the model-resolution record already existed when the CLI started.
+  const stubScript = `
+    const fs = require("fs");
+    const path = require("path");
+    const dir = path.join(process.env.GITHUB_WORKSPACE, ".claude", "agents");
+    const agents = fs.existsSync(dir) ? Object.fromEntries(fs.readdirSync(dir).map(name => [name, fs.readFileSync(path.join(dir, name), "utf8")])) : {};
+    const recordPath = path.join(process.env.GH_AW_TMP_DIR, "agent", "model-resolution.json");
+    const records = fs.existsSync(recordPath) ? JSON.parse(fs.readFileSync(recordPath, "utf8")) : [];
+    fs.appendFileSync(process.env.CLAUDE_HARNESS_STUB_CALLS, JSON.stringify({ agents, records }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done" }) + "\\n");
+  `;
+
+  function runWithStagedAgent({ agentContent, reflectData = runs.typistReflect(), env = {} }) {
+    const dir = makeHarnessTempDir("claude-subagents-");
+    const ostmp = path.join(dir, "ostmp");
+    const workspace = path.join(dir, "workspace");
+    const recordsDir = path.join(dir, "records");
+    // Activation staging plus restore_inline_sub_agents.sh.
+    writeInlineSubAgents(`# Typist\n\n## agent: \`duplicate-type-finder\`\n${agentContent}`, workspace, path.join(ostmp, "gh-aw"), "claude");
+    fs.mkdirSync(path.join(workspace, ".claude/agents"), { recursive: true });
+    fs.copyFileSync(path.join(ostmp, "gh-aw/.claude/agents/duplicate-type-finder.md"), path.join(workspace, ".claude/agents/duplicate-type-finder.md"));
+    try {
+      const { result, calls } = runHarnessWithStub({
+        stubScript,
+        reflectData,
+        extraEnv: {
+          TMPDIR: ostmp,
+          GITHUB_WORKSPACE: workspace,
+          GH_AW_ENGINE_CWD: "",
+          GH_AW_TMP_DIR: recordsDir,
+          GH_AW_AWF_CONFIG_PATH: path.join(dir, "missing-awf-config.json"),
+          GH_AW_LLM_PROVIDER: "anthropic",
+          GH_AW_SAFE_OUTPUTS: "",
+          GH_AW_HARNESS_MAX_RETRIES: "0",
+          GH_AW_PHASE: "",
+          ...env,
+        },
+      });
+      const recordPath = path.join(recordsDir, "agent", "model-resolution.json");
+      const records = fs.existsSync(recordPath) ? JSON.parse(fs.readFileSync(recordPath, "utf8")) : [];
+      const workspaceAgent = fs.readFileSync(path.join(workspace, ".claude/agents/duplicate-type-finder.md"), "utf8");
+      return { result, calls, records, workspaceAgent };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("claude_declared_small_resolves_before_spawn", () => {
+    const { result, calls, records } = runWithStagedAgent({ agentContent: typistAgent() });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(calls).toHaveLength(1);
+    const loaded = calls[0].agents["duplicate-type-finder.md"];
+    expect(loaded).toMatch(/^---\nname: "duplicate-type-finder"\n/);
+    expect(loaded).toContain('model: "claude-haiku-5-5"');
+    const resolved = { engine: "claude", role: "duplicate-type-finder", configured_model: "small", resolved_model: "claude-haiku-5-5", provider: "anthropic", status: "resolved", cause: null };
+    expect(calls[0].records).toContainEqual(resolved);
+    expect(records).toContainEqual(resolved);
+  });
+
+  it("claude_declared_dead_or_unknown_model_fails_before_spawn", () => {
+    // Fixture mutation: the recorded catalogue without claude-haiku-5-5, requested explicitly.
+    const reflectData = runs.typistReflect();
+    reflectData.endpoints.forEach(endpoint => endpoint.models && (endpoint.models = endpoint.models.filter(model => model !== "claude-haiku-5-5")));
+    const { result, calls, records, workspaceAgent } = runWithStagedAgent({ agentContent: typistAgent().replace("model: small", "model: claude-haiku-5-5"), reflectData });
+
+    expect(result.status).toBe(1);
+    expect(calls).toEqual([]);
+    expect(result.stderr).toContain("claude sub-agent 'duplicate-type-finder': The requested model is not supported: 'claude-haiku-5-5' is not available in the workflow's live model catalog.");
+    expect(records).toContainEqual({ engine: "claude", role: "duplicate-type-finder", configured_model: "claude-haiku-5-5", resolved_model: null, provider: "anthropic", status: "failed", cause: "model_unavailable" });
+    expect(workspaceAgent).toContain("model: claude-haiku-5-5");
+  });
+
+  it("fails closed before spawn when a staged workflow sub-agent file cannot be parsed", () => {
+    // Fixture mutation: malformed frontmatter in the staged inline agent.
+    const { result, calls, records } = runWithStagedAgent({ agentContent: "---\nname: [unterminated\nmodel: small\n---\nBody.\n" });
+
+    expect(result.status).toBe(1);
+    expect(calls).toEqual([]);
+    expect(records).toEqual([]);
+    expect(result.stderr).toContain("cannot read or parse the staged workflow sub-agent");
+    expect(result.stderr).toContain("Refusing to start Claude");
+  });
+
+  it("cleans up and exits with a clear message when sub-agent resolution throws unexpectedly", () => {
+    const dir = makeHarnessTempDir("claude-subagents-throw-");
+    try {
+      const cleanupLog = path.join(dir, "cleanup.log");
+      const preload = path.join(dir, "throwing-subagents.cjs");
+      fs.writeFileSync(
+        preload,
+        `
+        const fs = require("fs");
+        require(${JSON.stringify(require.resolve("./engine_subagent_models.cjs"))}).applyClaudeSubagentModels = async () => { throw new Error("injected sub-agent failure"); };
+        const runtime = require(${JSON.stringify(require.resolve("./claude_runtime.cjs"))});
+        const remove = runtime.removeClaudePlugin;
+        runtime.removeClaudePlugin = pluginDir => { fs.appendFileSync(${JSON.stringify(cleanupLog)}, "removed\\n"); return remove(pluginDir); };
+      `,
+        "utf8"
+      );
+      const { result, calls } = runWithStagedAgent({ agentContent: typistAgent(), env: { NODE_OPTIONS: `--require=${JSON.stringify(preload)}` } });
+
+      expect(result.status).toBe(1);
+      expect(calls).toEqual([]);
+      expect(result.stderr).toContain("fatal: unexpected error while resolving Claude sub-agent models: injected sub-agent failure");
+      expect(fs.readFileSync(cleanupLog, "utf8")).toBe("removed\n");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed before spawn for a workflow-declared sub-agent named main", () => {
+    const dir = makeHarnessTempDir("claude-subagents-main-");
+    const ostmp = path.join(dir, "ostmp");
+    const workspace = path.join(dir, "workspace");
+    const recordsDir = path.join(dir, "records");
+    try {
+      writeInlineSubAgents(`# Typist\n\n## agent: \`main\`\n${typistAgent()}`, workspace, path.join(ostmp, "gh-aw"), "claude");
+      const { result, calls } = runHarnessWithStub({
+        stubScript,
+        reflectData: runs.typistReflect(),
+        extraEnv: {
+          TMPDIR: ostmp,
+          GITHUB_WORKSPACE: workspace,
+          GH_AW_ENGINE_CWD: "",
+          GH_AW_TMP_DIR: recordsDir,
+          GH_AW_AWF_CONFIG_PATH: path.join(dir, "missing-awf-config.json"),
+          GH_AW_LLM_PROVIDER: "anthropic",
+          GH_AW_SAFE_OUTPUTS: "",
+          GH_AW_HARNESS_MAX_RETRIES: "0",
+          GH_AW_PHASE: "",
+        },
+      });
+
+      expect(result.status).toBe(1);
+      expect(calls).toEqual([]);
+      expect(result.stderr).toContain("the sub-agent name 'main' is reserved for the Claude main model's resolution record");
+      const recordPath = path.join(recordsDir, "agent", "model-resolution.json");
+      const records = fs.existsSync(recordPath) ? JSON.parse(fs.readFileSync(recordPath, "utf8")) : [];
+      expect(records.filter(record => record.configured_model === "small")).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("bare mode loads the resolved definition through the plugin's agents path", () => {
+    const dir = makeHarnessTempDir("claude-subagents-bare-");
+    const ostmp = path.join(dir, "ostmp");
+    const workspace = path.join(dir, "workspace");
+    try {
+      // The managed directory is /tmp/gh-aw/.claude in a run; point the real plugin builder at this run's staging.
+      const preload = path.join(dir, "bare-plugin.cjs");
+      fs.writeFileSync(
+        preload,
+        `
+        const runtime = require(${JSON.stringify(require.resolve("./claude_runtime.cjs"))});
+        const build = runtime.claudeBareCapabilities;
+        runtime.claudeBareCapabilities = args => build(args, ${JSON.stringify(path.join(ostmp, "gh-aw", ".claude"))}, ${JSON.stringify(path.join(ostmp, "agent"))});
+      `,
+        "utf8"
+      );
+      writeInlineSubAgents(`# Typist\n\n## agent: \`duplicate-type-finder\`\n${typistAgent()}`, workspace, path.join(ostmp, "gh-aw"), "claude");
+      const staged = fs.readFileSync(path.join(ostmp, "gh-aw/.claude/agents/duplicate-type-finder.md"), "utf8");
+      const bareStub = `
+        const fs = require("fs");
+        const path = require("path");
+        const args = process.argv.slice(2);
+        const agentsDir = path.join(args[args.indexOf("--plugin-dir") + 1], "agents");
+        const agents = Object.fromEntries(fs.readdirSync(agentsDir).map(name => [name, fs.readFileSync(path.join(agentsDir, name), "utf8")]));
+        fs.appendFileSync(process.env.CLAUDE_HARNESS_STUB_CALLS, JSON.stringify({ args, agents, symlink: fs.lstatSync(agentsDir).isSymbolicLink() }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done" }) + "\\n");
+      `;
+      const { result, calls } = runHarnessWithStub({
+        stubScript: bareStub,
+        extraArgs: ["--bare"],
+        reflectData: runs.typistReflect(),
+        extraEnv: {
+          NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+          TMPDIR: ostmp,
+          GITHUB_WORKSPACE: workspace,
+          GH_AW_ENGINE_CWD: "",
+          GH_AW_TMP_DIR: path.join(dir, "records"),
+          GH_AW_AWF_CONFIG_PATH: path.join(dir, "missing-awf-config.json"),
+          GH_AW_LLM_PROVIDER: "anthropic",
+          GH_AW_SAFE_OUTPUTS: "",
+          GH_AW_HARNESS_MAX_RETRIES: "0",
+          GH_AW_PHASE: "",
+        },
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].args).toContain("--plugin-dir");
+      expect(calls[0].symlink).toBe(false);
+      const loaded = calls[0].agents["duplicate-type-finder.md"];
+      expect(loaded).toMatch(/^---\nname: "duplicate-type-finder"\n/);
+      expect(loaded).toContain('model: "claude-haiku-5-5"');
+      expect(fs.readFileSync(path.join(ostmp, "gh-aw/.claude/agents/duplicate-type-finder.md"), "utf8")).toBe(staged);
+      expect(staged).toContain("model: small");
+      expect(fs.readdirSync(path.join(ostmp, "agent"))).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("claude_codex_detection_skips_subagent_resolution (Claude)", () => {
+    // Fixture mutation: an unknown model that would fail closed outside detection.
+    const agentContent = typistAgent().replace("model: small", "model: claude-nonexistent-9");
+    const { result, calls, records, workspaceAgent } = runWithStagedAgent({ agentContent, env: { GH_AW_PHASE: "detection" } });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(records).toEqual([]);
+    expect(workspaceAgent).toContain("model: claude-nonexistent-9");
+    expect(result.stderr).not.toContain("sub-agent");
   });
 });

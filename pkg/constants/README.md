@@ -57,12 +57,12 @@ The package also acts as the authoritative source for the generated workflow con
 | `MCPGatewayFeatureFlag` | `FeatureFlag` | `"mcp-gateway"` | Enables MCP gateway workflow support. |
 | `DisableXPIAPromptFeatureFlag` | `FeatureFlag` | `"disable-xpia-prompt"` | Disables the XPIA prompt path. |
 | `DIFCProxyFeatureFlag` | `FeatureFlag` | `"difc-proxy"` | Deprecated integrity proxy flag kept for compatibility. |
-| `CliProxyFeatureFlag` | `FeatureFlag` | `"cli-proxy"` | Enables the AWF CLI proxy sidecar path. |
 | `AwfDiagnosticLogsFeatureFlag` | `FeatureFlag` | `"awf-diagnostic-logs"` | Enables AWF failure diagnostics capture. |
 | `ByokCopilotFeatureFlag` | `FeatureFlag` | `"byok-copilot"` | Deprecated legacy Copilot BYOK flag. |
 | `IntegrityReactionsFeatureFlag` | `FeatureFlag` | `"integrity-reactions"` | Enables reaction-based integrity promotion and demotion. |
 | `GroupConcurrencyQueueFeatureFlag` | `FeatureFlag` | `"group-concurrency-queue"` | Controls whether generated group concurrency uses `queue: max`. |
 | `DangerouslyDisableSandboxAgentFeatureFlag` | `FeatureFlag` | `"dangerously-disable-sandbox-agent"` | Required to allow `sandbox.agent: false`. |
+| `DangerouslyAllowRolesReadAndPullRequestTargetFeatureFlag` | `FeatureFlag` | `"dangerously-allow-roles-read-and-pull-request-target"` | Suppresses the non-strict warning for `pull_request_target` with `on.roles` containing `read` or `all`. |
 | `GHAWDetectionFeatureFlag` | `FeatureFlag` | `"gh-aw-detection"` | Enables the external threat-detection binary path by default; set to `false` for the legacy inline path. |
 | `AgentJobName` | `JobName` | `"agent"` | Built-in agent job identifier. |
 | `ActivationJobName` | `JobName` | `"activation"` | Built-in activation job identifier. |
@@ -76,6 +76,7 @@ The package also acts as the authoritative source for the generated workflow con
 | `UploadCodeScanningJobName` | `JobName` | `"upload_code_scanning_sarif"` | Built-in SARIF upload job identifier. |
 | `UploadCodeCoverageJobName` | `JobName` | `"upload_code_coverage"` | Built-in code-coverage upload job identifier. |
 | `ConclusionJobName` | `JobName` | `"conclusion"` | Built-in conclusion job identifier. |
+| `ConclusionAdmissionJobName` | `JobName` | `"conclusion_admission"` | Isolated conclusion-admission callback job identifier. |
 | `UnlockJobName` | `JobName` | `"unlock"` | Built-in unlock job identifier. |
 | `GitHubMCPServerID` | `MCPServerID` | `"github"` | Built-in GitHub MCP server identifier. |
 | `SafeOutputsMCPServerID` | `MCPServerID` | `"safeoutputs"` | Built-in safe-outputs MCP server identifier. |

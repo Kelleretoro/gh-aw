@@ -20,15 +20,15 @@ permissions:
   pull-requests: read
 name: Agent Container Smoke Test
 engine: pi
-model: copilot/auto
+model: copilot/mai-code-1.1-flash
 strict: true
 runtimes:
   node:
-    version: "20"
+    version: "24"
   python:
     version: "3.11"
   go:
-    version: "1.24"
+    version: "1.27.3"
   java:
     version: "21"
   dotnet:

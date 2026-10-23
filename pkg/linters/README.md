@@ -13,9 +13,12 @@ This package currently provides custom Go analyzers in the following subpackages
 - `bufioscannererunchecked` — reports `bufio.Scanner` loops that do not check `Err()` after scanning completes.
 - `bytescomparestring` — reports `string(a) == string(b)` and `string(a) != string(b)` comparisons where `a` and `b` are `[]byte` values; use `bytes.Equal(a, b)` for `==` and `!bytes.Equal(a, b)` for `!=`.
 - `bytesbufferstring` — reports `string(buf.Bytes())` calls where `buf` is a `bytes.Buffer` value receiver, suggesting `buf.String()` instead.
+- `closeerrorunchecked` — reports `Close()` expression statements and assignments where the error return value is discarded, including inside deferred closures.
+- `consolestderr` — checks console formatter destinations in direct `fmt.Fprint*` stdout and stderr writes, with suggested fixes. Default names use stderr styling; intentional stdout output uses `*Stdout` variants. `RenderStructWithOptions` requires an option literal matching the destination; unknown option variables are reported without an automatic fix. It resolves imported packages and exempts stream-neutral helpers; indirect writer/formatter aliases are outside its scope.
 - `contextcancelnotdeferred` — reports context cancel functions that are called directly instead of deferred.
 - `ctxbackground` — reports `context.Background()` calls inside functions that already receive a `context.Context` parameter.
 - `deferinloop` — reports `defer` statements placed directly inside `for`/`range` loop bodies, which execute when the enclosing function returns rather than each iteration and can cause resource leaks.
+- `deferrerrorunchecked` — reports deferred calls that discard an error return value, excluding direct zero-argument `Close()` methods owned by `unchecked_deferredclose`. The analyzer lives in `deferred-error-unchecked`.
 - `errorfwrapv` — reports `fmt.Errorf` calls that pass error arguments without `%w` wrapping.
 - `excessivefuncparams` — reports function declarations that exceed a configurable parameter-count threshold.
 - `errormessage` — reports non-actionable error-message patterns in changed files; pass `-errormessage.full-repo` (or `-errormessage.changed-files=all`) to audit the whole repository.
@@ -24,13 +27,16 @@ This package currently provides custom Go analyzers in the following subpackages
 - `fileclosenotdeferred` — reports non-deferred file `Close()` calls that can leak resources.
 - `execcommandwithoutcontext` — reports `exec.Command(...)` calls inside functions that already receive `context.Context` and should use `exec.CommandContext(...)`.
 - `fmterrorfnoverbs` — reports `fmt.Errorf` calls whose format string contains no verbs, recommending `errors.New` instead.
+- `formatintitoa` — reports `strconv.FormatInt(int64(x), 10)` for `int` arguments, recommending `strconv.Itoa(x)`. Supports constant decimal bases, parentheses, and import/type aliases; excludes defined integer types and non-decimal bases. Suggested fixes are limited to package-qualified calls without overlapping comments.
+- `fprintferrorunchecked` — reports unchecked `fmt.Fprintf`, `fmt.Fprint`, and `fmt.Fprintln` writes except direct console output; CI reports findings as warnings.
 - `fprintlnsprintf` — reports `fmt.Fprintln(..., fmt.Sprintf(...))` patterns and recommends direct formatting calls.
 - `generatedyamlheredoc` — reports shell heredocs embedded in generated workflow YAML and recommends passing plain environment-variable content to a JavaScript renderer. Run `make golint-custom` to verify that an unsuppressed heredoc in `pkg/workflow` is reported.
 - `globwalkignorederror` — reports `filepath.Glob` and `os.ReadDir` calls where the error return is discarded with `_`.
 - `goroutinemissingrecover` — reports goroutines started via a function literal whose body does not install a top-level `defer func() { recover() }()` guard.
+- `goroutineresourceleak` — reports goroutine resource acquisitions without deferred cleanup before a possible exit, channels without a close or safely buffered send/receive pair, and loop-launched goroutines without matching `WaitGroup` synchronization.
 - `hardcodedfilepath` — reports hard-coded file path string literals that match known path constants or should be extracted into named constants; also annotates paths that appear in log/print calls.
 - `httpnoctx` — reports HTTP client and package-level HTTP calls that do not accept a `context.Context`.
-- `httprespbodyclose` — reports HTTP responses whose `Body.Close()` call is missing or not deferred.
+- `httprespbodyclose` — reports directly matched HTTP response `Body.Close()` calls that are not deferred.
 - `httpstatuscode` — reports raw HTTP status-code integer literals that should use `net/http` named constants.
 - `ioutildeprecated` — reports uses of deprecated `io/ioutil` functions (deprecated since Go 1.16) and suggests their replacements in the `io` and `os` packages.
 - `jsonmarshalignoredeerror` — reports `json.Marshal` and `json.Unmarshal` calls where the error return is discarded.
@@ -44,11 +50,13 @@ This package currently provides custom Go analyzers in the following subpackages
 - `manualpathconcat` — reports manual `"/"` separator string concatenation used to build paths (e.g. `dir + "/" + file`) that should use `filepath.Join` or `path.Join`.
 - `nilctxpassed` — reports function calls where `nil` is passed as a `context.Context` argument; the correct idioms are `context.Background()` or `context.TODO()`.
 - `osgetenvlibrary` — reports `os.Getenv` calls in library packages (`pkg/*`) where environment access should be injected.
+- `osisnotexist` — reports `os.IsNotExist`, `os.IsExist`, `os.IsPermission`, and `os.IsTimeout`, which do not inspect arbitrary wrapped errors. Use `errors.Is` with `fs.ErrNotExist`, `fs.ErrExist`, or `fs.ErrPermission`. For timeouts, use `errors.As` with `interface{ Timeout() bool }` and check `Timeout()`; `errors.Is(err, os.ErrDeadlineExceeded)` only covers deadline errors, not every timeout.
 - `osexitinlibrary` — reports `os.Exit` calls in library packages (`pkg/*`) where process termination should be delegated to `cmd/*` entry points.
 - `ossetenvlibrary` — reports `os.Setenv` calls in library packages (`pkg/*`) where side effects should be isolated.
 - `packagelevelmutableslicemap` — reports package-level (file/package-scope) `var` slice/map declarations mutated from inside a function body via `append()` re-assignment, index assignment, or `delete()`. Mutations inside a top-level `init()` are exempt.
 - `panic-in-library-code` — reports `panic()` calls in library packages (`pkg/*`) where errors should be returned instead.
 - `rawloginlib` — reports direct usage of the standard `log` package in library packages, where `pkg/logger` should be used.
+- `reflectdeepequalusage` — reports `reflect.DeepEqual()` calls, including calls through local function-value aliases, that should use typed equality operators or type-specific comparison functions. Alias resolution is conservative: aliases must have a declaration initializer and no reassignment or address escape; package-level aliases are not resolved.
 - `regexpcompileinfunction` — reports `regexp.Compile` / `regexp.MustCompile` and their POSIX variants called inside functions that should be package-level.
 - `regexpdynamicpattern` — reports regexp compile calls whose pattern is not a compile-time constant string.
 - `seenmapbool` — reports `map[string]bool` used as a set (values always `true`) that should use `map[string]struct{}` instead.
@@ -72,19 +80,75 @@ This package currently provides custom Go analyzers in the following subpackages
 - `timenowsub` — reports `time.Now().Sub(t)` calls that should be simplified to `time.Since(t)`.
 - `tolowerequalfold` — reports case-insensitive string comparisons using `strings.ToLower`/`ToUpper` that should use `strings.EqualFold`.
 - `trimleftright` — reports `strings.TrimLeft`/`TrimRight` calls with a multi-character literal cutset where `TrimPrefix`/`TrimSuffix` was likely intended.
+- `typeassertionnil` — reports single-value type assertions to pointer types and recommends the two-value form.
 - `typeassertionokdiscarded` — reports two-value type assertions whose `ok` result is discarded.
 - `uncheckedsliceindex` — reports slice and string indexes without proven bounds checks.
+- `unchecked_deferredclose` — reports deferred `Close()` calls that ignore error return values.
 - `uncheckedtypeassertion` — reports single-value type assertions where unchecked panics are possible.
 - `uncheckedflushreturn` — reports `Flush()` method calls where the error return is discarded, which silently drops buffered data on failure.
+- `walkdirignoredeerror` — reports `filepath.Walk` and `filepath.WalkDir` calls where the error return is discarded, hiding traversal failures. The analyzer lives in `walk-dir-ignored-error`.
 - `wgdonenotdeferred` — reports non-deferred `sync.WaitGroup.Done()` calls that can deadlock on panics or early returns.
 - `writebytestring` — reports `w.Write([]byte(s))` calls where `s` is a string, which can be replaced with `io.WriteString` to avoid an unnecessary `[]byte` allocation.
 - `internal` — shared helper packages for analyzers (file checks, `nolint` handling, and coverage-aware perf gating).
+
+## Close error policy
+
+Deferred cleanup and error handling are separate requirements. A bare `defer c.Close()`
+ensures cleanup runs, but still discards the error; it is not an approved error-handling
+idiom simply because `closeerrorunchecked` does not report it.
+
+The two analyzers are complementary: `unchecked_deferredclose` diagnoses direct deferred
+`Close()` calls, while `closeerrorunchecked` diagnoses expression statements and
+blank-identifier assignments, including inside deferred closures. Wrapping an unchecked
+call in a closure does not fix it. Use a deferred closure that propagates or reports the
+cleanup error. For example, a function with a named `err error` result can preserve both
+the operation error and the cleanup error using `errors.Join`:
+
+```go
+defer func() {
+    err = errors.Join(err, c.Close())
+}()
+```
+
+Methods that return no error remain valid as bare deferred calls. Intentional exceptions
+require the appropriate analyzer's `nolint` directive with a justification. Neither
+analyzer proves that resources are closed or that an assigned error is eventually
+handled. Their separate CI rollout exclusions remain unchanged pending remediation
+of existing findings.
+
+`deferrerrorunchecked` excludes direct zero-argument `Close()` methods so that
+`unchecked_deferredclose` remains their sole diagnostic owner. Existing
+`nolint:unchecked_deferredclose` directives keep their meaning; other deferred
+error-returning calls remain covered by `deferrerrorunchecked`.
+
+## Resource analysis boundaries
+
+`manualmutexunlock`, `fileclosenotdeferred`, `contextcancelnotdeferred`, and
+`httprespbodyclose` match acquisition and cleanup calls syntactically within a
+function. They report matched manual cleanup without a matching defer, not every
+acquisition lacking cleanup. Calls such as `releaseLock(mu)`, `closeFile(f)`,
+`cancelContext(cancel)`, and `closeBody(resp)` are outside their scope, whether
+manual or deferred: these analyzers do not infer helper behavior or follow aliases.
+Passing a resource to a read-only helper does not count as cleanup or hide a
+direct manual cleanup. Ownership transfers without locally matched cleanup remain
+unreported.
+
+`goroutineresourceleak` permits bookkeeping between an acquisition and its defer
+in the same block, but stops at possible exits (including synchronous builtin
+`panic`), loops, repeated locking, or resource reassignment.
+Its channel check conservatively stops diagnosing a channel handed to an opaque
+call, assigned to a local alias, stored (including through `append`), or captured
+by a closure. Those
+handoffs are not proof of safety; their behavior is outside the local check.
+Built-in `len` and `cap` calls, comparisons, receives, and type conversions are
+not themselves handoffs. A launched goroutine's return values are discarded, so
+returning a channel does not transfer ownership.
 
 ## Coverage-aware perf gating
 
 Micro-optimizations flagged by allocation/perf linters (e.g. `stringsconcatloop`, `appendoneelement`,
 `appendbytestring`, `bytesbufferstring`, `bytescomparestring`, `lenstringsplit`, `mapclearloop`,
-`seenmapbool`, `slicemakezerolength`, `sortslice`, `stringbytesroundtrip`, `stringsjoinone`, `tolowerequalfold`, and
+`reflectdeepequalusage`, `seenmapbool`, `slicemakezerolength`, `sortslice`, `stringbytesroundtrip`, `stringsjoinone`, `tolowerequalfold`, and
 `writebytestring`) only matter on hot paths: applying them to code that tests never execute adds
 churn without a measurable benefit. These linters consult the shared
 `pkg/linters/internal/coverage` package, which loads a Go coverage profile (produced by
@@ -114,9 +178,12 @@ environment variable and gates findings on the recorded execution hit count for 
 | `bufioscannererunchecked` | Custom `go/analysis` analyzer that flags `bufio.Scanner` loops that do not check `Err()` after scanning completes |
 | `bytescomparestring` | Custom `go/analysis` analyzer that flags `string(a) == string(b)` / `!=` comparisons on `[]byte` values; use `bytes.Equal(a, b)` for `==` and `!bytes.Equal(a, b)` for `!=` |
 | `bytesbufferstring` | Custom `go/analysis` analyzer that flags `string(buf.Bytes())` calls where `buf` is a `bytes.Buffer` value and suggests `buf.String()` instead |
+| `closeerrorunchecked` | Custom `go/analysis` analyzer that flags `Close()` method calls where the error return value is explicitly discarded |
+| `consolestderr` | Custom `go/analysis` analyzer that requires destination-aware console formatting for direct stderr writes |
 | `contextcancelnotdeferred` | Custom `go/analysis` analyzer that flags context cancel functions called directly instead of deferred |
 | `ctxbackground` | Custom `go/analysis` analyzer that flags `context.Background()` calls inside functions that already receive a context parameter |
 | `deferinloop` | Custom `go/analysis` analyzer that flags `defer` statements inside `for`/`range` loop bodies that execute when the enclosing function returns rather than each iteration |
+| `deferrerrorunchecked` | Custom `go/analysis` analyzer that flags deferred calls discarding errors, except zero-argument `Close()` methods |
 | `errorfwrapv` | Custom `go/analysis` analyzer that flags `fmt.Errorf` calls that pass error arguments without `%w` wrapping |
 | `excessivefuncparams` | Custom `go/analysis` analyzer that flags function declarations with too many positional parameters |
 | `errormessage` | Custom `go/analysis` analyzer that flags non-actionable error message patterns in changed files (or all files with `-errormessage.full-repo`) |
@@ -125,13 +192,16 @@ environment variable and gates findings on the recorded execution hit count for 
 | `execcommandwithoutcontext` | Custom `go/analysis` analyzer that flags `exec.Command(...)` calls that should use `exec.CommandContext(...)` in context-receiving functions |
 | `fileclosenotdeferred` | Custom `go/analysis` analyzer that flags file `Close()` calls that are not deferred immediately |
 | `fmterrorfnoverbs` | Custom `go/analysis` analyzer that flags `fmt.Errorf` calls with no format verbs, recommending `errors.New` |
+| `formatintitoa` | Custom `go/analysis` analyzer that simplifies decimal `strconv.FormatInt(int64(x), 10)` calls on `int` arguments to `strconv.Itoa(x)` |
+| `fprintferrorunchecked` | Custom `go/analysis` analyzer that warns about unchecked `fmt.Fprintf`/`Fprint`/`Fprintln` writes other than direct console output |
 | `fprintlnsprintf` | Custom `go/analysis` analyzer that flags `fmt.Fprintln(..., fmt.Sprintf(...))` patterns |
 | `generatedyamlheredoc` | Custom `go/analysis` analyzer that flags shell heredocs embedded in generated workflow YAML |
 | `globwalkignorederror` | Custom `go/analysis` analyzer that flags `filepath.Glob` and `os.ReadDir` calls where the error return is discarded with `_` |
 | `goroutinemissingrecover` | Custom `go/analysis` analyzer that flags goroutines started via a function literal that do not install a top-level defer/recover guard |
+| `goroutineresourceleak` | Custom `go/analysis` analyzer that flags goroutine resource acquisitions without immediate deferred cleanup, channels without a close or safely buffered send/receive pair, and loop-launched goroutines without matching `WaitGroup` synchronization |
 | `hardcodedfilepath` | Custom `go/analysis` analyzer that flags hard-coded file path string literals that match known path constants or should be extracted as named constants; annotates paths in log/print calls |
 | `httpnoctx` | Custom `go/analysis` analyzer that flags HTTP calls that do not accept a `context.Context` |
-| `httprespbodyclose` | Custom `go/analysis` analyzer that flags HTTP response bodies that are not closed (or not deferred) |
+| `httprespbodyclose` | Custom `go/analysis` analyzer that flags directly matched HTTP response `Body.Close()` calls that are not deferred |
 | `httpstatuscode` | Custom `go/analysis` analyzer that flags raw HTTP status-code integer literals that should use `net/http` named constants |
 | `ioutildeprecated` | Custom `go/analysis` analyzer that flags deprecated `io/ioutil` function calls (deprecated since Go 1.16) and suggests replacements in the `io` and `os` packages |
 | `jsonmarshalignoredeerror` | Custom `go/analysis` analyzer that flags `json.Marshal`/`json.Unmarshal` calls where the error return is discarded |
@@ -145,11 +215,13 @@ environment variable and gates findings on the recorded execution hit count for 
 | `manualpathconcat` | Custom `go/analysis` analyzer that flags manual `"/"` separator string concatenation used to build paths that should use `filepath.Join` or `path.Join` |
 | `nilctxpassed` | Custom `go/analysis` analyzer that flags function calls where `nil` is passed as a `context.Context` argument |
 | `osgetenvlibrary` | Custom `go/analysis` analyzer that flags `os.Getenv` usage in library packages |
+| `osisnotexist` | Custom `go/analysis` analyzer that flags legacy `os` error predicates and recommends wrapped-error-aware checks |
 | `osexitinlibrary` | Custom `go/analysis` analyzer that flags `os.Exit` usage in library packages |
 | `ossetenvlibrary` | Custom `go/analysis` analyzer that flags `os.Setenv` usage in library packages |
 | `packagelevelmutableslicemap` | Custom `go/analysis` analyzer that flags package-level slice/map `var` declarations mutated from inside a function body via `append()` re-assignment, index assignment, or `delete()` |
 | `panic-in-library-code` | Custom `go/analysis` analyzer that flags `panic()` usage in library packages |
 | `rawloginlib` | Custom `go/analysis` analyzer that flags standard-library `log` package calls in library packages |
+| `reflectdeepequalusage` | Custom `go/analysis` analyzer that flags `reflect.DeepEqual()` calls that should use typed equality operators or type-specific comparison functions |
 | `regexpcompileinfunction` | Custom `go/analysis` analyzer that flags regexp compilation inside function bodies |
 | `regexpdynamicpattern` | Custom `go/analysis` analyzer that flags regexp compile calls with non-constant patterns |
 | `seenmapbool` | Custom `go/analysis` analyzer that flags `map[string]bool` used as a set that should use `map[string]struct{}` |
@@ -173,10 +245,13 @@ environment variable and gates findings on the recorded execution hit count for 
 | `timenowsub` | Custom `go/analysis` analyzer that flags `time.Now().Sub(t)` calls that should use `time.Since(t)` |
 | `tolowerequalfold` | Custom `go/analysis` analyzer that flags case-insensitive comparisons via `strings.ToLower`/`ToUpper` that should use `strings.EqualFold` |
 | `trimleftright` | Custom `go/analysis` analyzer that flags `strings.TrimLeft`/`TrimRight` calls with a multi-character literal cutset where `TrimPrefix`/`TrimSuffix` was likely intended |
+| `typeassertionnil` | Custom `go/analysis` analyzer that flags single-value type assertions to pointer types and recommends the two-value form |
 | `typeassertionokdiscarded` | Custom `go/analysis` analyzer that flags two-value type assertions whose `ok` result is discarded |
 | `uncheckedsliceindex` | Custom `go/analysis` analyzer that reports slice and string indexes without proven bounds checks |
+| `unchecked_deferredclose` | Custom `go/analysis` analyzer that flags deferred `Close()` calls whose error return is ignored |
 | `uncheckedtypeassertion` | Custom `go/analysis` analyzer that flags unchecked single-value type assertions |
 | `uncheckedflushreturn` | Custom `go/analysis` analyzer that flags `Flush()` method calls where the error return is discarded |
+| `walkdirignoredeerror` | Custom `go/analysis` analyzer in `walk-dir-ignored-error` that flags `filepath.Walk`/`filepath.WalkDir` calls where the error return is discarded |
 | `walkfuncerrshadow` | Custom `go/analysis` analyzer that flags `filepath.Walk`/`filepath.WalkDir` callbacks whose `err` parameter shadows an outer `err` variable assigned from the walk call |
 | `wgdonenotdeferred` | Custom `go/analysis` analyzer that flags non-deferred `sync.WaitGroup.Done()` calls |
 | `writebytestring` | Custom `go/analysis` analyzer that flags `w.Write([]byte(s))` calls where `s` is a string that can be replaced with `io.WriteString` |
@@ -220,6 +295,7 @@ import (
 	"github.com/github/gh-aw/pkg/linters/ssljson"
 	"github.com/github/gh-aw/pkg/linters/timesleepnocontext"
 	"github.com/github/gh-aw/pkg/linters/trimleftright"
+	"github.com/github/gh-aw/pkg/linters/typeassertionnil"
 )
 
 // Use with multichecker, singlechecker, or custom go/analysis driver.
@@ -250,6 +326,7 @@ _ = sprintfint.Analyzer
 _ = ssljson.Analyzer
 _ = timesleepnocontext.Analyzer
 _ = trimleftright.Analyzer
+_ = typeassertionnil.Analyzer
 ```
 
 ## Dependencies
@@ -259,6 +336,7 @@ _ = trimleftright.Analyzer
 - `github.com/github/gh-aw/pkg/linters/appendoneelement` — append-one-element analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/bytescomparestring` — bytes-compare-string analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/bytesbufferstring` — bytes-buffer-string analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/consolestderr` — console stderr formatter analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/contextcancelnotdeferred` — context-cancel-not-deferred analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/ctxbackground` — context-background analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/deferinloop` — defer-in-loop analyzer subpackage
@@ -270,6 +348,8 @@ _ = trimleftright.Analyzer
 - `github.com/github/gh-aw/pkg/linters/excessivefuncparams` — excessive-func-params analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/fileclosenotdeferred` — file-close-not-deferred analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/fmterrorfnoverbs` — fmt-errorf-no-verbs analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/formatintitoa` — format-int-itoa analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/fprintferrorunchecked` — unchecked-fprint-error analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/fprintlnsprintf` — fprintln-sprintf analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/globwalkignorederror` — glob-walk-ignored-error analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/hardcodedfilepath` — hard-coded-file-path analyzer subpackage
@@ -287,6 +367,7 @@ _ = trimleftright.Analyzer
 - `github.com/github/gh-aw/pkg/linters/manualmutexunlock` — manual-mutex-unlock analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/manualpathconcat` — manual-path-concat analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/osgetenvlibrary` — os-getenv-library analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/osisnotexist` — os-error-predicate analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/osexitinlibrary` — os-exit-in-library analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/ossetenvlibrary` — os-setenv-library analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/packagelevelmutableslicemap` — package-level-mutable-slice-map analyzer subpackage
@@ -312,10 +393,12 @@ _ = trimleftright.Analyzer
 - `github.com/github/gh-aw/pkg/linters/timesleepnocontext` — time-sleep-no-context analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/tolowerequalfold` — to-lower-equal-fold analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/trimleftright` — trim-left-right analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/typeassertionnil` — type-assertion-nil analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/typeassertionokdiscarded` — type-assertion-ok-discarded analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/unchecked-slice-index` — unchecked-slice-index analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/uncheckedtypeassertion` — unchecked-type-assertion analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/uncheckedflushreturn` — unchecked-flush-return analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/walk-dir-ignored-error` — walk-dir-ignored-error analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/walkfuncerrshadow` — walk-func-err-shadow analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/wgdonenotdeferred` — wg-done-not-deferred analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/writebytestring` — write-byte-string analyzer subpackage
@@ -333,7 +416,11 @@ _ = trimleftright.Analyzer
 ## Design Notes
 
 - The package is intentionally organized as a namespace (`pkg/linters/*`) so individual analyzers remain isolated and independently testable.
-- CI currently enforces the `errstringmatch`, `manualmutexunlock`, `panicinlibrarycode`, `osexitinlibrary`, and `rawloginlib` analyzers via `.github/workflows/cgo.yml`.
+- CI enforces selected production analyzers via the native and WebAssembly `LINTER_FLAGS` lists in `.github/workflows/cgo.yml`; `fprintferrorunchecked` is excluded from blocking checks and reported separately as a non-blocking warning on native Go code.
+- `consolestderr` has dedicated blocking steps on both targets. `TestCIEnforcedLintersMatchTargets` requires the combined bulk and dedicated analyzer sets to match across native and WebAssembly targets, independently of the registry guard.
+- `typeassertionnil` is registered but excluded from CI enforcement pending a cross-platform enforcement-readiness audit.
+- `unchecked_deferredclose` is registered but excluded from CI enforcement until existing deferred `Close()` findings are remediated.
+- `walkdirignoredeerror` is registered but excluded from CI enforcement until existing discarded `WalkDir` errors in `pkg/cli/audit_threat_detection.go` and `pkg/cli/model_routing.go` are remediated.
 - `excessivefuncparams` exposes a `-max-params` analyzer flag and defaults to `8` parameters (`DefaultMaxParams`).
 - `largefunc` exposes a `-max-lines` analyzer flag, defaults to `60` lines (`DefaultMaxLines`), and skips `_test.go` files.
 - `osexitinlibrary` helps enforce separation between library logic and process-level termination.

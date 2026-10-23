@@ -69,6 +69,8 @@ type AWFConfigFile struct {
 	// Schema is the JSON schema reference for IDE auto-complete support.
 	Schema string `json:"$schema,omitempty"`
 
+	Experimental *AWFExperimentalConfig `json:"experimental,omitempty"`
+
 	// Runner contains runner topology metadata that AWF uses to activate
 	// topology-specific behaviors (split-filesystem handling, network isolation,
 	// tool cache redirection, sysroot image selection).
@@ -94,6 +96,9 @@ type AWFConfigFile struct {
 
 	// CloudHypervisor contains Cloud Hypervisor microVM execution configuration.
 	CloudHypervisor *AWFCloudHypervisorConfig `json:"cloudHypervisor,omitempty"`
+
+	// NVX contains NVX one-shot microVM execution configuration.
+	NVX *AWFNVXConfig `json:"nvx,omitempty"`
 
 	// Logging contains logging and diagnostics configuration.
 	Logging *AWFLoggingConfig `json:"logging,omitempty"`
@@ -148,6 +153,10 @@ type AWFPlatformConfig struct {
 	Type string `json:"type,omitempty"`
 }
 
+type AWFExperimentalConfig struct {
+	ModelRouting bool `json:"modelRouting,omitempty"`
+}
+
 // AWFAPIProxyConfig is the "apiProxy" section of the AWF config file.
 // It maps to the apiProxy.* fields in the AWF config schema.
 // Note: --enable-api-proxy is deprecated since AWF v0.27.32 (API proxy is always on).
@@ -176,7 +185,8 @@ type AWFAPIProxyConfig struct {
 	// When nil, the AWF default (enabled=true, strategy=middle_power) is used.
 	// Set enabled=false to prevent AWF from silently rewriting deployment names, which
 	// is needed for BYOK Azure OpenAI deployments where rewriting causes HTTP 404.
-	ModelFallback *AWFModelFallbackConfig `json:"modelFallback,omitempty"`
+	ModelFallback  *AWFModelFallbackConfig `json:"modelFallback,omitempty"`
+	FallbackModels []string                `json:"fallbackModels,omitempty"`
 
 	// ModelMultipliers configures per-model AIC accounting multipliers in AWF.
 	ModelMultipliers map[string]float64 `json:"modelMultipliers,omitempty"`
@@ -204,7 +214,8 @@ type AWFAPIProxyConfig struct {
 	Models map[string][]string `json:"models,omitempty"`
 
 	// AllowedModels is the explicit allowlist policy for model names/patterns.
-	AllowedModels []string `json:"allowedModels,omitempty"`
+	AllowedModels []string               `json:"allowedModels,omitempty"`
+	Routing       *AWFModelRoutingConfig `json:"routing,omitempty"`
 	// DisallowedModels is the explicit denylist policy for model names/patterns.
 	DisallowedModels []string `json:"disallowedModels,omitempty"`
 
@@ -213,6 +224,21 @@ type AWFAPIProxyConfig struct {
 	// Only emitted for AWF v0.28.10+ (see AWFAPIProxyCACertMinVersion); older
 	// AWF strict config validation rejects the unknown property.
 	CACert string `json:"caCert,omitempty"`
+}
+
+type AWFModelRoutingConfig struct {
+	Objective       AWFModelRoutingObjective `json:"objective"`
+	Task            AWFModelRoutingTask      `json:"task"`
+	CandidateModels []string                 `json:"candidateModels,omitempty"`
+}
+
+type AWFModelRoutingObjective struct {
+	Goal string `json:"goal"`
+	Mode string `json:"mode"`
+}
+
+type AWFModelRoutingTask struct {
+	ConversationFile string `json:"conversationFile"`
 }
 
 // AWFHostedWebConfig is the "apiProxy.hostedWeb" section of the AWF config file.
@@ -275,6 +301,8 @@ type AWFAPITargetConfig struct {
 // AWFContainerConfig is the "container" section of the AWF config file.
 // It maps to container execution CLI flags.
 type AWFContainerConfig struct {
+	ContainerRuntime string `json:"containerRuntime,omitempty"`
+
 	// ImageTag is the pinned AWF Docker image tag, with optional digest metadata.
 	// Format: "<tag>" or "<tag>,squid=sha256:...,agent=sha256:..."
 	// Maps to: --image-tag <value>
@@ -289,6 +317,9 @@ type AWFContainerConfig struct {
 	// runner and daemon have separate filesystems.
 	// Maps to: --docker-host-path-prefix <value>
 	DockerHostPathPrefix string `json:"dockerHostPathPrefix,omitempty"`
+
+	// ContainerWorkDir selects the guest working directory.
+	ContainerWorkDir string `json:"containerWorkDir,omitempty"`
 
 	// Images is the closed manifest of digest-pinned AWF infrastructure images,
 	// keyed by AWF image role (squid, agent, apiProxy, ...). Mapped from the
@@ -314,6 +345,23 @@ type AWFCloudHypervisorConfig struct {
 	MemoryMiB                           int                             `json:"memoryMib,omitempty"`
 	APITimeoutMs                        int                             `json:"apiTimeoutMs,omitempty"`
 	SHA256                              *AWFCloudHypervisorSHA256Config `json:"sha256,omitempty"`
+}
+
+// AWFNVXConfig is the "nvx" section of the AWF config file.
+type AWFNVXConfig struct {
+	PreviewEnabled             bool   `json:"previewEnabled"`
+	MountPolicy                string `json:"mountPolicy"`
+	LayerPath                  string `json:"layerPath"`
+	ArtifactManifestPath       string `json:"artifactManifestPath"`
+	ArtifactManifestBundlePath string `json:"artifactManifestBundlePath"`
+	SignerWorkflow             string `json:"signerWorkflow,omitempty"`
+	OpenVMMPath                string `json:"openvmmPath"`
+	KernelPath                 string `json:"kernelPath"`
+	InitramfsPath              string `json:"initramfsPath"`
+	MemoryMiB                  int    `json:"memoryMib"`
+	MemoryMaxBytes             int64  `json:"memoryMaxBytes"`
+	PidsMax                    int    `json:"pidsMax"`
+	ScratchBytes               int64  `json:"scratchBytes,omitempty"`
 }
 
 // AWFCloudHypervisorSHA256Config contains development-only legacy artifact hashes.

@@ -201,13 +201,30 @@ func buildEngineMetadataEnvVars(engineConfig *EngineConfig, model string) []stri
 	// Add engine model: prefer explicit compile-time config; fall back to the runtime model
 	// captured by the activation job so safe-output footers can show the actual model used
 	// (e.g. the value of the GH_AW_MODEL_AGENT_* variable) rather than showing nothing.
-	if model != "" {
+	if model != "" && engineConfig.ModelRouting == nil {
 		customEnvVars = append(customEnvVars, fmt.Sprintf("          GH_AW_ENGINE_MODEL: %q\n", model))
 	} else {
 		customEnvVars = append(customEnvVars, fmt.Sprintf("          GH_AW_ENGINE_MODEL: ${{ needs.%s.outputs.model }}\n", string(constants.AgentJobName)))
 	}
+	if engineConfig.ModelRouting != nil {
+		customEnvVars = append(customEnvVars,
+			fmt.Sprintf("          GH_AW_ENGINE_MODEL_EFFORT: ${{ needs.%s.outputs.model_effort }}\n", string(constants.AgentJobName)),
+			fmt.Sprintf("          GH_AW_MODEL_ROUTING_STATUS: ${{ needs.%s.outputs.model_routing_status }}\n", string(constants.AgentJobName)),
+		)
+	}
 
 	return customEnvVars
+}
+
+func buildModelRoutingOutputEnvVars(engineConfig *EngineConfig, mainJobName string) []string {
+	if engineConfig == nil || engineConfig.ModelRouting == nil {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("          GH_AW_ENGINE_MODEL: ${{ needs.%s.outputs.model }}\n", mainJobName),
+		fmt.Sprintf("          GH_AW_ENGINE_MODEL_EFFORT: ${{ needs.%s.outputs.model_effort }}\n", mainJobName),
+		fmt.Sprintf("          GH_AW_MODEL_ROUTING_STATUS: ${{ needs.%s.outputs.model_routing_status }}\n", mainJobName),
+	}
 }
 
 // ========================================
@@ -256,6 +273,10 @@ func injectProcessorStepEnv(steps []string, env map[string]string) []string {
 }
 
 func (c *Compiler) addResolvedSafeOutputGitHubTokenForConfig(steps *[]string, data *WorkflowData, configToken string, resolver func(string) string, allowGitHubApp bool) {
+	*steps = append(*steps, fmt.Sprintf("          github-token: %s\n", resolveSafeOutputGitHubTokenForConfig(data, configToken, resolver, allowGitHubApp)))
+}
+
+func resolveSafeOutputGitHubTokenForConfig(data *WorkflowData, configToken string, resolver func(string) string, allowGitHubApp bool) string {
 	var safeOutputsToken string
 	var githubApp *GitHubAppConfig
 	if data.SafeOutputs != nil {
@@ -274,15 +295,39 @@ func (c *Compiler) addResolvedSafeOutputGitHubTokenForConfig(steps *[]string, da
 		// fallback in that case so github-token never resolves to an empty value.
 		if githubApp.shouldIgnoreMissingKey() || !safeOutputsGlobalAppTokenMinted(data.SafeOutputs) {
 			fallbackToken := resolver(resolvedCustomToken)
-			*steps = append(*steps, fmt.Sprintf("          github-token: %s\n", combineTokenExpressions("${{ steps.safe-outputs-app-token.outputs.token }}", fallbackToken)))
-			return
+			return combineTokenExpressions("${{ steps.safe-outputs-app-token.outputs.token }}", fallbackToken)
 		}
-		*steps = append(*steps, "          github-token: ${{ steps.safe-outputs-app-token.outputs.token }}\n")
-		return
+		return "${{ steps.safe-outputs-app-token.outputs.token }}"
 	}
 
-	resolvedToken := resolver(resolvedCustomToken)
-	*steps = append(*steps, fmt.Sprintf("          github-token: %s\n", resolvedToken))
+	return resolver(resolvedCustomToken)
+}
+
+func (c *Compiler) safeOutputGitHubTokenSource(data *WorkflowData) string {
+	if data.SafeOutputs == nil {
+		return `"github_actions"`
+	}
+
+	safeOutputs := data.SafeOutputs
+	if safeOutputs.GitHubApp == nil {
+		if safeOutputs.GitHubToken != "" {
+			if safeOutputs.GitHubToken == "${{ secrets.GITHUB_TOKEN }}" || safeOutputs.GitHubToken == "${{ github.token }}" {
+				return `"github_actions"`
+			}
+			return `"unknown"`
+		}
+		return "${{ secrets.GH_AW_GITHUB_TOKEN != '' && 'pat' || 'github_actions' }}"
+	}
+
+	if !safeOutputs.GitHubApp.shouldIgnoreMissingKey() && safeOutputsGlobalAppTokenMinted(safeOutputs) {
+		return `"app"`
+	}
+
+	fallbackSource := "secrets.GH_AW_GITHUB_TOKEN != '' && 'pat' || 'github_actions'"
+	if safeOutputs.GitHubToken != "" {
+		fallbackSource = "'unknown'"
+	}
+	return fmt.Sprintf("${{ steps.safe-outputs-app-token.outputs.token != '' && 'app' || %s }}", fallbackSource)
 }
 
 // addSafeOutputGitHubTokenForConfig adds github-token to the with section for standard safe-output operations.

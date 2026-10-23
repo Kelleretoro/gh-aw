@@ -139,7 +139,29 @@ Yes. Private repositories can support proprietary code, a "sidecar" repository w
 
 ### Can I edit workflows directly on GitHub.com without recompiling?
 
-Yes, for the **markdown body** (AI instructions) — loaded at runtime, takes effect on the next run. **Frontmatter** (tools, permissions, triggers, network rules) is embedded at compile time and requires `gh aw compile my-workflow` after edits. See [Editing Workflows](/gh-aw/guides/working-with-workflows/#editing-workflows).
+Yes, for the **markdown body** (AI instructions) — loaded at runtime, takes effect on the next run. **Frontmatter** (tools, permissions, triggers, network rules) is embedded at compile time and requires `gh aw compile my-workflow` after edits. See [Editing Workflows](/gh-aw/setup/working-with-workflows/#editing-workflows).
+
+### How can I use parameters in a workflow prompt?
+
+Declare `workflow_dispatch` inputs for values chosen when starting a run, or use workflow-level `env` for values configured in one place. Reference them with GitHub Actions expressions in the markdown body:
+
+```aw wrap
+---
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to report on
+        type: string
+        default: main
+env:
+  PRODUCT: Contoso
+---
+
+Build a report for ${{ env.PRODUCT }} on branch ${{ inputs.branch }}.
+```
+
+The prompt is populated with the input and environment values before the agent receives it. A shell-style placeholder such as `${PRODUCT}` in the markdown body is **not** expanded; use `${{ env.PRODUCT }}` instead. Recompile after changing frontmatter values or input definitions.
 
 ### Can workflows trigger other workflows?
 
@@ -200,7 +222,7 @@ See [Using MCPs](/gh-aw/guides/mcps/).
 Use the existing image override paths instead of raw `sandbox.agent.args`:
 
 - For repository-wide container substitutions (tooling images, MCP images, and default AWF tags), configure `.github/workflows/aw.json` `container_pins`.
-- For AWF infrastructure roles specifically (for example `squid`, `agent`, `apiProxy`, `cliProxy`, `buildTools`), configure `sandbox.agent.images` with digest-pinned references.
+- For AWF infrastructure roles specifically (for example `squid`, `agent`, `api-proxy`, `cli-proxy`, `build-tools`), configure `sandbox.agent.images` with digest-pinned references.
 
 ```json title=".github/workflows/aw.json"
 {
@@ -220,7 +242,7 @@ sandbox:
     images:
       squid: registry.example.com/approved/squid:v0.28.8@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       agent: registry.example.com/approved/agent:v0.28.8@sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-      apiProxy: registry.example.com/approved/api-proxy:v0.28.8@sha256:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      api-proxy: registry.example.com/approved/api-proxy:v0.28.8@sha256:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 > [!NOTE]
@@ -260,7 +282,7 @@ imports:
   - githubnext/agentics/shared/common-tools.md
 ```
 
-See [Imports](/gh-aw/reference/imports/) and [Adding Existing Workflows](/gh-aw/guides/working-with-workflows/#adding-existing-workflows).
+See [Imports](/gh-aw/reference/imports/) and [Adding Existing Workflows](/gh-aw/setup/working-with-workflows/#adding-existing-workflows).
 
 ### Can I run workflows on a schedule?
 

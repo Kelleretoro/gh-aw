@@ -106,6 +106,8 @@ imports:
 
 `shared/reporting-otlp.md` combines `shared/reporting.md` and `shared/otlp.md` for telemetry-enabled reporting workflows.
 
+Shared OTLP configuration can use whole-value `${{ github.aw.metadata.<key> }}` references in `observability.otlp.attributes` and `observability.otlp.resource-attributes`. These resolve at compile time against each importing root workflow's `metadata` map, so callers do not need to pass the values through import inputs. Only simple, existing metadata keys can be referenced, and only explicitly selected values are exported.
+
 ## Import Schema (`import-schema`)
 
 Use `import-schema` to declare a typed parameter contract. Callers pass values via `with`; the compiler validates them and substitutes them into the shared file's frontmatter and body before processing.
@@ -231,7 +233,7 @@ Use this form when workflows in different directories need the same stable impor
 
 ### Cross-repo imports
 
-Paths matching `owner/repo/path@ref` are fetched from GitHub at compile time. The `@ref` suffix can be a semantic tag (`@v1.0.0`), branch (`@main`), or commit SHA. Remote imports are cached in `.github/aw/imports/` by commit SHA to support offline compilation; local imports are never cached. See [Adding Existing Workflows](/gh-aw/guides/working-with-workflows/#adding-existing-workflows) for installation flows.
+Paths matching `owner/repo/path@ref` are fetched from GitHub at compile time. The `@ref` suffix can be a semantic tag (`@v1.0.0`), branch (`@main`), or commit SHA. Remote imports are cached in `.github/aw/imports/` by commit SHA to support offline compilation; local imports are never cached. See [Adding Existing Workflows](/gh-aw/setup/working-with-workflows/#adding-existing-workflows) for installation flows.
 
 ```aw wrap
 ---
@@ -381,6 +383,26 @@ Process the issue using the rotated token from the imported step.
 ```
 
 Steps from imports run **before** steps defined in the main workflow. Imported prerequisites run before the files that depend on them, while unrelated sibling imports retain declaration order.
+
+### Importing Secret Masking Steps
+
+`secret-masking.steps` defines custom redaction hooks that run after built-in secret redaction and before artifact upload. Imported hooks are appended to the workflow's hooks.
+
+Built-in redaction scans supported text files under `/tmp/gh-aw` and `${RUNNER_TEMP}/gh-aw`. Files without secret matches are left unchanged unless `secret-masking.steps` configures custom redactors, which require writable files. When redaction or custom-hook preparation requires a write, a readable non-writable file, such as a container-owned log, is atomically replaced with a runner-owned copy with owner-only read/write permissions. If the parent directory is also read-only, such as a Go module cache directory, redaction instead makes the file owner-readable and writable in place without changing directory permissions. This requires permission to change the file's mode; it does not bypass file locks or inaccessible directories.
+
+Runtime-mask redaction handles multi-megabyte JSON strings and mixed log records without relying on recursive regular-expression matching or repeatedly scanning rejected quoted spans. If malformed quotes hide an encoded mask, conservative recovery replaces only matching source spans and represents the record as a JSON string. The decoded record preserves unrelated plain-text escapes, such as backslashes in Windows paths; records without additional matches retain their original bytes. Configured secrets, built-in token patterns, and runtime masks are matched together so overlapping credentials cannot evade redaction through fragmentation or encoding changes. This does not change GitHub's step-summary size limit.
+
+Malformed ordinary JSON artifacts are treated as text: raw and escaped credentials are matched together across the entire file, including multiline secrets and recoverable quoted spans. Unexpected decoding or write failures still remove the source before upload; malformed executable safe outputs follow the stricter rules below.
+
+Executable safe-output JSON/JSONL preserves public field names, aliases, and enum values declared by the action's bundled tool schemas, so short masks cannot rename `body` or change a review's message type. Free-form values and arbitrary nested keys are still redacted, even when they contain those same public words. The configuration and validation files consumed by the output collector also retain public protocol vocabulary; redaction must not rewrite their constraints or targets. Malformed executable records and mask conflicts with custom message types, custom top-level fields, or control data fail closed: the source is removed and redaction fails rather than publishing a corrupted message. Ordinary log artifacts do not receive these protocol exceptions.
+
+Custom hooks must tolerate absent optional files and files that disappear between discovery and reading (`ENOENT`). Earlier cleanup or redaction can remove files, including symbolic links and artifacts that could not be sanitized. Do not create empty placeholders for missing logs or outputs.
+
+Custom hooks run during workspace redaction in the agent job. Graders execute
+later in conclusion using the redacted in-memory unified session; they do not
+read source files or rerun custom hooks.
+
+Permission errors and other redaction failures are not equivalent to missing files. Report them explicitly and remove any unsanitized artifact source before upload; do not silently skip it or use `continue-on-error` as a workaround. For files outside the built-in scan, custom hooks are responsible for preparing writable files and avoiding symbolic links. Stop log writers before redaction so they cannot append sensitive content after sanitization.
 
 ### Importing MCP Servers
 
@@ -569,7 +591,7 @@ gh aw compile my-workflow
 
 ## Learn More
 
-- [Adding Existing Workflows](/gh-aw/guides/working-with-workflows/#adding-existing-workflows) - Installing workflows with `gh aw add`
+- [Adding Existing Workflows](/gh-aw/setup/working-with-workflows/#adding-existing-workflows) - Installing workflows with `gh aw add`
 - [Frontmatter](/gh-aw/reference/frontmatter/) - Configuration options reference
 - [MCPs](/gh-aw/guides/mcps/) - Model Context Protocol setup
 - [Safe Outputs](/gh-aw/reference/safe-outputs/) - Safe output configuration details

@@ -93,14 +93,13 @@ func TestBuildCopilotSDKToolConfigPreservesTriState(t *testing.T) {
 			args: []string{
 				"--allow-tool", "write",
 				"--allow-tool", "web_fetch",
-				"--allow-tool", "web_search",
 				"--allow-tool", "shell",
 				"--allow-tool", "github",
 			},
 			capabilities: copilotSDKToolCapabilities{
-				Bash: true, Edit: true, WebFetch: true, WebSearch: true, MCP: true, CLIProxy: true,
+				Bash: true, Edit: true, WebFetch: true, MCP: true, CLIProxy: true,
 			},
-			permissions: []string{"github", "read", "shell", "web_fetch", "web_search", "write"},
+			permissions: []string{"github", "read", "shell", "web_fetch", "write"},
 		},
 		{
 			name: "empty bash allowlist is explicitly disabled",
@@ -168,13 +167,52 @@ func TestBuildCopilotSDKToolConfigPreservesTriState(t *testing.T) {
 	}
 }
 
+func TestBuildCopilotSDKToolConfigDynamicWorkflows(t *testing.T) {
+	enabled, disabled := true, false
+	for _, tt := range []struct {
+		name    string
+		setting *bool
+		want    bool
+	}{
+		{name: "default"},
+		{name: "enabled", setting: &enabled, want: true},
+		{name: "disabled", setting: &disabled},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := &WorkflowData{EngineConfig: &EngineConfig{CopilotSDK: true, DynamicWorkflows: tt.setting}}
+			config := buildCopilotSDKToolConfig(data, nil)
+			if config.Capabilities.DynamicWorkflows != tt.want {
+				t.Errorf("DynamicWorkflows = %v, want %v", config.Capabilities.DynamicWorkflows, tt.want)
+			}
+			expected := []string{"read"}
+			if tt.want {
+				expected = append(expected, "workflow")
+			}
+			if !reflect.DeepEqual(config.Permissions.AllowedTools, expected) {
+				t.Errorf("AllowedTools = %#v, want %#v", config.Permissions.AllowedTools, expected)
+			}
+		})
+	}
+}
+
 func TestBuildCopilotSDKToolConfigJSONOnlyForSDKMode(t *testing.T) {
 	workflowData := &WorkflowData{
 		EngineConfig: &EngineConfig{CopilotSDK: false},
 		Tools:        map[string]any{"edit": true},
 	}
+
 	if actual := buildCopilotSDKToolConfigJSON(workflowData, []string{"--allow-tool", "write"}); actual != "" {
 		t.Fatalf("buildCopilotSDKToolConfigJSON() = %q, want empty string outside SDK mode", actual)
+	}
+
+}
+
+func TestBuildCopilotSDKToolConfigIncludesAggregateToolCallLimit(t *testing.T) {
+	config := buildCopilotSDKToolConfig(&WorkflowData{
+		EngineConfig: &EngineConfig{CopilotSDK: true, MaxToolCalls: "24"},
+	}, nil)
+	if config.MaxToolCalls != "24" {
+		t.Fatalf("MaxToolCalls = %q, want %q", config.MaxToolCalls, "24")
 	}
 }
 
@@ -225,6 +263,8 @@ func TestCopilotSDKWebFetchContractFixtureMatchesCompiler(t *testing.T) {
 on: workflow_dispatch
 permissions:
   contents: read
+safe-outputs:
+  create-issue: false
 engine:
   id: copilot
   copilot-sdk: true
@@ -262,7 +302,7 @@ tools:
 		switch copilotArgs[index] {
 		case "--disable-builtin-mcps", "--no-ask-user":
 			contractArgs = append(contractArgs, copilotArgs[index])
-		case "--allow-tool":
+		case "--allow-tool", "--deny-tool":
 			if index+1 < len(copilotArgs) {
 				contractArgs = append(contractArgs, copilotArgs[index], copilotArgs[index+1])
 				index++

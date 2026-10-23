@@ -17,6 +17,14 @@ on:
 
 GitHub Agentic Workflows supports all standard GitHub Actions triggers plus additional enhancements for reactions, cost control, and advanced filtering.
 
+`on.admission: true` opts a workflow into the compiler-owned `admission` and `conclusion_admission` jobs. These jobs are omitted by default unless `.github/workflows/aw.json` sets `"admission": true` for the repository. Either opt-in enables both jobs; a workflow-level `false` does not override a repository-level `true`. This setting is not a GitHub Actions event. Recompile after changing it. See [Centralized Activation Admission](/gh-aw/reference/enterprise-configuration/#centralized-activation-admission) for the required runtime variables.
+
+**Experimental hosted CAO triggers:** `on.gateway-dispatch` and all its nested triggers are experimental. GitHub issue, pull-request, discussion, comment, and review/thread notifications are filtered by the server. `projects-items` requires `project_id`; paired `status-transitions` adds delivered Status predicates. Separate `code-scanning-alert` and `dependabot-alerts` triggers select their own events with independent `types`, `severity`, and `filters`; there is no bundled security event. Shared `repos` and wildcard `orgs` restrict independently approved GitHub sources without granting access; non-GitHub families ignore them. Named secret scanning is unsupported. Compilation requires `{"gateway-dispatch":true}` in `.github/workflows/aw.json` and generates a mandatory `gateway_provenance` job for approved CAO App identity, not generic repository-write authority. Configure central Actions secrets `GH_AW_GATEWAY_APP_ID` and `GH_AW_GATEWAY_APP_BOT_ID` (existing variables remain a fallback); every other job requires successful provenance. Integrations must remain nonactivating until the receiver token flow and approved destination revision enforce the [App-token contract](/gh-aw/specs/webhook-gateway-specification/#github-app-token-provenance). No other trigger may coexist with `gateway-dispatch`. Supported non-trigger settings such as `roles` and `bots` remain outside its mapping, and the compiler emits only its workflow-specific restricted `repository_dispatch` route. See [Webhook Triggers](/gh-aw/reference/webhook-triggers/) for syntax, payload filters, and integration requirements.
+
+**Experimental external issue triggers:** `on.gateway-dispatch.jira-issue`, `on.gateway-dispatch.linear-issue`, and `on.gateway-dispatch.azure-devops-issue` use GitHub-style activity names derived from native provider events and delivered transition evidence. Jira requires `project`, Linear requires `organization-id` and accepts optional `team-id`, and Azure DevOps requires `project_id`, all beside `types` without a `filters` wrapper. They share the repository opt-in, write-minimum role policy, and required App-token provenance contract above, but require a separately approved provider bridge and provider-specific credentials. Azure closure requires explicit `closed-states`; Jira label normalization is limited to unambiguous single-label changes. See [Provider Issue Triggers](/gh-aw/reference/provider-issue-triggers/) for supported activities, selectors, and receiver requirements.
+
+All gateway families forward only canonical resource URLs, event type arrays, and declared matching filter literals, never native resource bodies or unselected values. Workflows resolve any additional data with provider-authenticated clients so the provider enforces access. See the [Webhook Gateway Specification](/gh-aw/specs/webhook-gateway-specification/) for the closed payload contract.
+
 ### Dispatch Triggers (`workflow_dispatch:`)
 
 Run workflows manually from the GitHub UI, API, or via `gh aw run`/`gh aw trial`. [Full syntax reference](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#on).
@@ -178,6 +186,8 @@ on:
 
 `pull_request_target.types` accepts the same activity names as `pull_request`, including `ready_for_review`.
 
+Strict mode rejects `pull_request_target` when `on.roles` contains `all` or `read`, including in a role list. Non-strict mode warns about this dangerous combination: untrusted contributors can trigger an agent job with access to secrets, including engine credentials and custom secrets. This restriction applies even with `checkout: false`, trusted checkouts, or `on.pull_request_target.acknowledge-risk: true`. To suppress only the non-strict warning, set `features.dangerously-allow-roles-read-and-pull-request-target: true`. Prefer `pull_request`, or retain the default trusted roles `[admin, maintainer, write]`.
+
 #### Fork Filtering (`forks:`)
 
 Pull request workflows block forks by default for security. Use the `forks:` field to allow specific fork patterns:
@@ -190,6 +200,8 @@ on:
 ```
 
 Use `["owner/repo"]` for a specific repository, `["owner/*"]` for an entire org/user, or `["*"]` to allow all forks (use with caution). Omit `forks:` for the default behavior (same-repository PRs only). The compiler uses repository ID comparison so fork detection is unaffected by repository renames.
+
+Alternatively, use `forks: {author-association: [OWNER, MEMBER, COLLABORATOR]}` to allow fork PRs by the author's relationship to the base repository rather than the fork owner. Same-repository PRs remain allowed, and no association is implicitly included. See [author associations](/gh-aw/reference/fork-support/#author-associations) for trust and secret-availability considerations.
 
 #### Stacked PR Filtering (`max-stack:`)
 
@@ -500,7 +512,9 @@ on:
 
 The `[bot]` suffix is optional — `github-actions` matches `github-actions[bot]` automatically.
 
-Allowlisted bots must be installed on the repository, which is verified through the repository collaborator API. GitHub App identities are not collaborators, so that lookup finds nothing for them. On `repository_dispatch` the check is therefore relaxed: the lookup is still performed, and an allowlisted App is authorized when it conclusively reports that the actor is not a collaborator, because sending the event already requires `contents: write` access to the repository. A lookup that fails (for example during an API outage or when rate limited) is still denied. This is how an App-triggered `repository_dispatch` is admitted — `on.roles:` is matched against repository collaborator roles and never matches an App sender.
+Allowlisted bots must be installed on the repository, which is verified through the repository collaborator API. The built-in Copilot coding agent identities (`Copilot` and `copilot-swe-agent`, including `copilot-swe-agent[bot]`) are an exception: when explicitly allowlisted, they do not require a collaborator lookup. Other GitHub App identities are not collaborators, so that lookup finds nothing for them. On `repository_dispatch` the check is therefore relaxed: the lookup is still performed, and an allowlisted App is authorized when it conclusively reports that the actor is not a collaborator, because sending the event already requires `contents: write` access to the repository. A lookup that fails (for example during an API outage or when rate limited) is still denied. This is how an App-triggered `repository_dispatch` is admitted — `on.roles:` is matched against repository collaborator roles and never matches an App sender.
+
+For PR branch checkout after an `issue_comment`, `pull_request_review_comment`, or `pull_request_review`, an allowlisted Bot sender may bypass the collaborator check only when it authored the comment or review and the PR head and base are both in the workflow repository. Fork PRs and other actors still require write-or-higher collaborator permission.
 
 ### Filtering by Author Associations (`on.skip-author-associations`)
 

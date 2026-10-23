@@ -79,9 +79,9 @@ func parseCommaSeparatedOrNewlineList(s string) []string {
 
 // toAnySlice converts a []string to []any for storage in a map[string]any.
 func toAnySlice(ss []string) []any {
-	out := make([]any, len(ss))
-	for i, s := range ss {
-		out[i] = s
+	out := make([]any, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, s)
 	}
 	return out
 }
@@ -101,6 +101,8 @@ var knownTools = map[string]struct{}{
 	"drive-memory":      {},
 	"comment-memory":    {},
 	"repo-memory":       {},
+	"ledger":            {},
+	"work-queue":        {},
 	"safety-prompt":     {},
 	"timeout":           {},
 	"startup-timeout":   {},
@@ -161,6 +163,14 @@ func NewTools(toolsMap map[string]any) *Tools { //nolint:largefunc // Existing t
 	}
 	if val, exists := toolsMap["repo-memory"]; exists {
 		tools.RepoMemory = parseRepoMemoryTool(val)
+	}
+	if val, exists := toolsMap["ledger"]; exists {
+		ledger, err := parseLedgerToolConfig(val)
+		if err != nil {
+			tools.ledgerParseErr = err
+		} else {
+			tools.Ledger = ledger
+		}
 	}
 	if val, exists := toolsMap["timeout"]; exists {
 		tools.Timeout = parseTimeoutTool(val)
@@ -548,6 +558,11 @@ func parseAgenticWorkflowsTool(val any) *AgenticWorkflowsToolConfig {
 		config.Enabled = boolVal
 	} else if val == nil {
 		config.Enabled = true // nil means enabled
+	} else if configMap, ok := val.(map[string]any); ok {
+		config.Enabled = true
+		if allowWriteTools, ok := configMap["allow-write-tools"].(bool); ok {
+			config.AllowWriteTools = allowWriteTools
+		}
 	}
 
 	return config
@@ -703,6 +718,10 @@ func parseMCPServerConfig(val any) MCPServerConfig { //nolint:largefunc // Exist
 		config.URL = url
 	}
 
+	if caCertFile, ok := configMap["ca-cert-file"].(string); ok {
+		config.CACertFile = caCertFile
+	}
+
 	if headers, ok := configMap["headers"].(map[string]any); ok {
 		config.Headers = make(map[string]string)
 		for k, v := range headers {
@@ -750,6 +769,7 @@ func parseMCPServerConfig(val any) MCPServerConfig { //nolint:largefunc // Exist
 		"version":        {},
 		"toolsets":       {},
 		"url":            {},
+		"ca-cert-file":   {},
 		"headers":        {},
 		"container":      {},
 		"entrypoint":     {},

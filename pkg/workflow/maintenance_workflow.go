@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
@@ -123,6 +124,7 @@ type GenerateMaintenanceWorkflowOptions struct {
 	ActionTag        string
 	RepoConfig       *RepoConfig
 	RepoSlug         string
+	NoLogo           bool
 }
 
 const defaultNoOpIssueExpirationHours = 24 * 30
@@ -132,13 +134,15 @@ func isNoOpReportAsIssueEnabled(reportAsIssue *string) bool {
 }
 
 // GenerateMaintenanceWorkflow generates the agentics-maintenance.yml workflow
-// if any workflows use expiring safe outputs or noop issue reporting.
+// if any workflows use expiring safe outputs, noop issue reporting, steering,
+// or queue compaction.
 // When opts.RepoConfig is non-nil and opts.RepoConfig.MaintenanceDisabled is true the
 // maintenance workflow is deleted and the function returns immediately.
 // opts.RepoSlug is the owner/repo slug used to determine the default branch for the push
 // trigger; pass an empty string to fall back to "main".
 func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWorkflowOptions) error { //nolint:largefunc // Existing workflow orchestration remains centralized.
 	workflowDataList := opts.WorkflowDataList
+	pinWarnings := actionPinWarningsForWorkflows(workflowDataList) //nolint:seenmapbool // PinContext.Warnings requires map[string]bool for shared deduplication.
 	workflowDir := opts.WorkflowDir
 	version := opts.Version
 	actionMode := opts.ActionMode
@@ -165,6 +169,9 @@ func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWo
 			return err
 		}
 		return GenerateAutoUpdateWorkflow(GenerateAutoUpdateWorkflowOptions{
+			RepoConfig:      repoConfig,
+			NoLogo:          opts.NoLogo,
+			PinWarnings:     pinWarnings,
 			Context:         ctx,
 			WorkflowDir:     workflowDir,
 			Enabled:         repoConfig.IsAutoUpgradeEnabled(),
@@ -200,9 +207,12 @@ func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWo
 
 	// Scan workflows for expires fields and track the minimum expires value
 	hasExpires, minExpires, triggerReason := scanWorkflowsForExpires(workflowDataList, repoConfig)
+	compactionLedgers := collectMaintenanceCompactionLedgers(workflowDataList)
+	hasWorkQueue := slices.ContainsFunc(workflowDataList, isWorkQueueEnabled)
+	hasSteering := slices.ContainsFunc(workflowDataList, isSteeringIssueEnabled)
 
-	if !hasExpires {
-		maintenanceLog.Print("No workflows use expires field, skipping maintenance workflow generation")
+	if !hasExpires && len(compactionLedgers) == 0 && !hasWorkQueue && !hasSteering {
+		maintenanceLog.Print("No workflows require scheduled maintenance, skipping maintenance workflow generation")
 
 		// No maintenance workflow means no scheduled close-expired-issues consumer.
 		// Since the implicit 168-hour action-failure default was not an opt-in
@@ -225,6 +235,9 @@ func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWo
 		// for safe_outputs, create_labels, and validate operations.
 		if err := generateAllSideRepoMaintenanceWorkflows(ctx, generateAllSideRepoMaintenanceWorkflowsOptions{
 			workflowDataList: workflowDataList,
+			pinWarnings:      pinWarnings,
+			repoConfig:       repoConfig,
+			noLogo:           opts.NoLogo,
 			workflowDir:      workflowDir,
 			version:          version,
 			actionMode:       actionMode,
@@ -238,6 +251,9 @@ func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWo
 		}
 
 		return GenerateAutoUpdateWorkflow(GenerateAutoUpdateWorkflowOptions{
+			RepoConfig:      repoConfig,
+			NoLogo:          opts.NoLogo,
+			PinWarnings:     pinWarnings,
 			Context:         ctx,
 			WorkflowDir:     workflowDir,
 			Enabled:         repoConfig != nil && repoConfig.IsAutoUpgradeEnabled(),
@@ -253,6 +269,15 @@ func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWo
 		})
 	}
 
+	if triggerReason == "" {
+		if hasWorkQueue {
+			triggerReason = "work queue maintenance"
+		} else if hasSteering {
+			triggerReason = "steering issue cleanup"
+		} else {
+			triggerReason = fmt.Sprintf("%d compaction-enabled ledger(s)", len(compactionLedgers))
+		}
+	}
 	maintenanceLog.Printf("Maintenance workflow generation triggered: %s", triggerReason)
 	maintenanceLog.Printf("Generating maintenance workflow for expired discussions, issues, and pull requests (minimum expires: %d hours)", minExpires)
 
@@ -262,8 +287,15 @@ func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWo
 		minExpiresDays++ // Round up partial days
 	}
 
-	// Generate cron schedule based on minimum expires value
-	cronSchedule, scheduleDesc := generateMaintenanceCron(minExpiresDays)
+	// Generate cron schedule based on minimum expires value. Without expiring safe outputs,
+	// ledger compaction needs daily maintenance (ledgers default to a daily schedule and the
+	// compaction plan job no-ops when a ledger is not yet due). In generateMaintenanceCron,
+	// any minExpiresDays > 4 maps to a daily schedule ("37 0 * * *", "Daily").
+	cronDays := minExpiresDays
+	if !hasExpires {
+		cronDays = 7 // maps to daily in generateMaintenanceCron (> 4 days)
+	}
+	cronSchedule, scheduleDesc := generateMaintenanceCron(cronDays)
 	maintenanceLog.Printf("Maintenance schedule: %s (%s)", cronSchedule, scheduleDesc)
 
 	// Fetch the default branch for the push trigger (dev mode only)
@@ -277,6 +309,13 @@ func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWo
 		strings.TrimSpace(compileGitHubTokenSecret) != "",
 	)
 	copilotOrgBilling := allCopilotWorkflowsUseOrgBilling(workflowDataList)
+	hasCacheMemory := false
+	for _, data := range workflowDataList {
+		if data != nil && data.CacheMemoryConfig != nil && len(data.CacheMemoryConfig.Caches) > 0 {
+			hasCacheMemory = true
+			break
+		}
+	}
 	content, err := buildMaintenanceWorkflowYAML(ctx, buildMaintenanceWorkflowYAMLOptions{
 		cronSchedule:        cronSchedule,
 		scheduleDesc:        scheduleDesc,
@@ -293,9 +332,24 @@ func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWo
 		compileGitHubToken:  getEffectiveMaintenanceGitHubToken(compileGitHubTokenSecret),
 		createCompilePR:     enableCompileCreatePullRequest,
 		copilotOrgBilling:   copilotOrgBilling,
+		compactionLedgers:   compactionLedgers,
+		hasWorkQueue:        hasWorkQueue,
+		hasCacheMemory:      hasCacheMemory,
+		hasSteering:         hasSteering,
+		noLogo:              !shouldIncludeLockFileLogo(repoConfig, opts.NoLogo),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to finalize maintenance workflow YAML: %w", err)
+	}
+	content, err = applyArtifactRetention(content, repoConfig)
+	if err != nil {
+		return fmt.Errorf("failed to configure maintenance artifact retention: %w", err)
+	}
+	if repoConfig != nil {
+		content, err = mapPinnedUsesInYAML(content, repoConfig.ActionPins, repoConfig.ActionPinPrefixes, pinWarnings, resolver)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Write the maintenance workflow file
@@ -314,6 +368,9 @@ func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWo
 	// Generate side-repo maintenance workflows for any SideRepoOps targets detected.
 	if err := generateAllSideRepoMaintenanceWorkflows(ctx, generateAllSideRepoMaintenanceWorkflowsOptions{
 		workflowDataList: workflowDataList,
+		pinWarnings:      pinWarnings,
+		repoConfig:       repoConfig,
+		noLogo:           opts.NoLogo,
 		workflowDir:      workflowDir,
 		version:          version,
 		actionMode:       actionMode,
@@ -327,6 +384,9 @@ func GenerateMaintenanceWorkflow(ctx context.Context, opts GenerateMaintenanceWo
 	}
 
 	return GenerateAutoUpdateWorkflow(GenerateAutoUpdateWorkflowOptions{
+		RepoConfig:      repoConfig,
+		NoLogo:          opts.NoLogo,
+		PinWarnings:     pinWarnings,
 		Context:         ctx,
 		WorkflowDir:     workflowDir,
 		Enabled:         repoConfig != nil && repoConfig.IsAutoUpgradeEnabled(),
@@ -382,6 +442,13 @@ func handleMaintenanceDisabled(workflowDataList []*WorkflowData, workflowDir str
 				fmt.Sprintf("Workflow '%s' uses the 'expires' field but maintenance is disabled in aw.json. "+
 					"Expiration will not run until maintenance is re-enabled.", workflowData.Name)))
 		}
+	}
+
+	// Ledger compaction is owned by maintenance; without it ledgers grow until they reach shard limits.
+	for _, ledger := range collectMaintenanceCompactionLedgers(workflowDataList) {
+		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(
+			fmt.Sprintf("Ledger '%s' has compaction enabled but maintenance is disabled in aw.json. "+
+				"Ledger compaction will not run until maintenance is re-enabled.", ledger.Name)))
 	}
 
 	maintenanceFile := filepath.Join(workflowDir, "agentics-maintenance.yml")

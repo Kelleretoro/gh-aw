@@ -11,7 +11,7 @@ Code-writing types (`create-pull-request` and `push-to-pull-request-branch`) enf
 
 ## Pull Request Creation (`create-pull-request:`)
 
-Creates a PR with the agent's code changes. Falls back to opening an issue if PR creation is blocked (e.g. org settings) — set `fallback-as-issue: false` to disable. Set `max` above `1` to allow multiple independent PRs per run.
+Creates a PR with the agent's code changes. Falls back to opening an issue if PR creation is blocked (e.g. org settings) — set `fallback-as-issue: false` to disable. The default `max: 1` is a **per-workflow-run quota shared by all agents and sub-agents**, not a per-agent limit. Set `max` to the number of PRs the run may create when using parallel agents or creating multiple independent PRs; excess `create_pull_request` calls are rejected.
 
 ```yaml wrap
 safe-outputs:
@@ -144,10 +144,12 @@ By default a random hex suffix is appended to the agent-provided branch name to 
 The agent's commits are packaged as a **git bundle** and uploaded as an Actions artifact. A separate, permission-controlled `safe_outputs` job then:
 
 1. Checks out the target repository at the base branch (shallow, depth 1). Any additional `fetch:` refs declared in `checkout:` frontmatter for the target repository are fetched so their commits are locally available.
-2. Applies the bundle via `git fetch <bundle-file>`. If prerequisite commits are missing (because the base branch advanced while the agent was running), they are fetched from origin by SHA and the bundle fetch retried automatically.
+2. Imports the local bundle offline with `git bundle unbundle`. If prerequisite commits are missing, the handler fails by default; provision the required objects during authenticated checkout or opt in to prerequisite recovery with `allow-full-history-fetch: true` on that specific PR handler. The opt-in permits potentially unbounded recovery downloads, but bundle import and validation remain offline.
 3. Pushes the branch using the GitHub GraphQL API (signed commits) and creates the pull request.
 
-If the base branch advances between agent start and `safe_outputs` apply, the PR is created slightly behind the current base — normal behavior the author can address with a rebase. If a non-fast-forward race occurs during the push itself, the job creates a fallback PR from a temporary branch so no changes are lost.
+If the base branch advances between agent start and `safe_outputs` apply, the PR can be created slightly behind the current base and addressed with a rebase when the necessary bundle objects are available. Otherwise, missing prerequisites cause the handler to fail unless recovery is explicitly enabled as described above. If a non-fast-forward race occurs during the push itself, the job creates a fallback PR from a temporary branch so no changes are lost.
+
+For unsigned bundle pushes, the handler recognizes the exact pinned base tip by default. If the base branch has advanced past an ancestor already included in the bundle, that older-ancestor size baseline is opt-in: set `allow-merged-base-baseline: true` under `safe-outputs.push-to-pull-request-branch`. Without it, validation uses the PR-head baseline; a related patch-size error points to the opt-in. This setting only enables bounded metadata/REST discovery and does not fetch base objects or enable history recovery.
 
 An older **patch transport** (`git format-patch` / `git am --3way`) is used when bundle data is unavailable. `--3way` resolves cleanly against an updated base when there are no conflicts; if it cannot, the patch is applied at the agent's original base commit and the PR UI shows the conflicts for manual resolution.
 
@@ -312,7 +314,7 @@ safe-outputs:
   submit-pull-request-review:
     max: 1
     allowed-events: [COMMENT, REQUEST_CHANGES]  # include REQUEST_CHANGES when superseding older blocking reviews
-    supersede-older-reviews: true  # dismiss older same-workflow REQUEST_CHANGES reviews after replacement
+    supersede-older-reviews: true  # dismiss older same-workflow blockers after a clean COMMENT review with no inline findings
     target: "triggering"           # or "*", or explicit PR number
     target-repo: "owner/repo"      # cross-repository
     allowed-repos: ["org/repo1"]   # additional allowed repositories
@@ -323,7 +325,7 @@ safe-outputs:
 
 Use `allowed-events` to control review decisions (`APPROVE`, `COMMENT`, `REQUEST_CHANGES`). Prefer `allowed-events: [COMMENT]` by default so bot reviews remain informative and non-blocking.
 
-When you intentionally allow `REQUEST_CHANGES`, set `supersede-older-reviews: true` to dismiss older blocking reviews from the same workflow after posting a replacement review. This behavior is best-effort.
+When you intentionally allow `REQUEST_CHANGES`, set `supersede-older-reviews: true` to dismiss older blocking bot reviews from the same workflow after posting a clean `COMMENT` review without inline findings. Only reviews older than the clean replacement are eligible, and a new blocking review or one with inline findings does not dismiss earlier findings. This best-effort behavior uses a review-body provenance marker even when the visible footer is disabled.
 
 When `target: "*"` is configured, the agent must supply `pull_request_number` in each `submit_pull_request_review` tool call to identify which PR to review — omitting it will cause the review to fail. For cross-repository scenarios, the agent can also supply `repo` (in `owner/repo` format) to route the review to a PR in a different repository; the value must match `target-repo` or appear in `allowed-repos`.
 
@@ -415,6 +417,10 @@ safe-outputs:
 
 When `push-to-pull-request-branch` is configured, git commands (`checkout`, `branch`, `switch`, `add`, `rm`, `commit`, `merge`) are automatically enabled.
 
+An explicit `target` accepts a positive PR number as an integer (`123`), a numeric string (`"123"`), or a hash-prefixed string (`"#123"`). With `target: "*"`, the same forms are accepted in the safe output message's `pull_request_number` field. Quote hash-prefixed values in YAML so they are not treated as comments.
+
+`create_pull_request` stages a patch/bundle for processing after the agent finishes; its tool response does not return a PR number. A `push_to_pull_request_branch` call cannot target a PR created earlier in the same agent run, even with a `temporary_id`, because the branch is not yet available remotely. Push follow-up commits in a later run after the PR exists.
+
 ### Destination branch
 
 The agent **does not specify the destination branch**. Both the source and
@@ -430,6 +436,30 @@ This eliminates a class of failures where the agent passed a wrong or synthetic
 branch name (see [issue #37835](https://github.com/github/gh-aw/issues/37835)).
 
 By default, pushes are replayed through GitHub's signed commit API because `signed-commits: true` means signed commits are required. Set `signed-commits: false` only for repositories that do not require signed commits; this uses direct `git push` and can preserve merge commits that the signed commit API cannot represent. This field is supported by both `create-pull-request` and `push-to-pull-request-branch`.
+
+Signed replay checks every commit's synthesized file changes before creating a remote branch or publishing commits. Each commit supports at most 4096 additions and deletions combined, subject to configured patch limits; exceeding this bound fails without unsigned fallback. Queue Claims retain per-path authorization, including the first commit's paths when creating a new branch.
+
+For unsigned bundle pushes, the handler pins the current PR base branch tip using an exact-ref, metadata-only `git ls-remote` against the target checkout's origin, with that checkout's credentials rather than a fork-head token. It does not fetch objects to establish this optional baseline. After local bundle import, patch-size and changed-content-size checks can compare against a validation-only merge of the old PR head and a locally available ancestor confirmed against the pinned tip. Only the exact pinned tip exempts base changes from protected-file and history checks; other ancestors retain PR-head protection because reachability does not prove a historical base-branch state. Agent changes and conflict resolutions remain subject to the checks. Agent-created octopus merges (three or more parents) are rejected because their resolution changes cannot be validated with Git's remerge diffs.
+
+Optional baseline discovery limits each Git command to 5 seconds and 1 MiB per output stream, each history scan to 100 records, and REST comparisons to four requests with a 5-second abort deadline and no retries. Reaching a limit retains conservative PR-head validation. Only missing-parent (404) responses permit another comparison within that budget; other API failures stop discovery.
+
+Local bundle import and optional ancestry/tree inspection deny all Git transports, including promisor lazy downloads. This uses `GIT_ALLOW_PROTOCOL` as well as `GIT_NO_LAZY_FETCH`, so it does not depend on newer Git versions recognizing the latter. Missing credentials, unavailable history or blobs, and unsupported `merge-tree` retain conservative PR-head validation; they never cause an optional baseline fetch, deepen a shallow checkout, or populate missing blobs. A newer base tip may confirm an already-provisioned ancestor through metadata-only REST comparisons, but is never downloaded. Workflow-start SHAs and agent metadata are not alternate provenance sources. Staged mode retains offline patch-preview checks. The push remains append-only: merge an already-provisioned base ref rather than rebasing existing PR commits.
+
+### Bundle prerequisites and history downloads
+
+`create-pull-request` and `push-to-pull-request-branch` import bundles without automatic prerequisite downloads by default. A missing prerequisite fails with guidance to provision the required objects in the target checkout, or explicitly enable recovery:
+
+```yaml wrap
+safe-outputs:
+  push-to-pull-request-branch:
+    allow-full-history-fetch: true
+```
+
+**This opt-in permits unbounded downloads**, including `--unshallow` and fetch-by-SHA. Commit depth, an exact SHA, and `blob:none` are not byte limits. Prefer configuring the required refs and history during authenticated [`checkout:`](/gh-aw/reference/checkout/) instead, using credentials for each target repository. Choose checkout depth deliberately for the repository; full history can be prohibitively expensive in a large monorepo. A bundle whose prerequisites and required content are already present needs no recovery, including in shallow checkouts. Partial clones may fail locally when required content is absent, even if the commit object exists.
+
+`allow-full-history-fetch` is configured independently under `safe-outputs.create-pull-request` or `safe-outputs.push-to-pull-request-branch`. Both default to `false` and accept only a literal boolean. The setting affects that handler's bundle prerequisite recovery, not optional baseline discovery, ordinary PR-head fetch/push operations, or other network paths. Recovery authentication failures use fixed diagnostics without printing credentials or raw remote errors.
+
+For `push-to-pull-request-branch`, opted-in recovery uses the validated PR head repository and the same credentials as PR-head fetch/push operations, including a configured automation fork (`head-repo` and `head-github-token`). Fork credentials are scoped to recovery and restored before local bundle import and validation. Trusted base discovery still queries only target `origin` metadata with target-checkout credentials; it never fetches base objects. `create-pull-request` recovery continues to use its checkout's `origin`.
 
 ### Cross-repo usage
 
@@ -562,7 +592,7 @@ safe-outputs:
         - .cursor/                # allow updates to the .cursor/ directory
 ```
 
-The `exclude` list names files by **basename** (e.g., `AGENTS.md`) or **path prefix** (e.g., `.agents/`) to remove from the default protected set. Dot-folder path prefixes in the `exclude` list (e.g. `.cursor/`) also opt that directory out of the general top-level-dot-folder protection rule. The remaining protected files still enforce the configured policy. This is useful when a workflow is explicitly designed to manage one specific instruction file or configuration directory without disabling all protection.
+The `exclude` list names files by **basename** (e.g., `AGENTS.md`) or **path prefix** (e.g., `.agents/`) to remove from the default protected set. To exclude only an **exact repository path**, start it with `/`: `exclude: ["/pyproject.toml"]` allows the root `pyproject.toml` while nested files such as `lib/foo/pyproject.toml` remain protected. Dot-folder path prefixes in the `exclude` list (e.g. `.cursor/`) also opt that directory out of the general top-level-dot-folder protection rule. The remaining protected files still enforce the configured policy. This is useful when a workflow is explicitly designed to manage one specific instruction file or configuration directory without disabling all protection.
 
 :::tip[Workflows that update top-level Markdown files]
 `CHANGELOG.md` is excluded by default. If your workflow is explicitly designed to modify another protected root-level Markdown file such as `README.md`, add it to the `exclude` list so the agent can commit the change.
