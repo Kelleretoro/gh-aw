@@ -19,9 +19,18 @@ github/copilot-cli v1.0.98 SHA256SUMS.txt 372f0c8d3d50076455cd19ef080dc59dc2a324
 github/copilot-cli v1.0.21 SHA256SUMS.txt fd9b2fb92a39aeb2a41815a6aa0bf3853307c812b3451a45f5a2217be003987d
 github/gh-aw-firewall v0.28.70 checksums.txt 9a35879a2f405fa7a1aa275a67b96d01eb0d0c6c8fd850637a1ad8ad55b500da
 github/copilot-cli v1.0.101 SHA256SUMS.txt 018625eac68670d66ede904b9b82cdcd6ab8f87ba20e6e1fbdf0b62c8295d5be
+github/gh-aw-firewall v0.29.0 checksums.txt 2d49727b3b65630b5d0ba5375168687a852afac319d05c911d4769c43fa2ed61
+github/copilot-cli v1.0.103 SHA256SUMS.txt 26cd3e4b32cde498e4961fb4d48e7b85d7859fc69af1a645a19201fdd577bdb2
 PINS
     ) || {
-      echo "ERROR: No reviewed SHA256 pin for ${repository} ${version} ${asset}; supply checksums-sha256 in trusted workflow frontmatter or update the setup action's release_integrity.sh" >&2
+      local config_field="engine"
+      if [ "$repository" = github/gh-aw-firewall ]; then
+        config_field="sandbox.agent"
+      fi
+      echo "ERROR: No reviewed SHA256 pin for ${repository} ${version} ${asset}; refusing to install an unverified release." >&2
+      echo "Fix: run 'gh extension upgrade gh-aw', then 'gh aw compile <workflow.md>' and commit the regenerated .lock.yml. Ensure the workflow uses a setup action revision containing this release pin." >&2
+      echo "For an intentional release override, set ${config_field}.version to a literal release version and ${config_field}.checksums-sha256 to the independently authenticated SHA256 of ${asset} (not the CLI archive)." >&2
+      echo "Maintainers: add the reviewed pin with 'bash scripts/update-release-pins.sh ${repository} ${version} ${asset} <trusted-manifest-sha256>'; do not trust a digest solely because it was downloaded alongside the executable." >&2
       return 1
     }
   fi

@@ -391,6 +391,7 @@ gh aw compile --strict --zizmor            # Security scan (fails on findings)
 gh aw compile --grant                      # License scan container images
 gh aw compile --yamllint                   # Lint generated YAML output
 gh aw compile --dependabot                 # Generate dependency manifests
+gh aw compile --actions-lock               # Update the standard Actions dependency lockfile
 gh aw compile --purge                      # Remove orphaned .lock.yml files
 ```
 
@@ -400,7 +401,19 @@ If the repository root contains an [`aw.yml` manifest](/gh-aw/reference/aw-yml-p
 
 Unlike `gh aw upgrade`, `gh aw compile` does not run codemods unless you pass `--fix`.
 
-**Options:** `--action-mode`, `--action-tag`, `--actionlint`, `--actions-repo`, `--allow-action-refs`, `--allow-experimental`, `--approve`, `--dependabot`, `--dry-run`, `--dir/-d`, `--engine/-e`, `--environment`, `--fail-fast`, `--fix`, `--force/-f`, `--force-refresh-action-pins`, `--force-refresh-container-pins`, `--gh-aw-ref`, `--ghes`, `--grant`, `--grype`, `--json/-j`, `--logical-repo/-l`, `--models`, `--no-check-update`, `--no-emit`, `--no-logo`, `--poutine`, `--purge`, `--refresh-stop-time`, `--require-self-hosted-runners`, `--runner-guard`, `--schedule-seed`, `--shellcheck`, `--show-all`, `--staged`, `--stats`, `--strict`, `--syft`, `--trial`, `--validate`, `--validate-images`, `--watch/-w`, `--yamllint`, `--zizmor`
+**Options:** `--action-mode`, `--action-tag`, `--actionlint`, `--actions-lock`, `--actions-repo`, `--allow-action-refs`, `--allow-experimental`, `--approve`, `--dependabot`, `--dry-run`, `--dir/-d`, `--engine/-e`, `--environment`, `--fail-fast`, `--fix`, `--force/-f`, `--force-refresh-action-pins`, `--force-refresh-container-pins`, `--gh-aw-ref`, `--ghes`, `--grant`, `--grype`, `--json/-j`, `--logical-repo/-l`, `--models`, `--no-check-update`, `--no-emit`, `--no-lint`, `--no-logo`, `--poutine`, `--purge`, `--refresh-stop-time`, `--require-self-hosted-runners`, `--runner-guard`, `--schedule-seed`, `--shellcheck`, `--show-all`, `--staged`, `--stats`, `--strict`, `--syft`, `--trial`, `--validate`, `--validate-images`, `--watch/-w`, `--yamllint`, `--zizmor`
+
+**`--actions-lock` flag:** After successful compilation and companion workflow generation, run `gh actions-lock --no-narrow` from the repository root to update `.github/workflows/actions.lock`. The extension scans all workflows in its default directory, even when compiling specific files or using `--dir`. `--no-narrow` preserves SHA-pinned action references. Install the extension separately with `gh extension install github/gh-actions-lock`; compilation never installs it. Extension failures fail the command without rolling back compiled files. Extension output goes to stderr, preserving `--json` output on stdout. Cannot be combined with `--no-emit`, `--read-only`, `--watch`, or `--dry-run`: the extension performs repository-wide post-processing beyond emitted compiler files. This integration does not replace `.github/aw/actions-lock.json` or change existing pin resolution.
+
+The extension inherits the environment through the standard GitHub CLI helper, including `GH_HOST`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GH_ACTIONS_LOCK_GITHUB_COM_TOKEN`, `GH_CONFIG_DIR`, and certificate settings. When `GH_HOST` is unset, the host detected from the origin remote is forwarded. Existing `GH_TOKEN` precedence and `GITHUB_TOKEN` fallback are preserved. Host support depends on the installed extension.
+
+**`--no-lint` flag:** Disable default built-in Actions/AW AST linting. By default, compilation checks the generated execution graph and authored source before emitting a lock file, including with `--no-emit`, and fails on lint errors. This flag does not disable existing compiler validation or opt-in external scanners and cannot be combined with `--dry-run`. The compile MCP input is `skip_lint`. Native Actions YAML and downstream dispatch targets require a separate `gh aw lint` invocation.
+
+`add`, `update`, and `validate` also run built-in lint whenever they recompile workflows. Only `compile` exposes `--no-lint`; fix the reported findings before using other recompiling commands.
+
+To migrate existing workflows, run `gh aw compile --no-emit`, fix findings in the authored source, then rerun the original command. `--no-lint` is a per-compilation escape hatch, not a persistent setting for other commands.
+
+Compile-time lint is Actions/AW AST-only and does not require a native JavaScript parser. Run standalone `gh aw lint --javascript-module <module-path>` for deeper authored JavaScript driver and custom-grader checks. Missing-parser coverage warnings remain advisory and do not block compiler dry-run; successful compilation does not establish complete JavaScript analysis.
 
 **`--no-logo` flag:** Omit the ASCII logo from generated workflow headers without removing metadata or regeneration instructions. To persist this setting for all compiles, including upgrades, set [`"lock_file_logo": false` in `.github/workflows/aw.json`](/gh-aw/reference/compilation-process/#repository-configuration-awjson). Either opt-out disables the logo; `--banner` only controls terminal output.
 
@@ -431,6 +444,8 @@ With `--dry-run`, actionable workflow warnings invalidate only the affected work
 - **`--grype`:** Scans container images referenced in compiled workflows for known vulnerabilities using the Grype vulnerability scanner. When a `.grype.yaml` file exists at the repository root it is mounted into the scanner and passed to grype via `--config`, so repository-level ignore rules (documented risk acceptances for findings with no upstream fix) are applied.
 - **`--runner-guard`:** Runs taint analysis on compiled workflows to detect unsafe data flows from untrusted inputs to sensitive runner operations.
 
+Grype reports each image as planned, then completed with a finding count or failed, using the pinned image reference when available. A completed scan with zero findings confirms that the image was scanned; a failed or missing completion leaves coverage incomplete. Empty or malformed JSON and missing or null `matches` arrays are scan failures, not zero-finding results. Scan failures produce warnings in normal compilation and errors with `--strict`; development compilation with `--dry-run` also treats scanner execution or parsing failures as fatal.
+
 **Shared Workflows:** Workflows without an `on` field are detected as shared components. Validated with relaxed schema and skip compilation. See [Imports reference](/gh-aw/reference/imports/).
 
 #### `validate`
@@ -450,7 +465,7 @@ gh aw validate --engine copilot             # Override AI engine
 
 **Options:** `--allow-action-refs`, `--dir/-d`, `--engine/-e`, `--fail-fast`, `--json/-j`, `--no-check-update`, `--stats`, `--strict`, `--validate-images`
 
-All linters (`zizmor`, `actionlint`, `poutine`), `--validate`, and `--no-emit` are always-on defaults and cannot be disabled. Accepts the same workflow ID format as `compile`.
+Built-in Actions/AW AST lint, external linters (`zizmor`, `actionlint`, `poutine`), `--validate`, and `--no-emit` are always-on defaults and cannot be disabled. Accepts the same workflow ID format as `compile`.
 
 #### `lint`
 
@@ -499,6 +514,8 @@ gh aw trial ./workflow.md --dry-run                # Preview without executing
 **Options:** `--engine/-e`, `--repeat`, `--delete-host-repo-after`, `--logical-repo/-l`, `--clone-repo`, `--trigger-context`, `--host-repo`, `--dry-run`, `--append`, `--auto-merge-prs`, `--no-security-scanner`, `--delete-host-repo-before`, `--json/-j`, `--timeout`, `--yes/-y`
 
 Unlike `run --repo/-r`, `trial` has no `--repo/-r`: `--logical-repo/-l` sets the simulated `github.repository` context, while `--host-repo` selects where the trial actually runs. `--json/-j` is available for trial output.
+
+`--timeout` sets the execution timeout in integer minutes (default: `30`; `0` disables the timeout). For example, use `--timeout 10`, not `--timeout 10m`.
 
 **Secret Handling:** API keys required for the selected engine are automatically checked. If missing from the target repository, they are prompted for interactively and uploaded.
 
@@ -658,7 +675,7 @@ gh aw logs --runtime cloud-hypervisor                    # Filter to runs using 
 
 `logs` defaults `--artifacts` to `usage` for faster, compact downloads. When usage lacks `aw_info.json`, metadata is fetched from the compact `info` artifact before falling back to legacy activation artifacts. The `--last` flag is an alias for `--count/-c`.
 `--dry-run` selects only dry-run runs; `--no-dry-run` excludes them. These flags are mutually exclusive and work with workflow targets or `--stdin`. Older valid metadata without `dry_run` counts as a normal run; missing or malformed `aw_info.json` is excluded when either filter is active. Unified sessions preserve the flag as `workflow.info.data.dryRun`, and audit engine configuration exposes `dry_run`.
-When multiple targets run concurrently, `--count` limits the combined number of workflow runs and `--timeout` limits the total wall-clock download time across all targets.
+When multiple targets run concurrently, `--count` limits the combined number of workflow runs and `--timeout` limits the total wall-clock download time across all targets. `--timeout` accepts integer minutes (for example, `--timeout 10`); the default `0` disables the timeout.
 
 `--evals` and `--graders` each pull in a matching artifact set automatically: `--evals` includes results from `evals.jsonl`, `--graders` includes deterministic grader results and their artifacts. `--audit` generates `audit.json` in each downloaded run's cache directory (comparisons use only the runs downloaded in that invocation). `--ignore-workflow-runs` excludes specific run IDs (or `slug/ID` values, where the slug is informational and matching uses the numeric ID) from an otherwise matching set.
 
@@ -932,14 +949,17 @@ gh aw health --days 30             # Summary for last 30 days
 gh aw health --threshold 90        # Warn if below 90% success rate
 gh aw health --json                # Output in JSON format
 gh aw health --start-date -24h      # Evidence from the last 24 hours
+gh aw health --timeout 30s --json   # Return available evidence within a 30-second collection budget
 gh aw health --start-date 2026-10-14T04:49:11Z  # Evidence since a release timestamp
 gh aw health --start-date 2026-10-14 --end-date 2026-10-15  # Bounded window
 gh aw health issue-monster --days 90  # 90-day metrics for workflow
 ```
 
-**Options:** `--days`, `--start-date`, `--end-date`, `--logs-dir`, `--threshold`, `--repo/-r`, `--json/-j`
+**Options:** `--days`, `--start-date`, `--end-date`, `--logs-dir`, `--timeout`, `--threshold`, `--repo/-r`, `--json/-j`
 
 The `--days` flag accepts 7, 30, or 90 (default: 7). Other values produce an error.
+
+`--timeout` bounds evidence collection (default: `2m`; `0` disables the deadline). The shared deadline cancels API quota checks, requests, local Git revision reads, and work-queue ledger reads. Expiry skips further cache reads and returns available evidence with `collection.partial: true`, `reason: "time_budget"`, and a warning, rather than discarding the report. JSON includes `timeout_seconds` when bounded and `elapsed_seconds`, measured after cache enrichment. An in-progress local cache read and report rendering may finish after the deadline. Partial results do not establish fleet health; increase the budget or narrow the workflow/time window to collect more evidence. `DEBUG=cli:health` logs request progress and elapsed times to stderr without logging response bodies.
 
 `--start-date` and `--end-date` filter run creation times inclusively. Both accept `YYYY-MM-DD` dates, RFC3339 timestamps with time zones, and relative times such as `-24h`, `-1d`, or `-1w`. Dates use UTC; an end date includes that entire day. The end defaults to the current time. Without an explicit start, `--days` counts backward from the end. An explicit start replaces the default seven-day horizon and cannot be combined with an explicit `--days`.
 
@@ -1016,6 +1036,8 @@ gh aw forecast --eval                       # Backtest forecast quality against 
 
 The `--days` flag accepts only `7` or `30` (default: `30`). Other values produce an error.
 
+`--timeout` gracefully stops computation after the specified number of integer minutes (for example, `--timeout 10`). The default `0` disables the timeout.
+
 #### `experiments`
 
 Inspect experiment state tracked in `experiments/*` branches. The default command behavior matches `experiments list`; use `experiments analyze` for per-workflow statistics.
@@ -1075,6 +1097,8 @@ gh aw remove my-workflow --no-remove-orphans    # Remove but keep orphaned inclu
 Update workflows based on `source` field (`owner/repo/path@ref`). By default, performs a 3-way merge to preserve local changes; use `--no-merge` to override with upstream. Semantic versions update within same major version.
 
 By default, `update` also force-updates all GitHub Actions referenced in your workflows (both in `actions-lock.json` and workflow files) to their latest major version. Use `--no-release-bump` to restrict force-updates to core `actions/*` actions only.
+
+Container digest pins are refreshed on a best-effort basis using Docker Buildx or `crane`. If a lookup fails, `update` prints one short informational message with the reason and preserves existing pins. Set `DEBUG=cli:update_container_pins` for per-image diagnostics.
 
 If no workflows in the repository contain a `source` field, the command exits gracefully with an informational message rather than an error. This is expected behavior for repositories that have not yet added updatable workflows.
 

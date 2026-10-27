@@ -73,6 +73,18 @@ const MAX_LABELS = 10;
  */
 const MAX_ASSIGNEES = 5;
 
+/**
+ * Maximum number of older entities to close
+ * @type {number}
+ */
+const MAX_CLOSE_COUNT = 10;
+
+/**
+ * Maximum aggregate bytes retained across protected command output streams and attempts.
+ * @type {number}
+ */
+const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // File paths
 // ---------------------------------------------------------------------------
@@ -201,6 +213,8 @@ module.exports = {
   FAQ_CREATE_PR_PERMISSIONS_URL,
   MAX_LABELS,
   MAX_ASSIGNEES,
+  MAX_CLOSE_COUNT,
+  MAX_CAPTURE_BYTES,
   GATEWAY_JSONL_PATH,
   RPC_MESSAGES_PATH,
   MANIFEST_FILE_PATH,

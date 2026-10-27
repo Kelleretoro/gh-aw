@@ -11,6 +11,7 @@ type CompileConfig struct {
 	Watch                     bool     // Enable watch mode
 	WorkflowDir               string   // Custom workflow directory
 	NoEmit                    bool     // Validate without generating lock files
+	SkipLint                  bool     // Disable built-in Actions/AW AST linting
 	ReadOnly                  bool     // Disable compilation side effects for untrusted MCP callers
 	NoLogo                    bool     // Omit the ASCII logo from generated workflow headers
 	Purge                     bool     // Remove orphaned lock files
@@ -23,6 +24,7 @@ type CompileConfig struct {
 	EnvironmentOverride       string   // Override the environment on every generated job
 	RequireSelfHostedRunners  bool     // Require every generated job to select a self-hosted runner
 	Dependabot                bool     // Generate Dependabot manifests for npm dependencies
+	ActionsLock               bool     // Run gh actions-lock --no-narrow after successful compilation
 	ForceOverwrite            bool     // Force overwrite of existing files (dependabot.yml)
 	RefreshStopTime           bool     // Force regeneration of stop-after times instead of preserving existing ones
 	ForceRefreshActionPins    bool     // Force refresh of action pins by clearing cache and resolving from GitHub API
@@ -50,6 +52,7 @@ type CompileConfig struct {
 	Approve                   bool     // Approve all safe update changes, skipping safe update enforcement regardless of strict mode setting.
 	ValidateImages            bool     // Require Docker to be available for container image validation (fail instead of skipping when Docker is unavailable)
 	PriorManifestFile         string   // Path to a JSON file containing pre-cached manifests (map[lockFile]*GHAWManifest) collected at MCP server startup; takes precedence over git HEAD / filesystem reads for safe update enforcement
+	MCPProgressFile           string   // Hidden: path for streaming completed workflow results to the MCP server
 	GHESCompat                bool     // Enable GHES-compatible v3 artifact actions (overrides aw.json ghes field)
 	activeModels              *activeModelInventory
 	modelValidationWarnings   []string

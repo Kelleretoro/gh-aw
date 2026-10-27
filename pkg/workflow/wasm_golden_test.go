@@ -38,6 +38,7 @@ var testDefaultClaudeAgentInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_AGENT_V
 var testDefaultClaudeInstallVersionRE = regexp.MustCompile(`(@anthropic-ai/claude-code@)` + regexp.QuoteMeta(string(constants.DefaultClaudeCodeVersion)) + `\b`)
 var testDefaultCopilotInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultCopilotVersion)) + `"`)
 var testDefaultCopilotAgentInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_AGENT_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultCopilotVersion)) + `"`)
+var testDefaultCopilotInstallPinRE = regexp.MustCompile(`(install_copilot_cli\.sh"\s+)v?` + regexp.QuoteMeta(string(constants.DefaultCopilotVersion)) + `(\s+(?:--rootless\s+)?--checksums-sha256\s+)` + regexp.QuoteMeta(constants.DefaultCopilotChecksumsSHA256) + `\b`)
 var testDefaultCodexInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultCodexVersion)) + `"`)
 var testDefaultCodexAgentInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_AGENT_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultCodexVersion)) + `"`)
 var testDefaultCodexInstallVersionRE = regexp.MustCompile(`(@openai/codex@)` + regexp.QuoteMeta(string(constants.DefaultCodexVersion)) + `\b`)
@@ -58,6 +59,7 @@ func normalizeDefaultRuntimeVersions(content string) string {
 	normalized = testDefaultClaudeInstallVersionRE.ReplaceAllString(normalized, `${1}CLAUDE_VERSION`)
 	normalized = testDefaultCopilotInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_VERSION: "COPILOT_VERSION"`)
 	normalized = testDefaultCopilotAgentInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_AGENT_VERSION: "COPILOT_VERSION"`)
+	normalized = testDefaultCopilotInstallPinRE.ReplaceAllString(normalized, `${1}COPILOT_VERSION${2}COPILOT_CHECKSUMS_SHA256`)
 	normalized = testDefaultCodexInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_VERSION: "CODEX_VERSION"`)
 	normalized = testDefaultCodexAgentInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_AGENT_VERSION: "CODEX_VERSION"`)
 	normalized = testDefaultCodexInstallVersionRE.ReplaceAllString(normalized, `${1}CODEX_VERSION`)
@@ -101,6 +103,7 @@ func normalizeOutput(content string) string {
 }
 
 func TestNormalizeOutput_DefaultRuntimeVersions(t *testing.T) {
+	pinnedRuntimeConfig := `{"pinnedAwf":"v0.5.0","pinnedAwfImage":"ghcr.io/github/gh-aw-firewall/agent:0.5.0","pinnedMcpgImage":"ghcr.io/github/gh-aw-mcpg:v0.0.12"}`
 	input := strings.Join([]string{
 		`GH_AW_INFO_AWF_VERSION: "` + string(constants.DefaultFirewallVersion) + `"`,
 		`GH_AW_INFO_AWMG_VERSION: "` + string(constants.DefaultMCPGatewayVersion) + `"`,
@@ -113,6 +116,8 @@ func TestNormalizeOutput_DefaultRuntimeVersions(t *testing.T) {
 		`run: npm install -g @anthropic-ai/claude-code@` + string(constants.DefaultClaudeCodeVersion),
 		`GH_AW_INFO_VERSION: "` + string(constants.DefaultCopilotVersion) + `"`,
 		`GH_AW_INFO_AGENT_VERSION: "` + string(constants.DefaultCopilotVersion) + `"`,
+		`run: bash "${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh" ` + string(constants.DefaultCopilotVersion) + ` --checksums-sha256 ` + constants.DefaultCopilotChecksumsSHA256,
+		`run: bash "${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh" ` + string(constants.DefaultCopilotVersion) + ` --rootless --checksums-sha256 ` + constants.DefaultCopilotChecksumsSHA256,
 		`GH_AW_INFO_VERSION: "` + string(constants.DefaultCodexVersion) + `"`,
 		`GH_AW_INFO_AGENT_VERSION: "` + string(constants.DefaultCodexVersion) + `"`,
 		`GH_AW_INFO_VERSION: "` + string(constants.DefaultPiVersion) + `"`,
@@ -121,7 +126,7 @@ func TestNormalizeOutput_DefaultRuntimeVersions(t *testing.T) {
 		`GH_AW_INFO_AGENT_VERSION: "` + string(constants.DefaultCopilotVersion) + `"`,
 		`run: npm install --ignore-scripts -g @openai/codex@` + string(constants.DefaultCodexVersion),
 		`run: npm install --ignore-scripts -g @earendil-works/pi-coding-agent@` + string(constants.DefaultPiVersion),
-		`{"pinnedAwf":"v0.5.0","pinnedAwfImage":"ghcr.io/github/gh-aw-firewall/agent:0.5.0","pinnedMcpgImage":"ghcr.io/github/gh-aw-mcpg:v0.0.12"}`,
+		pinnedRuntimeConfig,
 	}, "\n")
 
 	normalized := normalizeOutput(input)
@@ -140,6 +145,9 @@ func TestNormalizeOutput_DefaultRuntimeVersions(t *testing.T) {
 	require.Contains(t, normalized, `@anthropic-ai/claude-code@CLAUDE_VERSION`)
 	require.Contains(t, normalized, `GH_AW_INFO_VERSION: "COPILOT_VERSION"`)
 	require.Contains(t, normalized, `GH_AW_INFO_AGENT_VERSION: "COPILOT_VERSION"`)
+	require.Contains(t, normalized, `install_copilot_cli.sh" COPILOT_VERSION --checksums-sha256 COPILOT_CHECKSUMS_SHA256`)
+	require.Contains(t, normalized, `install_copilot_cli.sh" COPILOT_VERSION --rootless --checksums-sha256 COPILOT_CHECKSUMS_SHA256`)
+	require.NotContains(t, normalized, constants.DefaultCopilotChecksumsSHA256)
 	require.Contains(t, normalized, `GH_AW_INFO_VERSION: "CODEX_VERSION"`)
 	require.Contains(t, normalized, `GH_AW_INFO_AGENT_VERSION: "CODEX_VERSION"`)
 	require.Contains(t, normalized, `GH_AW_INFO_VERSION: "PI_VERSION"`)
@@ -151,8 +159,9 @@ func TestNormalizeOutput_DefaultRuntimeVersions(t *testing.T) {
 	require.Contains(t, normalized, `"pinnedAwf":"v0.5.0"`)
 	require.Contains(t, normalized, `"pinnedAwfImage":"ghcr.io/github/gh-aw-firewall/agent:0.5.0"`)
 	require.Contains(t, normalized, `"pinnedMcpgImage":"ghcr.io/github/gh-aw-mcpg:v0.0.12"`)
-	require.NotContains(t, normalized, string(constants.DefaultFirewallVersion))
-	require.NotContains(t, normalized, string(constants.DefaultMCPGatewayVersion))
+	normalizedWithoutPinnedRuntimeConfig := strings.Replace(normalized, pinnedRuntimeConfig, "", 1)
+	require.NotContains(t, normalizedWithoutPinnedRuntimeConfig, string(constants.DefaultFirewallVersion))
+	require.NotContains(t, normalizedWithoutPinnedRuntimeConfig, string(constants.DefaultMCPGatewayVersion))
 	require.NotContains(t, normalized, constants.SonnetDefaultModel)
 	require.NotContains(t, normalized, string(constants.DefaultClaudeCodeVersion))
 	require.NotContains(t, normalized, string(constants.DefaultCopilotVersion))

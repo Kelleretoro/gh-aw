@@ -37,6 +37,7 @@ const RUNTIME_TYPES = new Set([
   "firewall.event",
   "safe_output.request",
   "safe_output.result",
+  "safe_output.outcome",
   "safe_output.error",
   "experiment.state",
   "experiment.assignment",
@@ -232,7 +233,9 @@ function eventDetail(event) {
     case "safe_output.request":
       return `${fields(data, ["type", "repo", "number"])} [requested, not executed]`;
     case "safe_output.result":
-      return `${fields(data, ["type", "repo", "number", "provider", "identifier", "url"])} [execution recorded]`;
+      return `${fields(data, ["type", "status", "repo", "number", "provider", "identifier", "url"])} [execution recorded]`;
+    case "safe_output.outcome":
+      return fields(data, ["type", "messageIndex", "status", "staged", "url"]);
     case "safe_output.error":
       return `${fields(data, ["type", "status", "errorCode", "message", "error"])}${Array.isArray(data.errors) ? ` errors=${data.errors.length} [${data.errors.map(error => fields(error, ["type", "errorCode"])).join("; ")}]` : ""}`;
     case "experiment.assignment":
@@ -273,6 +276,8 @@ function eventDetail(event) {
           "ref",
           "sha",
           "actor",
+          // @safe-outputs-exempt SEC-005: display-only session metadata; this module makes no cross-repo API writes.
+          // Remove this exemption and validate the allowlist if this module gains cross-repo writes.
           "targetRepo",
         ]) +
         " " +

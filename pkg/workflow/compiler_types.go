@@ -24,6 +24,7 @@ type Compiler struct {
 	customOutput            string                   // If set, output will be written to this path instead of default location
 	version                 string                   // Version of the extension
 	skipValidation          bool                     // If true, skip schema validation
+	lint                    bool                     // Enable in-memory Actions/AW AST linting for CLI compilation
 	noEmit                  bool                     // If true, validate without generating lock files
 	readOnly                bool                     // If true, prevent compilation from populating caches or pulling images
 	strictMode              bool                     // If true, enforce strict validation requirements
@@ -44,6 +45,8 @@ type Compiler struct {
 	actionTag               string                   // Override action SHA or tag for actions/setup (when set, overrides actionMode to release)
 	actionsRepo             string                   // Override the external actions repository (default: github/gh-aw-actions)
 	jobManager              *JobManager              // Manages jobs and dependencies
+	prCheckoutLintBlock     string                   // Compiler-owned checkout/authentication steps eligible for the artipacked exception
+	agentCheckoutLintBlocks []string                 // Exact compiler-emitted agent checkout blocks, not authored steps
 	engineRegistry          *EngineRegistry          // Registry of available agentic engines
 	engineCatalog           *EngineCatalog           // Catalog of engine definitions backed by the registry
 	fileTracker             FileCreationTracker      // Optional file tracker for tracking created files

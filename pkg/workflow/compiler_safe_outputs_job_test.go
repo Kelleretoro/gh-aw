@@ -568,7 +568,7 @@ func TestCompileSafeOutputsTimeoutMinutesFromFrontmatter(t *testing.T) {
 		expectedTimeout string
 	}{
 		{
-			name: "default timeout is 45 minutes",
+			name: "API-only default timeout is capped at 15 minutes",
 			frontmatter: `---
 on:
   workflow_dispatch: {}
@@ -580,7 +580,7 @@ safe-outputs:
 ---
 # Test
 `,
-			expectedTimeout: "timeout-minutes: 45",
+			expectedTimeout: "timeout-minutes: 15",
 		},
 		{
 			name: "custom timeout of 30 minutes from frontmatter",
@@ -1057,6 +1057,34 @@ func TestWorkQueueOutcomeOutputIsWorkerOnly(t *testing.T) {
 			assert.NotContains(t, outputs, "work_queue_outcome")
 		}
 		assert.NotContains(t, outputs, "claim_results", "raw handler results must not become job outputs")
+	}
+}
+
+func TestWorkQueueRequestsOutputRequiresTrustedControls(t *testing.T) {
+	for _, role := range []string{"observer", "dispatcher", "worker"} {
+		for _, policy := range []bool{false, true} {
+			data := &WorkflowData{
+				SafeOutputs: &SafeOutputsConfig{},
+				Tools:       map[string]any{"work-queue": true},
+			}
+			switch role {
+			case "worker":
+				data.Tools = map[string]any{"work-queue": map[string]any{"worker": true}}
+			case "dispatcher":
+				data.SafeOutputs.DispatchWorkflow = &DispatchWorkflowConfig{Workflows: []string{"worker"}}
+			}
+			if policy {
+				data.WorkQueuePolicy = &WorkQueuePolicyConfig{}
+			}
+			assert.Equal(t, role, workQueueRuntimeRole(data))
+			outputs := map[string]string{}
+			addConditionalHandlerManagerOutputs(data, outputs)
+			if role != "observer" && policy {
+				assert.Equal(t, "${{ steps.work_queue_controls.outputs.work_queue_requests }}", outputs["work_queue_requests"])
+			} else {
+				assert.NotContains(t, outputs, "work_queue_requests")
+			}
+		}
 	}
 }
 
@@ -1823,6 +1851,7 @@ func TestBuildSafeOutputItemsManifestUploadStep(t *testing.T) {
 	assert.Contains(t, content, "Upload Safe Outputs Items")
 	assert.Contains(t, content, "if: always()")
 	assert.Contains(t, content, "/tmp/gh-aw/safe-output-items.jsonl")
+	assert.Contains(t, content, "/tmp/gh-aw/safe-output-outcomes.jsonl")
 	assert.NotContains(t, content, "process-safe-outputs.stdout.log")
 	assert.NotContains(t, content, "process-safe-outputs.stderr.log")
 }
@@ -1856,6 +1885,7 @@ func TestSafeOutputClaimArtifactsRequireWorkerAndSuccessfulRedaction(t *testing.
 			require.NotContains(t, content, "/tmp/gh-aw/claims/*/delivery-receipt.json")
 			if test.worker {
 				require.Contains(t, content, "/tmp/gh-aw/claims/*/safe-output-items.jsonl")
+				require.Contains(t, content, "/tmp/gh-aw/claims/*/safe-output-outcomes.jsonl")
 				require.Contains(t, content, "/tmp/gh-aw/claims/*/temporary-id-map.json")
 				require.Contains(t, content, "/tmp/gh-aw/claims/*/safe-output-errors.json")
 				require.Contains(t, content, "/tmp/gh-aw/claims/*/claim-delivery-errors.json")

@@ -542,10 +542,9 @@ jobs:
             const { main } = require(path.join(actionsDir, 'checkout_pr_branch.cjs'));
             await main();
       - name: Install GitHub Copilot CLI
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh"
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh" COPILOT_VERSION --checksums-sha256 COPILOT_CHECKSUMS_SHA256 --prefer-toolcache
         env:
           GH_HOST: github.com
-          GH_AW_COMPILED_VERSION: dev
           GH_AW_COPILOT_MIN_VERSION: 1.0.35
       - name: Install AWF binary
         run: bash "${RUNNER_TEMP}/gh-aw/actions/install_awf_binary.sh" vAWF_VERSION --rootless
@@ -1123,6 +1122,7 @@ jobs:
             /tmp/gh-aw/agent/model-endpoint-mismatch.json
             /tmp/gh-aw/agent/model-resolution.json
             /tmp/gh-aw/agent-stdio.log
+            /tmp/gh-aw/agent/harness_retry.json
             /tmp/gh-aw/pre-agent-audit.txt
             /tmp/gh-aw/github_rate_limits.jsonl
             /tmp/gh-aw/otel.jsonl
@@ -1358,8 +1358,10 @@ jobs:
             /tmp/gh-aw/usage/agent/token_usage.jsonl
             /tmp/gh-aw/usage/agent/model-routing.jsonl
             /tmp/gh-aw/usage/agent/execution.json
+            /tmp/gh-aw/usage/agent/harness_retry.json
             /tmp/gh-aw/usage/detection/token_usage.jsonl
             /tmp/gh-aw/usage/detection/execution.json
+            /tmp/gh-aw/usage/detection/harness_retry.json
             /tmp/gh-aw/usage/detection/detection_result.json
             /tmp/gh-aw/usage/evals/token_usage.jsonl
             /tmp/gh-aw/usage/evals/execution.json
@@ -1393,8 +1395,10 @@ jobs:
             /tmp/gh-aw/usage/agent/token_usage.jsonl
             /tmp/gh-aw/usage/agent/model-routing.jsonl
             /tmp/gh-aw/usage/agent/execution.json
+            /tmp/gh-aw/usage/agent/harness_retry.json
             /tmp/gh-aw/usage/detection/token_usage.jsonl
             /tmp/gh-aw/usage/detection/execution.json
+            /tmp/gh-aw/usage/detection/harness_retry.json
             /tmp/gh-aw/usage/detection/detection_result.json
             /tmp/gh-aw/usage/evals/token_usage.jsonl
             /tmp/gh-aw/usage/evals/execution.json
@@ -1467,7 +1471,7 @@ jobs:
     # Permissions for the safe_outputs job (workflow permissions default to none).
     permissions:
       issues: write
-    timeout-minutes: 45
+    timeout-minutes: 15
     env:
       GH_AW_AGENT_AIC: ${{ needs.agent.outputs.aic }}
       GH_AW_AIC: ${{ needs.agent.outputs.aic }}
@@ -1576,6 +1580,7 @@ jobs:
           name: safe-outputs-items
           path: |
             /tmp/gh-aw/safe-output-items.jsonl
+            /tmp/gh-aw/safe-output-outcomes.jsonl
             /tmp/gh-aw/temporary-id-map.json
             /tmp/gh-aw/safe-output-errors.json
           if-no-files-found: ignore

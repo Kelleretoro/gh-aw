@@ -52,6 +52,11 @@ type Input struct {
 	// of AW frontmatter; when both are supplied it is the compiled graph.
 	Document   *aw.Document
 	JavaScript *taint.JavaScriptOptions
+	// AllowActionRefs permits well-formed mutable references as warnings.
+	// Malformed references remain errors regardless of this compiler allowance.
+	AllowActionRefs bool
+	// SafeOutputJobs includes imported integration jobs resolved by the compiler.
+	SafeOutputJobs []string
 }
 
 type Diagnostic struct {
@@ -217,6 +222,7 @@ func Default() *Runner {
 		ActionPinRule(),
 		JobTimeoutRule(),
 		NeedsConsistencyRule(),
+		StepReferenceRule(),
 		TemplateInjectionRule(),
 		WorkflowRunScopeRule(),
 		PermissionScopeRule(),
@@ -245,5 +251,6 @@ func Default() *Runner {
 		CachePoisoningRule(),
 		ExcessivePermissionsRule(),
 		ObfuscationRule(),
+		BashCasePatternRule(),
 	}}
 }
