@@ -320,8 +320,8 @@ func (c *Compiler) generateUnifiedPromptCreationStep(yaml *strings.Builder, buil
 		for key, value := range section.EnvVars {
 			// Extract the GitHub expression from the value (e.g., "${{ github.repository }}" -> "github.repository")
 			// This is needed for the substitution step
-			if strings.HasPrefix(value, "${{ ") && strings.HasSuffix(value, " }}") {
-				content := strings.TrimSpace(value[4 : len(value)-3])
+			if isExpression(value) {
+				content := stripExpressionWrapper(value)
 				// Add to both allEnvVars (for prompt creation step) and expressionMappingsMap (for substitution step)
 				allEnvVars[key] = value
 				// Only add if not already present (user prompt expressions take precedence)
@@ -336,8 +336,9 @@ func (c *Compiler) generateUnifiedPromptCreationStep(yaml *strings.Builder, buil
 				// This ensures they're only available in the substitution step, not the prompt creation step
 				if _, exists := expressionMappingsMap[key]; !exists {
 					expressionMappingsMap[key] = &ExpressionMapping{
-						EnvVar:  key,
-						Content: fmt.Sprintf("'%s'", value), // Wrap in quotes for substitution
+						EnvVar:    key,
+						Content:   value,
+						IsLiteral: true,
 					}
 				}
 			}
@@ -364,15 +365,20 @@ func (c *Compiler) generateUnifiedPromptCreationStep(yaml *strings.Builder, buil
 	type promptRenderItem struct {
 		ContentEnvVar   string `json:"content_env,omitempty"`
 		File            string `json:"file,omitempty"`
+		AuthorFile      string `json:"author_file,omitempty"`
 		LedgerReplay    bool   `json:"ledger_replay,omitempty"`
 		ConditionEnvVar string `json:"condition_env,omitempty"`
 	}
 	type promptRenderConfig struct {
-		Items           []promptRenderItem `json:"items"`
-		SystemItemCount int                `json:"system_item_count"`
+		Items             []promptRenderItem `json:"items"`
+		SystemItemCount   int                `json:"system_item_count"`
+		AuthorExpressions map[string]string  `json:"author_expressions,omitempty"`
 	}
 
 	renderConfig := promptRenderConfig{}
+	if data.MainWorkflowPromptPath != "" {
+		renderConfig.AuthorExpressions = promptAuthorExpressions(expressionMappings)
+	}
 	renderContent := make(map[string]string)
 	contentIndex := 0
 	appendContent := func(content, conditionEnvVar string) {
@@ -420,6 +426,11 @@ func (c *Compiler) generateUnifiedPromptCreationStep(yaml *strings.Builder, buil
 	userBlankRun := 0
 	for chunkIdx, chunk := range userPromptChunks {
 		unifiedPromptLog.Printf("Preparing user prompt chunk %d/%d", chunkIdx+1, len(userPromptChunks))
+		if data.MainWorkflowPromptPath != "" && chunk == "{{#runtime-import "+data.MainWorkflowPromptPath+"}}" {
+			renderConfig.Items = append(renderConfig.Items, promptRenderItem{AuthorFile: data.MainWorkflowPromptPath})
+			userBlankRun = 0
+			continue
+		}
 		if strings.HasPrefix(chunk, "{{#runtime-import ") && strings.HasSuffix(chunk, "}}") {
 			appendContent(chunk+"\n", "")
 			userBlankRun = 0
@@ -461,7 +472,7 @@ func (c *Compiler) generateUnifiedPromptCreationStep(yaml *strings.Builder, buil
 	// Add all environment variables in sorted order for consistency
 	envKeys := sliceutil.SortedKeys(allEnvVars)
 	for _, key := range envKeys {
-		yaml.WriteString("          " + key + ": " + allEnvVars[key] + "\n")
+		writeYAMLEnv(yaml, "          ", key, allEnvVars[key])
 	}
 	for _, key := range sliceutil.SortedKeys(renderContent) {
 		writeYAMLEnv(yaml, "          ", key, renderContent[key])

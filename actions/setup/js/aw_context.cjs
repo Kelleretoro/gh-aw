@@ -284,6 +284,7 @@ function normalizeLegacyWorkQueueContext(awContext, rawClaim) {
  *   episode_id: string,
  *   hop_id: string,
  *   parent_hop_id: string,
+ *   parent_run_id: string,
  *   origin_event: string,
  *   root_repo: string,
  *   root_workflow_id: string,
@@ -296,6 +297,8 @@ function normalizeLegacyWorkQueueContext(awContext, rawClaim) {
  *   item_number: string,
  *   comment_id: string,
  *   comment_node_id: string,
+ *   pr_head_sha: string,
+ *   comment_updated_at: string,
  *   deployment_state: string,
  *   workflow_run_conclusion: string,
  *   otel_trace_id: string,
@@ -318,6 +321,9 @@ function normalizeLegacyWorkQueueContext(awContext, rawClaim) {
  *     Only populated for discussion/discussion_comment events. Can be passed
  *     as reply_to_id in add_comment to thread responses under the triggering
  *     comment when a dispatched specialist workflow replies to a discussion.
+ *   - pr_head_sha: Event-recorded PR head or review commit SHA, never a later
+ *     API resolution. Empty when the event has no immutable revision evidence.
+ *   - comment_updated_at: Triggering comment edit/creation time, not dispatch time.
  *   - deployment_state: The deployment status state value (e.g. "failure", "error",
  *     "success") when the workflow was triggered by a deployment_status event.
  *     Empty string for all other event types. Propagated to child workflows via
@@ -411,6 +417,7 @@ function buildAwContext() {
     // parent_hop_id identifies the immediate caller when a workflow was spawned
     // by a previous automation hop.
     parent_hop_id: parentHopId,
+    parent_run_id: parentHopId.match(/^([1-9]\d*)-/)?.[1] || "",
     // origin_event captures the original GitHub event that started the episode.
     origin_event: originEvent,
     // root_* fields stay stable across all child workflow hops in the episode.
@@ -428,6 +435,15 @@ function buildAwContext() {
     item_number,
     comment_id,
     comment_node_id,
+    // Only event-recorded revisions are propagated; an API read of today's head
+    // cannot reconstruct the revision when an earlier issue comment was posted.
+    pr_head_sha:
+      context.eventName === "pull_request_review"
+        ? (context.payload?.review?.commit_id ?? "")
+        : context.eventName === "pull_request_review_comment"
+          ? (context.payload?.comment?.commit_id ?? "")
+          : (context.payload?.pull_request?.head?.sha ?? ""),
+    comment_updated_at: context.payload?.comment?.updated_at ?? context.payload?.comment?.created_at ?? "",
     // deployment_state carries the GitHub deployment_status state value when the
     // triggering event is deployment_status. Empty string for all other events.
     // Propagated to called workflows so they can access the deployment state.

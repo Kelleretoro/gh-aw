@@ -41,6 +41,33 @@ describe("Unified conclusion session", () => {
     return target;
   }
 
+  it("records the selected PR revision in the unified session", () => {
+    const selectedSha = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
+    const outputPath = path.join(root, "usage/aw_session.jsonl");
+    const events = writeUnifiedSession({
+      rootDir: root,
+      outputPath,
+      dailyAIC: {
+        GH_AW_PR_HEAD_BASE_PR_NUMBER: "123",
+        GH_AW_PR_HEAD_BASE_SHA: selectedSha,
+      },
+    });
+    const checkout = events.find(event => event.type === "workflow.pr_checkout_revision");
+    expect(checkout?.data).toEqual({ prNumber: 123, selectedSha: selectedSha.toLowerCase() });
+    expect(checkout?.provenance).toMatchObject({ component: "workflow", phase: "agent", path: "runtime/pr-checkout" });
+    expect(fs.readFileSync(outputPath, "utf8")).toContain(JSON.stringify(checkout));
+    expect(validateSession(fs.readFileSync(outputPath, "utf8"))).toBe(events.length);
+  });
+
+  it.each([
+    ["invalid SHA", { GH_AW_PR_HEAD_BASE_PR_NUMBER: "123", GH_AW_PR_HEAD_BASE_SHA: "bad" }],
+    ["invalid PR number", { GH_AW_PR_HEAD_BASE_PR_NUMBER: "1e2", GH_AW_PR_HEAD_BASE_SHA: "a".repeat(40) }],
+    ["unsafe PR number", { GH_AW_PR_HEAD_BASE_PR_NUMBER: "9007199254740992", GH_AW_PR_HEAD_BASE_SHA: "a".repeat(40) }],
+  ])("omits checkout metadata with %s", (_description, dailyAIC) => {
+    const { events } = collectUnifiedSession({ rootDir: root, dailyAIC });
+    expect(events.some(event => event.type === "workflow.pr_checkout_revision")).toBe(false);
+  });
+
   it("collects only configured safe job outcomes and canonical execution URLs", () => {
     const { events } = collectUnifiedSession({
       rootDir: root,
@@ -634,6 +661,49 @@ describe("Unified conclusion session", () => {
     expect(persisted).not.toContain("PRIVATE_");
     expect(persisted).not.toContain("stale");
     expect(writeUnifiedSession({ rootDir: root, dailyAIC: { GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2" } })).toEqual(events);
+  });
+
+  it.each(["conclusion", "usage-only"])("never synthesizes eval.result from the 40955414354 not-evaluated marker in the %s layout", layout => {
+    const { buildGraderOutput, createSessionLookups } = req("./trace_graders.cjs");
+    process.env.GITHUB_RUN_ID = "40955414354";
+    process.env.GITHUB_RUN_ATTEMPT = "1";
+    const evidence = { version: 1, component: "evals", run_id: 40955414354, run_attempt: 1, state: "not_started" };
+    const marker = {
+      status: "not_evaluated",
+      reason_code: "judge_not_started",
+      reason: "The claude evals judge did not start: the sandbox failed before the engine harness started (execution step outcome: failure).",
+      engine: "claude",
+      model: "evals",
+      run_id: "40955414354",
+      run_attempt: "1",
+      timestamp: "2026-10-29T21:19:44.470Z",
+      execution_outcome: "failure",
+      execution_state: "not_started",
+    };
+    write(layout === "conclusion" ? "evals/evals/execution.json" : "usage/evals/execution.json", evidence);
+    write(layout === "conclusion" ? "evals/evals_status.json" : "usage/evals/evals_status.json", marker);
+
+    const { events } = collectUnifiedSession({ rootDir: root });
+    expect(events.filter(event => event.type === "eval.result")).toEqual([]);
+    expect(events.filter(event => event.type === "execution.result" && event.provenance.phase === "evals")).toHaveLength(1);
+    expect(JSON.stringify(events)).not.toContain("UNKNOWN");
+    expect(buildGraderOutput([], createSessionLookups(events)).context.evals).toBeUndefined();
+  });
+
+  it("keeps a genuine judge UNKNOWN answer as an eval.result counted by graders", () => {
+    const { buildGraderOutput, createSessionLookups } = req("./trace_graders.cjs");
+    process.env.GITHUB_RUN_ID = "40955414354";
+    process.env.GITHUB_RUN_ATTEMPT = "1";
+    write("evals/evals.jsonl", [
+      { id: "docs_reviewed", question: "Did the agent review the project documentation from the perspective of a Claude Code user?", answer: "UNKNOWN", model: "evals", timestamp: "2026-10-29T21:19:44.470Z", runid: "40955414354" },
+      { id: "feedback_produced", question: "Was feedback or a report produced identifying documentation gaps for non-Copilot users?", answer: "NO", model: "evals", timestamp: "2026-10-29T21:19:44.470Z", runid: "40955414354" },
+    ]);
+    const { events } = collectUnifiedSession({ rootDir: root });
+    expect(events.filter(event => event.type === "eval.result").map(event => [event.data.id, event.data.answer])).toEqual([
+      ["docs_reviewed", "UNKNOWN"],
+      ["feedback_produced", "NO"],
+    ]);
+    expect(buildGraderOutput([], createSessionLookups(events)).context.evals).toMatchObject({ total: 2, yes: 0, no: 1, unknown: 1 });
   });
 
   it.each(["evals/evals.jsonl", "evals.jsonl", "usage/evals.jsonl"])("imports only current-run evals from mixed history in %s", evalsPath => {
@@ -1717,7 +1787,7 @@ describe("Unified conclusion session", () => {
   });
 
   it.each([
-    { attempts: 1, exit_code: 1, attempt_results: [{ attempt: 1, exit_code: null, failure_classes: [] }] },
+    { attempts: 1, exit_code: 1, attempt_results: [{ attempt: 1, exit_code: "PRIVATE_RETRY_OUTPUT", failure_classes: [] }] },
     { attempts: 1, exit_code: 1, attempt_results: [{ attempt: 1, exit_code: 1, failure_classes: ["PRIVATE_FAILURE_TEXT"] }] },
     { attempts: 1, exit_code: 1, attempt_results: [{ attempt: 1, exit_code: 1, failure_classes: ["secret_736563726574"] }] },
   ])("does not publish invalid retry records or their private values: %j", record => {

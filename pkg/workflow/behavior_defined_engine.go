@@ -114,8 +114,16 @@ func (e *BehaviorDefinedEngine) GetModelEnvVarName() string {
 }
 
 func (e *BehaviorDefinedEngine) GetRequiredSecretNames(workflowData *WorkflowData) []string {
+	var backend UniversalLLMBackend
 	if e.usesUniversalLLMConsumer() {
-		return e.GetUniversalRequiredSecretNames(workflowData)
+		backend = e.resolveBackend(workflowData)
+	}
+	return e.getRequiredSecretNamesForBackend(workflowData, backend)
+}
+
+func (e *BehaviorDefinedEngine) getRequiredSecretNamesForBackend(workflowData *WorkflowData, backend UniversalLLMBackend) []string {
+	if e.usesUniversalLLMConsumer() {
+		return e.getUniversalRequiredSecretNamesForBackend(workflowData, backend)
 	}
 
 	seen := make(map[string]struct{})
@@ -235,6 +243,7 @@ func (e *BehaviorDefinedEngine) GetInstallationSteps(workflowData *WorkflowData)
 		version = workflowData.EngineConfig.Version
 	}
 
+	cooldownDays := resolveEngineCooldownDays(workflowData)
 	npmSteps := GenerateNpmInstallSteps(
 		install.PackageName,
 		version,
@@ -243,7 +252,7 @@ func (e *BehaviorDefinedEngine) GetInstallationSteps(workflowData *WorkflowData)
 		NPMInstallOptions{
 			IncludeNodeSetup:  install.IncludeNodeSetup,
 			RunInstallScripts: install.PostInstallScripts,
-			CooldownEnabled:   install.Cooldown,
+			CooldownDays:      &cooldownDays,
 		},
 	)
 	// MicroVMs cannot rely on the global npm installation. Stage the CLI in
@@ -259,7 +268,8 @@ func (e *BehaviorDefinedEngine) GetInstallationSteps(workflowData *WorkflowData)
 			install.StepName+" in microVM path",
 			binaryName,
 			install.PostInstallScripts,
-			install.Cooldown,
+			true,
+			cooldownDays,
 		))
 	}
 	if install.VerifyCommand != "" {
@@ -536,12 +546,16 @@ func (e *BehaviorDefinedEngine) GetExecutionSteps(workflowData *WorkflowData, lo
 	}
 
 	exec := behavior.Execution
+	var backend UniversalLLMBackend
+	if e.usesUniversalLLMConsumer() || exec.ProviderEnvMode == behaviorProviderEnvModeUniversalLLMConsumer {
+		backend = e.resolveBackend(workflowData)
+	}
 	firewallEnabled := e.behaviorDefinedFirewallEnabled(workflowData)
 	engineCommand := e.buildBehaviorDefinedEngineCommand(exec, workflowData)
-	command := e.buildBehaviorDefinedExecutionCommand(exec, workflowData, logFile, engineCommand, firewallEnabled)
-	env := e.buildBehaviorDefinedExecutionEnv(exec, workflowData, firewallEnabled)
+	command := e.buildBehaviorDefinedExecutionCommand(exec, workflowData, logFile, engineCommand, firewallEnabled, backend)
+	env := e.buildBehaviorDefinedExecutionEnv(exec, workflowData, firewallEnabled, backend)
 	steps := e.buildBehaviorDefinedSetupSteps()
-	steps = append(steps, e.buildBehaviorDefinedExecutionStep(exec, workflowData, command, env))
+	steps = append(steps, e.buildBehaviorDefinedExecutionStep(exec, workflowData, command, env, backend))
 	return steps
 }
 
@@ -602,9 +616,9 @@ func (e *BehaviorDefinedEngine) behaviorDefinedFirewallEnabled(workflowData *Wor
 	return firewallEnabled
 }
 
-func (e *BehaviorDefinedEngine) buildBehaviorDefinedExecutionCommand(exec *EngineExecutionDefinition, workflowData *WorkflowData, logFile, engineCommand string, firewallEnabled bool) string {
+func (e *BehaviorDefinedEngine) buildBehaviorDefinedExecutionCommand(exec *EngineExecutionDefinition, workflowData *WorkflowData, logFile, engineCommand string, firewallEnabled bool, backend UniversalLLMBackend) string {
 	if firewallEnabled {
-		return e.buildFirewallCommand(exec, workflowData, logFile, engineCommand)
+		return e.buildFirewallCommand(exec, workflowData, logFile, engineCommand, backend)
 	}
 	if exec.WriteTimestamp {
 		return fmt.Sprintf("set -o pipefail\nexport no_proxy=\"${NO_PROXY:-}\"\nprintf '%%s' \"$(date +%%s%%3N)\" > %s\n%s 2>&1 | tee -a %s",
@@ -613,7 +627,7 @@ func (e *BehaviorDefinedEngine) buildBehaviorDefinedExecutionCommand(exec *Engin
 	return fmt.Sprintf("set -o pipefail\nexport no_proxy=\"${NO_PROXY:-}\"\n%s 2>&1 | tee -a %s", engineCommand, logFile)
 }
 
-func (e *BehaviorDefinedEngine) buildBehaviorDefinedExecutionEnv(exec *EngineExecutionDefinition, workflowData *WorkflowData, firewallEnabled bool) map[string]string {
+func (e *BehaviorDefinedEngine) buildBehaviorDefinedExecutionEnv(exec *EngineExecutionDefinition, workflowData *WorkflowData, firewallEnabled bool, backend UniversalLLMBackend) map[string]string {
 	env := map[string]string{
 		"GH_AW_PROMPT":     constants.AwPromptsFile,
 		"GITHUB_WORKSPACE": "${{ github.workspace }}",
@@ -623,7 +637,10 @@ func (e *BehaviorDefinedEngine) buildBehaviorDefinedExecutionEnv(exec *EngineExe
 	injectWorkflowCallNetworkAllowedEnv(env, workflowData)
 	maps.Copy(env, exec.Env)
 	if exec.ProviderEnvMode == behaviorProviderEnvModeUniversalLLMConsumer {
-		e.ApplyUniversalProviderEnv(env, workflowData, firewallEnabled)
+		e.applyUniversalProviderEnvForBackend(env, workflowData, firewallEnabled, backend)
+		if firewallEnabled && backend == UniversalLLMBackendCopilot {
+			env[constants.CopilotBYOKDummyAPIKeyEnvVar] = constants.CopilotBYOKDummyAPIKey
+		}
 	}
 	e.applyBehaviorDefinedMCPEnv(exec, workflowData, env)
 	for _, binding := range e.definition.Auth {
@@ -643,13 +660,13 @@ func (e *BehaviorDefinedEngine) buildBehaviorDefinedExecutionEnv(exec *EngineExe
 	applyEngineCwdEnv(env, workflowData)
 	applyEngineVersionEnv(env, workflowData)
 	applyEngineAndAgentEnv(env, workflowData, behaviorDefinedEngineLog)
-	applyMCPScriptsSecretEnv(env, workflowData)
 	e.applyBehaviorDefinedModelEnv(exec, workflowData, env)
 	if exec.ProtectedSessionCapture && firewallEnabled {
 		env["RUNNER_TEMP"] = "${{ runner.temp }}"
 		env["GH_AW_PROTECTED_SESSION_CAPTURE"] = "1"
 		env["GH_AW_PROTECTED_CAPTURE_ID"] = protectedSessionCaptureID
 	}
+	applyDurableExecutionEnv(env, workflowData)
 	return env
 }
 
@@ -682,13 +699,13 @@ func (e *BehaviorDefinedEngine) applyBehaviorDefinedModelEnv(exec *EngineExecuti
 	env[exec.ModelEnvVarName] = modelVal
 }
 
-func (e *BehaviorDefinedEngine) buildBehaviorDefinedExecutionStep(exec *EngineExecutionDefinition, workflowData *WorkflowData, command string, env map[string]string) GitHubActionStep {
+func (e *BehaviorDefinedEngine) buildBehaviorDefinedExecutionStep(exec *EngineExecutionDefinition, workflowData *WorkflowData, command string, env map[string]string, backend UniversalLLMBackend) GitHubActionStep {
 	stepLines := []string{
 		"      - name: " + exec.StepName,
 		"        id: agentic_execution",
 		"        timeout-minutes: " + resolveStepTimeoutValue(workflowData),
 	}
-	filteredEnv := FilterEnvForSecrets(env, e.GetRequiredSecretNames(workflowData))
+	filteredEnv := FilterEnvForSecrets(env, e.getRequiredSecretNamesForBackend(workflowData, backend))
 	addCliProxyGHTokenToEnv(filteredEnv, workflowData)
 	return GitHubActionStep(FormatStepWithCommandAndEnv(stepLines, wrapAgentExecutionCommand(command), filteredEnv))
 }
@@ -716,12 +733,16 @@ func (e *BehaviorDefinedEngine) mcpFlagFragment(exec *EngineExecutionDefinition,
 	return shellJoinArgs([]string{exec.MCPConfigFlag, path})
 }
 
-func (e *BehaviorDefinedEngine) buildFirewallCommand(exec *EngineExecutionDefinition, workflowData *WorkflowData, logFile, engineCommand string) string {
+func (e *BehaviorDefinedEngine) buildFirewallCommand(exec *EngineExecutionDefinition, workflowData *WorkflowData, logFile, engineCommand string, backend UniversalLLMBackend) string {
 	allowedDomains := e.allowedDomains(workflowData)
 	// Propagate no_proxy inside the AWF container.  --env-all forwards NO_PROXY
 	// from the YAML env block, but Bun (and other runtimes) also check the
 	// lowercase variant, so we export it explicitly from the uppercase value.
 	engineCommandWithPath := fmt.Sprintf("export no_proxy=\"${NO_PROXY:-}\" && %s && %s", GetNpmBinPathSetup(), engineCommand)
+	if exec.ProviderEnvMode == behaviorProviderEnvModeUniversalLLMConsumer && backend == UniversalLLMBackendCopilot {
+		// Introduce the client key after AWF credential discovery, never in its startup environment.
+		engineCommandWithPath = `export OPENAI_API_KEY="$` + constants.CopilotBYOKDummyAPIKeyEnvVar + `" && ` + engineCommandWithPath
+	}
 	// microVM runtimes stage the engine CLI under ${RUNNER_TEMP}/gh-aw/engine-cli/bin
 	// because the runner tool cache is not mounted inside the sandbox.
 	if microVMCLIPath := GetMicroVMNpmCLIPathSetup(workflowData); microVMCLIPath != "" {
@@ -731,7 +752,7 @@ func (e *BehaviorDefinedEngine) buildFirewallCommand(exec *EngineExecutionDefini
 		engineCommandWithPath = fmt.Sprintf("%s && %s", mcpCLIPath, engineCommandWithPath)
 	}
 
-	excludedSecretNames := e.GetRequiredSecretNames(workflowData)
+	excludedSecretNames := e.getRequiredSecretNamesForBackend(workflowData, backend)
 	if e.behavior().SecretStrategy != behaviorSecretStrategyGeminiAPIKey {
 		for _, binding := range e.definition.Auth {
 			excludedSecretNames = slices.DeleteFunc(excludedSecretNames, func(secretName string) bool {
@@ -996,6 +1017,20 @@ func deepCopyEngineDefinition(src EngineDefinition) EngineDefinition {
 //nolint:largefunc // Deep copy initializes all fields explicitly.
 func deepCopyEngineBehaviorDefinition(src EngineBehaviorDefinition) EngineBehaviorDefinition {
 	dst := src // value copy covers all scalar fields
+	if src.Durable != nil {
+		durable := *src.Durable
+		durable.Installation = append([]EngineInstallationDefinition(nil), src.Durable.Installation...)
+		durable.Files = append([]string(nil), src.Durable.Files...)
+		for i := range durable.Installation {
+			if cooldown := durable.Installation[i].Cooldown; cooldown != nil {
+				copy := *cooldown
+				durable.Installation[i].Cooldown = &copy
+			}
+		}
+		copy := deepCopyEngineBehaviorDefinition(EngineBehaviorDefinition{Execution: src.Durable.Execution})
+		durable.Execution = copy.Execution
+		dst.Durable = &durable
+	}
 
 	// SupportedEnvVarKeys
 	if src.SupportedEnvVarKeys != nil {

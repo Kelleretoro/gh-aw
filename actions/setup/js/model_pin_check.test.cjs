@@ -168,6 +168,28 @@ describe("model_pin_check collection and rules", () => {
     expect(pin(report, "models.c-alias").source).toBe(".github/workflows/shared/c.md");
   });
 
+  it.each(["gpt-5-mini", "copilot/claude-opus-5"])("recognizes Claude sub-agent inherit without skipping parent model %s", model => {
+    const report = check({
+      ".github/workflows/claude.md": `---\nengine:\n  id: claude\n  model-provider: github\nmodel: ${model}\nimports:\n  - ../agents/helper.md\n---\n## agent: \`inline-helper\`\n---\nmodel: inherit\n---\nHelp.\n`,
+      ".github/agents/helper.md": "---\nname: helper\nmodel: inherit\n---\nHelp.\n",
+    });
+    for (const field of ["model (imported agent file)", "## agent: 'inline-helper' model"]) {
+      expect(pin(report, field)).toMatchObject({ configured: "inherit", status: "not_checked", reason: expect.stringMatching(/^sentinel `inherit`/), resolved: null, cause: null });
+    }
+    const parent = pin(report, "model");
+    expect(parent.status).toBe(model === "gpt-5-mini" ? "exact" : "unresolvable");
+    expect(report.action_required).toEqual(model === "gpt-5-mini" ? [] : [parent]);
+  });
+
+  it("does not treat main-engine or non-Claude inherit pins as inheritance instructions", () => {
+    const report = check({
+      ".github/workflows/claude.md": "---\nengine:\n  id: claude\n  model-provider: github\n  model: inherit\n---\n",
+      ".github/workflows/copilot.md": "---\nengine: copilot\nmodel: inherit\n---\n## agent: `helper`\n---\nmodel: inherit\n---\nHelp.\n",
+    });
+    expect(report.pins).toHaveLength(3);
+    expect(report.pins.every(result => result.status === "unresolvable" && result.cause === "model_unavailable")).toBe(true);
+  });
+
   it("does not let imported aliases override built-ins, but keeps main-workflow overrides", () => {
     const report = check({
       ".github/workflows/aliases.md": "---\nimports:\n  - shared/aliases.md\nengine: copilot\nmodel: sonnet\n---\n",
@@ -364,6 +386,23 @@ describe("model_pin_check collection and rules", () => {
     expect(pin(report, "engine.model")).toMatchObject({ status: "not_checked", reason: expect.stringMatching(/^sentinel `auto`/) });
     // A bare fallback follows the engine provider, which a copilot/ main model selects.
     expect(pin(report, "engine.fallback-models[1]")).toMatchObject({ provider: "copilot", status: "unresolvable", cause: "model_unavailable" });
+  });
+
+  it("does not check native Claude and Codex routing candidates against the Copilot catalogue", () => {
+    const notChecked = { status: "not_checked", reason: "provider not in the Copilot catalogue" };
+    const codex = check({ ".github/workflows/codex.md": "---\nengine:\n  id: codex\n  model-routing:\n    allowed-models: [gpt-5.4, openai/gpt-5.4]\n---\n" });
+    expect(pin(codex, "engine.model-routing.allowed-models[0]")).toMatchObject({ ...notChecked, provider: "openai" });
+    expect(pin(codex, "engine.model-routing.allowed-models[1]")).toMatchObject({ ...notChecked, provider: "openai" });
+    const claude = check({ ".github/workflows/claude.md": "---\nengine:\n  id: claude\n  model-routing:\n    allowed-models: [claude-sonnet-5, anthropic/claude-sonnet-5]\n---\n" });
+    expect(pin(claude, "engine.model-routing.allowed-models[0]")).toMatchObject({ ...notChecked, provider: "anthropic" });
+    expect(pin(claude, "engine.model-routing.allowed-models[1]")).toMatchObject({ ...notChecked, provider: "anthropic" });
+  });
+
+  it("checks Claude and Codex routing candidates against the Copilot catalogue with model-provider: github", () => {
+    const codex = check({ ".github/workflows/codex.md": "---\nengine:\n  id: codex\n  model-provider: github\n  model-routing:\n    allowed-models: [gpt-5.4]\n---\n" });
+    expect(pin(codex, "engine.model-routing.allowed-models[0]")).toMatchObject({ provider: "copilot", status: "exact", resolved: "gpt-5.4" });
+    const claude = check({ ".github/workflows/claude.md": "---\nengine:\n  id: claude\n  model-provider: github\n  model-routing:\n    allowed-models: [claude-sonnet-5]\n---\n" });
+    expect(pin(claude, "engine.model-routing.allowed-models[0]")).toMatchObject({ provider: "copilot", status: "exact", resolved: "claude-sonnet-5" });
   });
 
   it("reports catalog_unavailable when /reflect has no Copilot model list", () => {

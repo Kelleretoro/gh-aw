@@ -2,7 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { compactUnifiedSession, readCompactUnifiedSession, MAX_COMPACT_SESSION_BYTES, MAX_COMPACT_SESSION_EVENTS, MAX_COMPACT_STRING_BYTES, MAX_SOURCE_LINE_BYTES, MAX_SOURCE_SCAN_BYTES } = require("./compact_unified_session.cjs");
+const {
+  compactUnifiedSession,
+  readCompactUnifiedSession,
+  sessionEventPriority,
+  leastEssentialSessionEventIndex,
+  MAX_COMPACT_SESSION_BYTES,
+  MAX_COMPACT_SESSION_EVENTS,
+  MAX_COMPACT_STRING_BYTES,
+  MAX_SOURCE_LINE_BYTES,
+  MAX_SOURCE_SCAN_BYTES,
+} = require("./compact_unified_session.cjs");
 const event = (type, data) => ({ type, data, timestamp: "2026-10-20T19:00:00Z", provenance: { component: "agent", phase: "agent", path: "agent-session.jsonl", index: 0 } });
 const parse = result => (result.session.trim() ? result.session.trim().split("\n").map(JSON.parse) : []);
 
@@ -80,6 +90,69 @@ describe("compact unified session projection", () => {
     expect(result.omittedEvents).toBe(1);
   });
 
+  it("preserves safe per-attempt metadata, startup attempts and incomplete evidence", () => {
+    const attempt = {
+      attempt: 1,
+      exitCode: null,
+      failureClasses: [],
+      attemptId: "startup:1:harness:1",
+      startupAttemptId: "startup:1",
+      startedAt: 1700000000000,
+      strategy: "restart",
+      backoffMs: 0,
+      outcome: "interrupted",
+      reason: "watchdog",
+    };
+    const startup = { ...attempt, attemptId: "startup:1", exitCode: 0, finishedAt: 1700000000100, outcome: "success" };
+    delete startup.startupAttemptId;
+    const summary = { attempts: 1, exitCode: null, attemptResults: [attempt], startupAttemptResults: [startup] };
+    const events = [event("harness.retry", { ...summary, payload: "PRIVATE" }), event("harness.attempt", { ...attempt, layer: "harness", output: "PRIVATE" }), event("harness.attempt", { ...startup, layer: "startup" })];
+    const original = JSON.stringify(events);
+    expect(parse(compactUnifiedSession(events)).map(item => item.data)).toEqual([summary, { ...attempt, layer: "harness" }, { ...startup, layer: "startup" }]);
+    expect(compactUnifiedSession(events).session).not.toContain("PRIVATE");
+    expect(JSON.stringify(events)).toBe(original);
+  });
+
+  it("drops malformed attempt events and unsafe optional metadata", () => {
+    const attempt = { attempt: 1, exitCode: null, failureClasses: [] };
+    const events = [
+      event("harness.attempt", { ...attempt, layer: "startup", attemptId: "harness:1" }),
+      event("harness.attempt", { ...attempt, layer: "PRIVATE" }),
+      event("harness.retry", { attempts: 1, exitCode: null, attemptResults: [{ ...attempt, reason: "PRIVATE" }] }),
+    ];
+    expect(compactUnifiedSession(events).omittedEvents).toBe(3);
+    expect(compactUnifiedSession(events).session).toBe("");
+  });
+
+  it("preserves only bounded provenance attempt correlation identifiers", () => {
+    const events = ["harness:2", "startup:1", "PRIVATE", "harness:102", "startup:2:harness:3", "startup:102:harness:1", "startup:1:harness:102"].map(attemptId => ({
+      ...event("usage.report", { aic: 1 }),
+      provenance: { component: "agent", phase: "agent", path: "agent.jsonl", index: 0, attemptId, startupAttemptId: "startup:1" },
+    }));
+    const projected = parse(compactUnifiedSession(events));
+    expect(projected.map(item => item.provenance.attemptId)).toEqual(["harness:2", "startup:1", undefined, undefined, "startup:2:harness:3", undefined, undefined]);
+    expect(projected.every(item => item.provenance.startupAttemptId === "startup:1")).toBe(true);
+    expect(compactUnifiedSession(events).session).not.toContain("PRIVATE");
+  });
+
+  it("preserves only finite source-normalized provenance clocks", () => {
+    const clocks = [0, 1700000000123.5, NaN, Infinity, "PRIVATE", { content: "PRIVATE" }];
+    const inputs = clocks.map(timestampMs => ({ ...event("usage.report", { aic: 1 }), provenance: { timestampMs } }));
+    expect(parse(compactUnifiedSession(inputs)).map(item => item.provenance.timestampMs)).toEqual([0, 1700000000123.5, undefined, undefined, undefined, undefined]);
+    expect(compactUnifiedSession(inputs).session).not.toContain("PRIVATE");
+  });
+
+  it("preserves bounded native reconnect counters without creating harness events", () => {
+    const events = [
+      event("engine.retry", { attempt: 2, maxRetries: 5, backoffMs: 1000, output: "PRIVATE", errors: ["PRIVATE"] }),
+      event("engine.retry", { attempt: -1, maxRetries: "PRIVATE" }),
+      event("engine.retry", { attempt: 1, backoffMs: -1 }),
+    ];
+    const result = parse(compactUnifiedSession(events));
+    expect(result.map(item => item.type)).toEqual(["engine.retry", "engine.retry"]);
+    expect(result.map(item => item.data)).toEqual([{ attempt: 2, maxRetries: 5, backoffMs: 1000 }, { attempt: 1 }]);
+  });
+
   it("drops all conversation, reasoning, prompt, tool and unknown event kinds", () => {
     const types = [
       "user.message",
@@ -144,6 +217,92 @@ describe("compact unified session projection", () => {
     expect(result.truncated).toBe(true);
     expect(parse(result).map(item => item.data.version)).toEqual(events.slice(0, MAX_COMPACT_SESSION_EVENTS).map(item => item.data.version));
     expect(compactUnifiedSession(events)).toEqual(result);
+  });
+
+  it("prioritizes metadata, outcomes, guardrails/graders, retries, usage, then memory", () => {
+    const types = ["session.format", "workflow.info", "execution.result", "grader.result", "engine.retry", "usage.report", "memory.push"];
+    expect(types.map(type => sessionEventPriority({ type, data: {} }))).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(leastEssentialSessionEventIndex(types.map(type => ({ type, data: {} })))).toBe(6);
+  });
+
+  it.each([
+    ["grader.result", { passed: false }],
+    ["grader.result", { run: { errors: 1 } }],
+    ["guardrail.admission", { status: "denied" }],
+    ["guardrail.daily_aic", { exceeded: true }],
+    ["guardrail.daily_aic", { status: "structural_error" }],
+    ["guardrail.daily_aic", { status: "transient_error" }],
+    ["memory.push", { jobResult: "failure" }],
+    ["harness.attempt", { exitCode: 1 }],
+    ["workflow.job_result", { result: "timed_out" }],
+  ])("promotes failure evidence for %s", (type, data) => {
+    expect(sessionEventPriority({ type, data })).toBe(2);
+  });
+
+  it.each(["structural_error", "transient_error"])("retains a late daily-AIC %s ahead of successful guardrails and graders", status => {
+    const successes = Array.from({ length: MAX_COMPACT_SESSION_EVENTS }, (_, index) =>
+      index % 2 === 0 ? { type: "guardrail.daily_aic", data: { status: "under_budget", exceeded: false } } : { type: "grader.result", data: { id: String(index), passed: true } }
+    );
+    const failure = { type: "guardrail.daily_aic", data: { status, exceeded: false } };
+    const result = compactUnifiedSession([...successes, failure]);
+    expect(parse(result)).toEqual([...successes.slice(0, -1), failure]);
+    expect(result.includedEvents).toBe(MAX_COMPACT_SESSION_EVENTS);
+    expect(result.omittedEvents).toBe(1);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("evicts early low-priority records for late outcomes without reordering or mutating input", () => {
+    const events = [
+      { type: "session.format", data: { version: 1 } },
+      ...Array.from({ length: 200 }, (_, stepIndex) => ({ type: "usage.report", data: { stepIndex, aic: 1 } })),
+      { type: "execution.result", data: { outcome: "failure", exitCode: 1 } },
+      { type: "grader.result", data: { id: "quality", passed: false } },
+    ];
+    const original = structuredClone(events);
+    const result = compactUnifiedSession(events);
+    const retained = parse(result);
+    expect(result.includedEvents).toBe(128);
+    expect(result.omittedEvents).toBe(events.length - 128);
+    expect(result.truncated).toBe(true);
+    expect(retained[0].type).toBe("session.format");
+    expect(retained.at(-2)).toEqual(events.at(-2));
+    expect(retained.at(-1)).toEqual(events.at(-1));
+    expect(retained.filter(item => item.type === "usage.report").map(item => item.data.stepIndex)).toEqual(Array.from({ length: 125 }, (_, i) => i));
+    expect(events).toEqual(original);
+    expect(compactUnifiedSession(events)).toEqual(result);
+  });
+
+  it("reclaims byte budget from several low-priority records for later essential evidence", () => {
+    const usage = { type: "usage.report", data: { model: "x".repeat(256), provider: "x".repeat(256) } };
+    const events = [
+      ...Array.from({ length: 100 }, () => usage),
+      { type: "workflow.info", data: { engineId: "x".repeat(256), agentVersion: "x".repeat(256), cliVersion: "x".repeat(256) } },
+      { type: "session.result", data: { status: "failure", usage: { inputTokens: 10 } } },
+    ];
+    const result = compactUnifiedSession(events);
+    expect(Buffer.byteLength(result.session)).toBeLessThanOrEqual(MAX_COMPACT_SESSION_BYTES);
+    expect(parse(result).slice(-2)).toEqual(events.slice(-2));
+    expect(result.truncated).toBe(true);
+  });
+
+  it("preserves lower-priority evidence when a candidate cannot fit beside earlier equal-priority records", () => {
+    const usage = { type: "usage.report", data: { model: "x".repeat(256), provider: "x".repeat(256) } };
+    const memory = { type: "memory.push", data: { memoryId: "abc" } };
+    const candidate = { type: "usage.report", data: { ...usage.data, purpose: "xxx" } };
+    expect([usage, memory, candidate].map(item => Buffer.byteLength(JSON.stringify(item) + "\n"))).toEqual([570, 49, 586]);
+    const events = [...Array(28).fill(usage), memory];
+    const original = structuredClone(events);
+    const baseline = compactUnifiedSession(events);
+    expect(baseline.includedEvents).toBe(29);
+    expect(baseline.truncated).toBe(false);
+    const result = compactUnifiedSession([...events, candidate]);
+    expect(result.session).toBe(baseline.session);
+    expect(parse(result)).toEqual(events);
+    expect(result.includedEvents).toBe(29);
+    expect(result.omittedEvents).toBe(1);
+    expect(result.truncated).toBe(true);
+    expect(events).toEqual(original);
+    expect(compactUnifiedSession([...events, candidate])).toEqual(result);
   });
 
   it.each(["🦊", '"', "\\", "\u0000"])("bounds UTF-8 JSONL bytes after serialization with %j", character => {
@@ -212,6 +371,16 @@ describe("bounded compact session file reader", () => {
     const result = readCompactUnifiedSession(file);
     expect(result.includedEvents).toBe(1);
     expect(result.oversizedLines).toBe(1);
+  });
+
+  it("continues scanning after compact output fills to retain late failures", () => {
+    const events = [...Array.from({ length: 300 }, (_, stepIndex) => ({ type: "usage.report", data: { stepIndex } })), { type: "execution.result", data: { exitCode: 1, outcome: "failure" } }];
+    fs.writeFileSync(file, events.map(JSON.stringify).join("\n") + "\n");
+    const result = readCompactUnifiedSession(file);
+    expect(parse(result).at(-1)).toEqual(events.at(-1));
+    expect(result.includedEvents).toBe(128);
+    expect(result.omittedEvents).toBe(173);
+    expect(result.truncated).toBe(true);
   });
 
   it("bounds source scanning even for a huge file and marks incomplete coverage", () => {

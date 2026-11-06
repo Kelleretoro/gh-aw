@@ -321,20 +321,19 @@ func TestComputePermissionsForSafeOutputs(t *testing.T) {
 			},
 		},
 		{
-			name: "push-to-pull-request-branch default fallback - requires pull-requests write and administration read",
+			name: "push-to-pull-request-branch default fallback - requires pull-requests write",
 			safeOutputs: &SafeOutputsConfig{
 				PushToPullRequestBranch: &PushToPullRequestBranchConfig{
 					BaseSafeOutputConfig: BaseSafeOutputConfig{},
 				},
 			},
 			expected: map[PermissionScope]PermissionLevel{
-				PermissionContents:       PermissionWrite,
-				PermissionPullRequests:   PermissionWrite,
-				PermissionAdministration: PermissionRead,
+				PermissionContents:     PermissionWrite,
+				PermissionPullRequests: PermissionWrite,
 			},
 		},
 		{
-			name: "push-to-pull-request-branch with fallback-as-pull-request false - requires pull-requests read and administration read",
+			name: "push-to-pull-request-branch with fallback-as-pull-request false - requires pull-requests read",
 			safeOutputs: &SafeOutputsConfig{
 				PushToPullRequestBranch: &PushToPullRequestBranchConfig{
 					BaseSafeOutputConfig:  BaseSafeOutputConfig{},
@@ -342,9 +341,8 @@ func TestComputePermissionsForSafeOutputs(t *testing.T) {
 				},
 			},
 			expected: map[PermissionScope]PermissionLevel{
-				PermissionContents:       PermissionWrite,
-				PermissionPullRequests:   PermissionRead,
-				PermissionAdministration: PermissionRead,
+				PermissionContents:     PermissionWrite,
+				PermissionPullRequests: PermissionRead,
 			},
 		},
 		{
@@ -361,7 +359,7 @@ func TestComputePermissionsForSafeOutputs(t *testing.T) {
 			},
 		},
 		{
-			name: "push-to-pull-request-branch with check-branch-protection explicit true - includes administration read",
+			name: "push-to-pull-request-branch with check-branch-protection explicit true - no administration permission",
 			safeOutputs: &SafeOutputsConfig{
 				PushToPullRequestBranch: &PushToPullRequestBranchConfig{
 					BaseSafeOutputConfig:  BaseSafeOutputConfig{},
@@ -369,9 +367,8 @@ func TestComputePermissionsForSafeOutputs(t *testing.T) {
 				},
 			},
 			expected: map[PermissionScope]PermissionLevel{
-				PermissionContents:       PermissionWrite,
-				PermissionPullRequests:   PermissionWrite,
-				PermissionAdministration: PermissionRead,
+				PermissionContents:     PermissionWrite,
+				PermissionPullRequests: PermissionWrite,
 			},
 		},
 		{
@@ -562,7 +559,7 @@ func TestComputePermissionsForSafeOutputs(t *testing.T) {
 			},
 		},
 		{
-			name: "merge-pull-request requires contents write and pull-requests write",
+			name: "merge-pull-request without configured checks requires checks read for branch policy",
 			safeOutputs: &SafeOutputsConfig{
 				MergePullRequest: &MergePullRequestConfig{
 					BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")},
@@ -571,6 +568,7 @@ func TestComputePermissionsForSafeOutputs(t *testing.T) {
 			expected: map[PermissionScope]PermissionLevel{
 				PermissionContents:     PermissionWrite,
 				PermissionPullRequests: PermissionWrite,
+				PermissionChecks:       PermissionRead,
 			},
 		},
 		{
@@ -620,6 +618,53 @@ func TestComputePermissionsForSafeOutputs(t *testing.T) {
 	}
 }
 
+func TestCompileMergePullRequestCheckPermissions(t *testing.T) {
+	for _, app := range []string{"", "global", "per-handler"} {
+		for _, checks := range []string{"", "    required-checks: [ci/test]\n"} {
+			policy := "branch-only"
+			if checks != "" {
+				policy = "configured-checks"
+			}
+			t.Run(app+"/"+policy, func(t *testing.T) {
+				appConfig := "github-app:\n      app-id: ${{ vars.APP_ID }}\n      private-key: ${{ secrets.APP_PRIVATE_KEY }}\n"
+				globalApp, handlerApp := "", ""
+				switch app {
+				case "global":
+					globalApp = "  " + strings.ReplaceAll(appConfig, "\n      ", "\n    ")
+				case "per-handler":
+					handlerApp = "    " + appConfig
+				}
+				content := "---\non: issues\nengine: copilot\nsafe-outputs:\n" +
+					globalApp + "  merge-pull-request:\n    max: 1\n" + checks + handlerApp + "---\n\nTest workflow.\n"
+				testFile := filepath.Join(t.TempDir(), "merge-permissions.md")
+				require.NoError(t, os.WriteFile(testFile, []byte(content), 0600))
+				compiler := NewCompiler(WithVersion("1.0.0"))
+				data, err := compiler.ParseWorkflowFile(testFile)
+				require.NoError(t, err)
+				compiled, _, _, err := compiler.generateYAML(data, testFile)
+				require.NoError(t, err)
+				job := extractJobSection(compiled, "safe_outputs")
+				assert.Contains(t, job, "checks: read")
+				assert.NotContains(t, job, "checks: write")
+				if app != "" {
+					stepID := "safe-outputs-app-token"
+					if app == "per-handler" {
+						stepID = "merge-pull-request-app-token"
+					}
+					step := compiledStepBlockForTest(job, stepID)
+					require.NotEmpty(t, step)
+					assert.Contains(t, step, "permission-checks: read")
+					assert.NotContains(t, step, "permission-checks: write")
+				}
+				if app == "per-handler" {
+					appPermissions := computePermissionsForSafeOutputs(data.SafeOutputs, true)
+					assert.NotContains(t, appPermissions.permissions, PermissionChecks)
+				}
+			})
+		}
+	}
+}
+
 func TestComputePermissionsForSafeOutputsExcludesPerHandlerAppsFromGlobalAppToken(t *testing.T) {
 	safeOutputs := &SafeOutputsConfig{
 		AddComments: &AddCommentsConfig{
@@ -640,6 +685,27 @@ func TestComputePermissionsForSafeOutputsExcludesPerHandlerAppsFromGlobalAppToke
 	require.NotNil(t, perms)
 	assert.Equal(t, PermissionWrite, perms.permissions[PermissionActions])
 	assert.Equal(t, PermissionRead, perms.permissions[PermissionIssues])
+}
+
+func TestComputePermissionsForSafeOutputsExcludesHandlerTokensFromGlobalAppToken(t *testing.T) {
+	safeOutputs := &SafeOutputsConfig{
+		GitHubApp: &GitHubAppConfig{AppID: "global-app", PrivateKey: "global-key"},
+		DispatchWorkflow: &DispatchWorkflowConfig{
+			Workflows: []string{"downstream.yml"},
+			BaseSafeOutputConfig: BaseSafeOutputConfig{
+				Max:         strPtr("1"),
+				GitHubToken: "${{ secrets.GITHUB_TOKEN }}",
+			},
+		},
+	}
+
+	appPermissions := computePermissionsForSafeOutputs(safeOutputs, true)
+	require.NotNil(t, appPermissions)
+	assert.NotContains(t, appPermissions.permissions, PermissionActions)
+
+	jobPermissions := computePermissionsForSafeOutputs(safeOutputs, false)
+	require.NotNil(t, jobPermissions)
+	assert.Equal(t, PermissionWrite, jobPermissions.permissions[PermissionActions])
 }
 
 func TestComputePermissionsForSafeOutputsDispatchRepositoryAppSplit(t *testing.T) {
@@ -664,6 +730,59 @@ func TestComputePermissionsForSafeOutputsDispatchRepositoryAppSplit(t *testing.T
 	perms := computePermissionsForSafeOutputs(safeOutputs, true)
 	require.NotNil(t, perms)
 	assert.Equal(t, PermissionWrite, perms.permissions[PermissionContents])
+}
+
+func TestComputePermissionsForSafeOutputsDispatchRepositoryGitHubTokenSplit(t *testing.T) {
+	safeOutputs := &SafeOutputsConfig{
+		DispatchRepository: &DispatchRepositoryConfig{
+			Tools: map[string]*DispatchRepositoryToolConfig{
+				"with-token": {
+					Workflow:    "ci.yml",
+					EventType:   "ci_trigger",
+					Repository:  "github/gh-aw",
+					GitHubToken: "${{ secrets.DISPATCH_PAT }}",
+				},
+			},
+		},
+	}
+
+	// A per-tool github-token override means the handler authenticates with its own
+	// credential at runtime (dispatch_repository.cjs), so it must not also contribute
+	// contents: write to the global safe-outputs App mint.
+	appPermissions := computeDispatchRepositoryPermissions(safeOutputs, true)
+	assert.Nil(t, appPermissions)
+
+	jobPermissions := computeDispatchRepositoryPermissions(safeOutputs, false)
+	require.NotNil(t, jobPermissions)
+	assert.Equal(t, PermissionWrite, jobPermissions.permissions[PermissionContents])
+}
+
+func TestComputePermissionsForSafeOutputsDispatchRepositoryMixedGitHubTokenConfig(t *testing.T) {
+	safeOutputs := &SafeOutputsConfig{
+		DispatchRepository: &DispatchRepositoryConfig{
+			Tools: map[string]*DispatchRepositoryToolConfig{
+				"with-token": {
+					Workflow:    "ci.yml",
+					EventType:   "ci_trigger",
+					Repository:  "github/gh-aw",
+					GitHubToken: "${{ secrets.DISPATCH_PAT }}",
+				},
+				"without-token": {
+					Workflow:   "ci.yml",
+					EventType:  "ci_trigger",
+					Repository: "github/gh-aw",
+				},
+			},
+		},
+	}
+
+	appPermissions := computeDispatchRepositoryPermissions(safeOutputs, true)
+	require.NotNil(t, appPermissions)
+	assert.Equal(t, PermissionWrite, appPermissions.permissions[PermissionContents])
+
+	jobPermissions := computeDispatchRepositoryPermissions(safeOutputs, false)
+	require.NotNil(t, jobPermissions)
+	assert.Equal(t, PermissionWrite, jobPermissions.permissions[PermissionContents])
 }
 
 func TestComputePermissionsForSafeOutputsExcludesParsedPerHandlerApps(t *testing.T) {
@@ -1438,7 +1557,7 @@ func TestCompileStagedHandlerReadPermissions(t *testing.T) {
 						if app == "per-handler" {
 							stepID = handler.key + "-app-token"
 						}
-						step := compiledStepBlockForTest(compiled, stepID)
+						step := compiledStepBlockForTest(job, stepID)
 						require.NotEmpty(t, step)
 						for _, scope := range handler.scopes {
 							assert.Contains(t, step, "permission-"+string(scope)+": read")

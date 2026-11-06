@@ -1,5 +1,7 @@
 package constants
 
+import "strings"
+
 // JobName represents a GitHub Actions job identifier.
 // This semantic type distinguishes job names from arbitrary strings,
 // preventing mixing of job identifiers with other string types.
@@ -82,6 +84,31 @@ const UpdateDriveMemoryJobName JobName = "update_drive_memory"
 // AgentFailureStepName is the generated conclusion step that reports agent failures.
 const AgentFailureStepName = "Handle agent failure"
 
+// ThreatDetectionExecutionStepName is the external threat-detect engine step in the detection job.
+const ThreatDetectionExecutionStepName = "Execute threat detection with AWF"
+
+// EngineExecutionStepNamePrefix starts the name of every engine execution step that
+// the compiler emits in the evals and detection jobs. The jobs API does not expose
+// step ids, so gh aw audit identifies those steps by this prefix; the compiler
+// enforces it through EngineExecutionStepName.
+const EngineExecutionStepNamePrefix = "Execute "
+
+// IsEngineExecutionStepName reports whether name follows the evals and detection
+// engine execution step naming contract.
+func IsEngineExecutionStepName(name string) bool {
+	rest, found := strings.CutPrefix(name, EngineExecutionStepNamePrefix)
+	return found && strings.TrimSpace(rest) != ""
+}
+
+// EngineExecutionStepName returns name unchanged when it follows the engine execution
+// step naming contract, and otherwise prefixes it with EngineExecutionStepNamePrefix.
+func EngineExecutionStepName(name string) string {
+	if IsEngineExecutionStepName(name) {
+		return name
+	}
+	return EngineExecutionStepNamePrefix + name
+}
+
 // DeferredPromptStepName identifies the generated agent step resolving deferred prompt bindings.
 const DeferredPromptStepName = "Resolve deferred prompt expressions"
 
@@ -111,6 +138,17 @@ var KnownBuiltInJobNames = map[string]struct{}{
 	string(UnlockJobName):              {},
 }
 
+// MaintenanceJobDependencies contains generated maintenance jobs and their
+// prerequisite jobs. Maintenance jobs are not built-in customization targets.
+var MaintenanceJobDependencies = map[string]JobName{
+	string(PushRepoMemoryJobName):       AgentJobName,
+	string(UpdateCacheMemoryJobName):    AgentJobName,
+	string(UpdateDriveMemoryJobName):    AgentJobName,
+	string(PushLedgerChangesJobName):    AgentJobName,
+	string(PushEvalsStateJobName):       AgentJobName,
+	string(PushExperimentsStateJobName): ActivationJobName,
+}
+
 // IsCompilerOwnedJobName includes generated maintenance jobs, which are not
 // built-in customization targets. Source-backed checks must distinguish authored
 // jobs from these generated jobs rather than exempting maintenance names alone.
@@ -118,12 +156,8 @@ func IsCompilerOwnedJobName(name string) bool {
 	if _, builtin := KnownBuiltInJobNames[name]; builtin {
 		return true
 	}
-	switch JobName(name) {
-	case PushExperimentsStateJobName, PushEvalsStateJobName, PushRepoMemoryJobName,
-		PushLedgerChangesJobName, UpdateCacheMemoryJobName, UpdateDriveMemoryJobName:
-		return true
-	}
-	return false
+	_, maintenance := MaintenanceJobDependencies[name]
+	return maintenance
 }
 
 // Artifact name constants
@@ -152,6 +186,10 @@ const GradersArtifactName ArtifactName = "graders"
 
 // EvalsResultFilename is the filename of the evaluation results JSONL file.
 const EvalsResultFilename Filename = "evals.jsonl"
+
+// EvalsStatusFilename is the filename of the run-level BinEval marker written instead of
+// evals.jsonl when the evals judge did not start, failed, or produced no assistant response.
+const EvalsStatusFilename Filename = "evals_status.json"
 
 // EvalsBranchPrefix is the branch prefix used for durable eval result storage.
 const EvalsBranchPrefix = "evals"

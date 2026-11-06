@@ -41,6 +41,7 @@ The engine, inference provider, and enabled tools determine where repository con
 | Per-command bash allowlist | Yes | Yes | No | Yes | Yes | No |
 | Native MCP | Yes | Yes | Yes | Yes | Yes | Production-conformance gated |
 | Agent Plugins (`plugins`) | Yes | Yes | Yes | No | No | No |
+| Artifact-backed `engine.durable` | Session (CLI/SDK) | Session | Session | Session | Native durable tasks | Session |
 
 Codex can disable shell execution but cannot enforce a command allowlist. Agy rejects unsupported tool restrictions rather than ignoring them. See individual references for provider-specific web access, bare-mode behavior, and dynamic workflows.
 
@@ -63,13 +64,58 @@ engine:
 | `id` | Built-in ID, or the ID of an [imported definition](/gh-aw/reference/third-party-agent/). |
 | `model` | Exact model ID, alias, or provider-prefixed selection; may also be top-level `model`. |
 | `version` | Override the compiler-pinned CLI version. |
+| `cooldown` | Minimum release age in nonnegative integer days; defaults to `3`. Explicit `0` is rejected in strict mode. |
 | `env` | Runtime environment values; [scope and precedence](/gh-aw/reference/environment-variables/) still apply. |
 | `args` | Ordered arguments passed to the native CLI before its prompt argument. |
 | `command` | Replacement executable; skips the engine installer, not AWF installation. |
 | `api-target` | Endpoint hostname, where supported; see below. |
 | `harness` | Replacement wrapper or retry settings for Copilot, Claude, and Codex. |
+| `durable` | Artifact-backed session continuation with optional `retention-days` (1–90, default `7`). |
 
 Engine-specific options such as `agent`, `copilot-sdk`, `driver`, `dynamic-workflows`, `permission-mode`, `config`, and `extensions` are documented in each engine reference. Agy rejects most overrides.
+
+### Durable runs
+
+> [!WARNING]
+> Durable mode is experimental for all engines, including Pi. Enabling
+> `engine.durable` emits a compile-time warning. Configuration and behavior may
+> change without deprecation.
+
+All built-in engines support artifact-backed continuation:
+
+```aw
+engine:
+  id: copilot
+  durable:
+    retention-days: 7
+```
+
+The compiler restores an explicit parent from `aw_context`, or the last successful run of the same workflow on the same branch. Reruns prefer a checkpoint from an earlier attempt of the same run. Retention remains subject to repository and organization policy. No memory tool is required, and durable mode does not dispatch another run automatically.
+
+| Engine | Persisted state | Continuation |
+| --- | --- | --- |
+| Copilot CLI and SDK | Native session-state files and exact session ID | CLI `--session-id`; SDK `resumeSession` |
+| Claude | Project transcripts, task state, and exact session ID | CLI `--resume <id>` |
+| Codex | Native and archived rollout sessions and exact thread ID | CLI `exec resume <id>` |
+| Gemini | Native temporary session storage and project registry | Prompt points to restored session files |
+| Agy | Native conversation databases | Prompt points to restored session files |
+| Pi | Official Pi Durable task journal and checkpoint | Native task continuation; see [Pi durable runs](/gh-aw/reference/engines/pi/#durable-runs) |
+
+Copilot, Claude, and Codex resume the exact recorded native session with the current workflow prompt and freshly configured credentials, models, and tool policy. Gemini and Agy receive restoration metadata without a forced CLI continuation argument. Continuation guidance limits use to metadata unless historical facts are independently verified against trusted sources for the current task. It does not direct the agent to ingest restored text as prompts or instructions.
+
+Enabling `engine.durable` opts into reusing potentially attacker-influenced history across runs. Guidance to treat restored files as untrusted factual data is advisory, not deterministic instruction/data isolation; native session resume also reintroduces prior history. Durable continuation does not eliminate cross-run prompt injection.
+
+The first run starts normally when no prior run or implicit checkpoint exists. No continuation notice or resume argument is added without history. Missing explicit-parent artifacts, corrupt restored sessions, and API authorization failures remain errors rather than silently starting unrelated conversations.
+
+This restores session files, not workspace edits, credentials, or exactly-once tool execution. Pi additionally preserves pending tasks using its native durable library. Existing unified session capture and trace propagation remain enabled; restored Copilot events are excluded from current-run capture and model verification.
+
+Threat detection uses a separate fresh session and does not inherit the primary agent's durable state.
+
+Built-in session-based durable mode rejects replacement commands, drivers, and harnesses because their session files may differ. Ordinary CLI arguments remain supported, but native session selectors and flags that disable persistence cannot override compiler-managed continuation. Copilot cannot override `COPILOT_HOME` because durable mode collects its standard native session directory. Pi has [additional restrictions](/gh-aw/reference/engines/pi/#durable-runs). [Imported engines](/gh-aw/reference/third-party-agent/#durable-execution) must declare their own durable files and execution behavior; unsupported definitions still fail compilation.
+
+Checkpoint artifacts are published after secret redaction and integrity validation. Cancellation or hard runner loss can prevent publication; only the last published checkpoint can be restored.
+
+Artifacts contain restorable session content, not just integrity metadata, and may expose sensitive history to anyone with artifact access. Secret scanning and redaction are heuristic: they do not guarantee removal of PII, unknown token formats, or secrets in unsupported encodings. Enable durable mode only when the workflow's session content is suitable for the repository's artifact access and retention policies.
 
 ### Pinning a Specific Engine Version
 
@@ -84,6 +130,26 @@ engine:
 <span id="parameterized-versions"></span>
 
 Versions can use GitHub Actions expressions; the runtime passes them through environment variables rather than shell interpolation. Copilot expression values must resolve to trusted cached releases or built-in manifest pins. Other Copilot releases require a literal version and [checksum pin](/gh-aw/reference/engines/copilot/#copilot-release-checksum-pins). Agy accepts only its verified releases.
+
+### Engine release-age cooldown
+
+Compiler-managed engine installs require releases to be at least **3 days** old by default. Configure a different age with `engine.cooldown`:
+
+```aw
+engine:
+  id: copilot
+  cooldown: 7
+```
+
+The value must be a nonnegative integer number of days, not a boolean, string, duration, or expression. `cooldown: 0` disables the age check only when `strict: false`; strict mode rejects explicit zero. Omitting the field retains the default, including string-form and inline engine configurations.
+
+Claude, Codex, Pi, Gemini, and behavior-defined npm installs pass this age to npm through `NPM_CONFIG_MIN_RELEASE_AGE`, including compiler-managed microVM staging. Copilot's native installer checks GitHub release publication metadata before activating a cached CLI or downloading an archive, including musl guest binaries. Missing or invalid metadata fails the installation. The cooldown also applies to pinned versions and runtime version expressions; it does not replace checksum verification or version pins.
+
+npm enforces the cooldown through its built-in `min-release-age` setting at installation time; no custom version-check script is generated. Node.js runtime overrides must provide npm **11.10.0 or later** to support this setting. Older npm versions may ignore it.
+
+The policy covers compiler-managed npm and Copilot release installs, not arbitrary shell installers, custom `engine.command` executables, pre-agent steps, extensions, or other externally managed installation methods. Runtime dependency cooldowns remain separately configured by `runtimes.<id>.cooldown` (a boolean).
+
+Engine definitions that set `behaviors.installation.cooldown` use deprecated metadata that is ignored. Set `engine.cooldown` in the workflow instead. A value of `0` disables the policy only outside strict mode; strict mode rejects zero.
 
 ### Engine Environment Variables
 
@@ -156,6 +222,9 @@ The watchdog arms after a terminal safe output, not diagnostic reports such as `
 Threat detection defaults to zero retries; configure its engine explicitly to change that. Model fallback below retries individual inference requests, not whole agent attempts.
 
 ### Model aliases
+
+> [!NOTE]
+> The Copilot model catalog offered to a workflow can differ by organization and lag the models available to that organization's Copilot seats. Availability depends on the agentic-workflows integration, not just organization policy; a model listed by this repository's daily inventory is not necessarily offered to another workflow. An exact Copilot ID missing from a complete live catalog means that model is **not offered to this workflow**. Prefer aliases such as `opus` and `sonnet` over exact Copilot IDs so resolution selects an available model. Run `gh aw audit <run-url> --models` for a detailed report of that run's model information, including its catalog, discovery status, supported endpoints, and recorded routing and usage. Missing or incomplete discovery does not confirm model absence.
 
 Copilot, Claude, Codex, Pi, and Agy resolve aliases against the configured provider's live AWF `/reflect` catalog before execution:
 
@@ -255,4 +324,5 @@ See [Custom AI engines](/gh-aw/reference/third-party-agent/#shared-imported-engi
 
 ### Unsupported engine samples
 
-See [third-party samples](/gh-aw/reference/third-party-agent/#unsupported-engine-samples).
+See [third-party samples](/gh-aw/reference/third-party-agent/#unsupported-engine-samples),
+including the experimental Atomic declarative engine.

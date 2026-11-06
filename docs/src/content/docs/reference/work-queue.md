@@ -317,6 +317,32 @@ Artifact JSON is metadata-only, unlike live replay JSON. Scheduler predictions u
 
 Idle refresh is every 10 seconds; search and action review pause it. Failed reads retain the prior view with an explicit stale/error status. Uncertain publications retain their request ID for `explain --request-id`.
 
+## OpenTelemetry queue health
+
+Runtime queue operations emit `work_queue.read.run`, `work_queue.publish.run`, `work_queue.dispatch.run`, `work_queue.reconcile_dispatch.run`, `work_queue.reconcile.run`, and `work_queue.compact.run` spans. They reuse the workflow's trace and job parent, [OTLP configuration](/gh-aw/reference/open-telemetry/), exporter fan-out, and sanitized `otel.jsonl` mirror. No additional queue setting is required. Without valid workflow trace context, queue instrumentation is disabled.
+
+Attributes use the `gh-aw.work_queue.` prefix. `queue.id` is a stable SHA-256 digest of the lowercased target repository coordinates and queue branch, allowing correlation across workflow runs without exporting queue identifiers or task content. Nested ledger reads and publications contribute to one outer operation span rather than separate export requests.
+
+| Attribute suffix | Meaning |
+| --- | --- |
+| `operation`, `request.kind`, `reason`, `outcome` | Operation, last checked request kind, bounded scheduling decision, and lifecycle outcome when applicable |
+| `snapshot.present`, `observed_at_unix_ms`, `initialized` | Whether verified state was observed, its observation time, and whether Policy is installed |
+| `work.total`, `work.available`, `work.claimed`, `work.completed`, `work.cancelled`, `work.expired` | Queue-wide Work counts; expired unclaimed Work is included in cancelled, not available |
+| `work.retry_delayed`, `work.oldest_available_age_ms` | Available Work in backoff and age of the oldest available Work, including dependency- or capacity-blocked Work |
+| `delivery.pending`, `delivery.failed` | Work delivery barriers plus independent `keep_open` Claim barriers; completion alone is not delivery |
+| `claims.open`, `reservations.active`, `reservations.unbound`, `reservations.uncertain`, `reservations.unresolved` | Logical ownership and unreleased native capacity; cancellation or expiration does not imply reservation release |
+| `capacity.logical_limit`, `capacity.native_limit` | Sums of installed pool limits |
+| `capacity.logical_saturated_pools`, `capacity.native_saturated_pools` | Number of pools at or above their respective limits |
+| `admission_paused`, `grants_paused` | Committed operator controls |
+| `publication.attempts`, `publication.conflict`, `publication.ambiguous`, `publication.commits`, `publication.recovered` | Attempts, CAS conflicts, ambiguous writes, acknowledged new commits, and stable-request recoveries during the operation |
+| `committed.<kind>` | Counts of newly acknowledged Work, Claim, Completion, cancellation, Dispatch, Release, Result, and DeliveryFailure operations; recovered requests do not count as new commits |
+| `reconciliation.checked`, `reconciliation.unresolved` | Reservations checked by a reconciliation batch and those returning unresolved launch or binding-conflict outcomes |
+| `error.type` | Allowlisted error category, never raw provider messages or request bodies |
+
+These are **span attributes**, not continuously sampled OTEL metrics. For a dashboard, group by `queue.id` and select the snapshot with the latest `observed_at_unix_ms`; never sum snapshots across spans or workflow runs. Missing snapshots mean unknown state, not an empty queue. A failed operation may retain the last verified snapshot from before the failure. No operations means no new observations, so alert on stale observations separately.
+
+Monitor growing backlog age, failed delivery barriers, unresolved reservations, saturated pools, and repeated publication conflicts. Span status is ERROR for thrown failures and returned rejected/unresolved/conflicting launches, including unresolved reconciliation batches. An ordinary no-grant decision is not an error. Observability failures do not change publication, Claim accounting, or launch fencing. Queue-specific telemetry excludes Work payloads, result bodies, Work/Claim/dispatch/request IDs, fairness keys, and raw errors; the existing workflow resource attributes still identify the workflow run.
+
 ## Runtime debug logging
 
 | Setting | Scope |
@@ -329,6 +355,10 @@ Idle refresh is every 10 seconds; search and action review pause it. Failed read
 
 Events go to stderr with elapsed timing and sanitized counts, flags, statuses, and error categories, not payloads, identities, or credentials. Blocked controls and exhausted delivery verification also emit always-visible diagnostics.
 
+Git ledger reads reuse one bounded local object stream instead of starting Git for every historical object. Issue projection shares the originating client's ledger and verified ancestry; repository access is still refreshed before cached history is reused. Cold reads still validate every checkpoint boundary.
+
+Native launch diagnostics preserve fixed identity failure codes such as `run_correlation_mismatch`, `run_ref_mismatch`, and `run_principal_mismatch` without printing the run metadata. A correlation mismatch can reflect a pending run title; other identity failures remain non-retryable. Neither permits a second dispatch POST or release of an uncertain reservation.
+
 Routing diagnostics distinguish installed Policy gaps from compiler approval failures:
 
 | Code | Meaning and recovery |
@@ -339,9 +369,13 @@ Routing diagnostics distinguish installed Policy gaps from compiler approval fai
 
 HTTP failure diagnostics include validated quota counters, `rate_limit_reset_unix` (Unix seconds), `retry_after_seconds`, fixed rate-limit/SSO flags, and the GitHub request ID when available. Explicit rate-limit evidence distinguishes throttled HTTP 403 responses from otherwise ambiguous access denials; quota headroom alone does not prove permission denial. Raw provider messages, arbitrary headers, and authorization URLs are never printed.
 
-`queue_control_github_transport_failed` with `transport_response_missing=true` identifies a client-side synthetic status 500 without an HTTP response, not a confirmed GitHub server error. Worker provisioning retries failed metadata GETs at most three times with one-second delays and a fresh 15-second fetch deadline per attempt. Permission denials, rate limits, and invalid worker contents still fail closed; writes and worker launches are not retried by this read recovery. An exhausted read does not authorize releasing reservations or replaying effects.
+`queue_control_github_transport_failed` with `transport_response_missing=true` identifies a client-side synthetic status 500 without an HTTP response, not a confirmed GitHub server error. Worker provisioning and native repository/run metadata GETs use a fresh 15-second fetch deadline per attempt, including response-body reads. Standalone metadata recovery makes at most three attempts with one-second delays; native polling callers retain their own retry budget without nested retries. Permission denials, rate limits, and invalid worker contents or run identities still fail closed; writes and worker launches are not retried by this read recovery. An exhausted read does not authorize releasing reservations or replaying effects.
 
-The new fetch deadlines cover worker provisioning metadata reads only. Native run metadata reads retain their existing retry behavior but still use legacy timeout options and lack these abort-signal deadlines.
+`delivery.effect.uncovered` means a recorded effect lacks independent coverage, even if its handler succeeded. For signed pull requests, verification checks the exact head branch and confirms that the REST ref mutation's recorded commit is the verified head or its ancestor. Missing ref selectors, unrelated commits, moved heads, and unavailable readback remain unverified. An older delivery failure is not repaired by upgrading the verifier; inspect the original Claim and its immutable receipts before considering recovery, without replaying successful writes.
+
+`attempts_exhausted` is a terminal Work cancellation, not a delivery-verification failure. Inspect its individual Claim cancellation reasons: repeated `worker_cancelled` outcomes can reflect intentional clean-scan decisions, while `definitive_nonlaunch`, `native_run_terminal`, or `worker_termination` require their own native-run evidence. A write-capable worker that needs no resource output must cancel rather than complete with `noop`; cancellation still consumes an attempt. Do not increase retry limits, resubmit terminal Work, or reinterpret cancellation as a verified Result merely to clear the backlog.
+
+Observer smoke failures are not necessarily queue failures. A sandbox host-preflight or engine-driver failure can prevent any queue tool from running. Diagnose that first boundary separately; do not disable isolation, manufacture a smoke success, or change queue policy to compensate. Dispatch and worker smoke checks additionally require a verified launch and Result, respectively, not just staged intents.
 
 Projection coordination failures emit `projection.locks.acquire.failed` and counts of requested versus acknowledged locks. `projection.locks.retained` indicates unacknowledged native writes whose locks remain held. These diagnostics do not authorize retries, worker reruns, receipt recreation, or lock deletion.
 

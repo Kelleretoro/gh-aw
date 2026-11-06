@@ -1,9 +1,9 @@
 ---
 title: Safe Output Outcome Evaluation Specification
-version: 1.0.0
+version: 1.0.3
 status: Working Draft
 date: 2026-05-15
-last_updated: 2026-10-19
+last_updated: 2026-11-05
 ---
 
 # Safe Output Outcome Evaluation Specification
@@ -104,6 +104,10 @@ Status meanings:
 - `partial`: the Go CLI implements only part of the specified evidence contract.
 - `not-started`: no dedicated evaluator exists yet; current behavior is generic/no-op only.
 
+### Entities and Structure
+
+Each numbered section evaluates one safe-output entity: the GitHub object or workflow-execution record named immediately below its heading. Its evaluator is the Go function registered for that output type in `pkg/cli/outcome_eval.go`; `evalGenericSticky` is the explicit generic fallback, and `noop`/`missing_tool` are skipped without evaluation. The section entries below identify the entity and evaluator, including unsupported evaluators whose current result is `unknown`.
+
 ### Current Default Acceptance Map
 
 This table summarizes the current runtime behavior in `pkg/cli/outcome_eval*.go`. It is intentionally about what the evaluator accepts today, not just the intended long-term spec semantics.
@@ -162,6 +166,8 @@ coverage qualifications. Per-item cost attribution remains separate work.
 
 ## 1. `create_pull_request`
 
+**Entity:** Pull request. **Evaluator:** `evalCreatePullRequest`.
+
 **Question:** Was the PR merged?
 
 **API:** `GET /repos/{owner}/{repo}/pulls/{number}`
@@ -192,6 +198,8 @@ coverage qualifications. Per-item cost attribution remains separate work.
 ---
 
 ## 2. `create_issue`
+
+**Entity:** Issue. **Evaluator:** `evalCreateIssue`.
 
 **Question:** Was the issue resolved or dismissed?
 
@@ -225,6 +233,8 @@ coverage qualifications. Per-item cost attribution remains separate work.
 
 ## 3. `add_comment`
 
+**Entity:** Issue comment. **Evaluator:** `evalAddComment`.
+
 **Question:** Did anyone respond or react?
 
 **API:** `GET /repos/{owner}/{repo}/issues/comments/{comment_id}`
@@ -253,6 +263,8 @@ coverage qualifications. Per-item cost attribution remains separate work.
 ---
 
 ## 4. `add_labels`
+
+**Entity:** Issue or pull-request label set and the recorded label delta. **Evaluator:** `evalAddLabels`.
 
 **Question:** Did the labels stick?
 
@@ -284,6 +296,8 @@ classification rule.
 
 ## 5. `add_reviewer`
 
+**Entity:** Reviewer request and attributable pull-request review. **Evaluator:** `evalAddReviewer`.
+
 **Question:** Did the reviewer actually review?
 
 **API:** `GET /repos/{owner}/{repo}/pulls/{number}/reviews`
@@ -307,6 +321,8 @@ classification rule.
 
 ## 6. `update_issue`
 
+**Entity:** Issue fields recorded in the before/after snapshots. **Evaluator:** `evalUpdateIssue`.
+
 **Question:** Did the edit stick?
 
 **API:** `GET /repos/{owner}/{repo}/issues/{number}`
@@ -326,6 +342,8 @@ classification rule.
 
 ## 7. `update_pull_request`
 
+**Entity:** Pull-request fields recorded in the before/after snapshots. **Evaluator:** `evalUpdatePullRequest`.
+
 **Question:** Did the edit stick?
 
 Same retained-update logic as `update_issue` but on a PR object, using persisted execution-time snapshots instead of `updated_at`.
@@ -337,6 +355,8 @@ Same retained-update logic as `update_issue` but on a PR object, using persisted
 ---
 
 ## 8. `close_issue`
+
+**Entity:** Issue closure state and visible close actor. **Evaluator:** `evalCloseSticky`.
 
 **Question:** Did it stay closed?
 
@@ -355,6 +375,8 @@ Same retained-update logic as `update_issue` but on a PR object, using persisted
 ---
 
 ## 9. `close_pull_request`
+
+**Entity:** Pull-request closure state and visible close actor. **Evaluator:** `evalCloseSticky`.
 
 **Question:** Did it stay closed?
 
@@ -375,6 +397,8 @@ Same retained-update logic as `update_issue` but on a PR object, using persisted
 
 ## 10. `close_discussion`
 
+**Entity:** GitHub Discussion closure state. **Evaluator:** `evalCloseDiscussion` (currently unsupported).
+
 **Proposed rule only:** current runtimes return `unknown`/`none`/`unsupported_evaluator`. The conditions below are not implemented acceptance rules.
 
 **Question:** Did it stay closed?
@@ -391,6 +415,8 @@ Same retained-update logic as `update_issue` but on a PR object, using persisted
 ---
 
 ## 11. `create_discussion`
+
+**Entity:** GitHub Discussion. **Evaluator:** `evalCreateDiscussion` (currently unsupported).
 
 **Proposed rule only:** current runtimes return `unknown` with no evidence.
 
@@ -416,6 +442,8 @@ Same retained-update logic as `update_issue` but on a PR object, using persisted
 
 ## 12. `update_discussion`
 
+**Entity:** GitHub Discussion fields recorded in the execution evidence. **Evaluator:** `evalUpdateDiscussion` (currently unsupported).
+
 **Question:** Did the edit stick?
 
 Same logic as `update_issue` but via GraphQL on the discussion body.
@@ -423,6 +451,8 @@ Same logic as `update_issue` but via GraphQL on the discussion body.
 ---
 
 ## 13. `create_pull_request_review_comment`
+
+**Entity:** Pull-request review comment. **Evaluator:** `evalReviewComment` (currently unsupported).
 
 **Proposed rule only:** current runtimes return `unknown` with no evidence.
 
@@ -442,6 +472,8 @@ Same logic as `update_issue` but via GraphQL on the discussion body.
 
 ## 14. `submit_pull_request_review`
 
+**Entity:** Submitted pull-request review and its recorded review ID. **Evaluator:** `evalSubmitPullRequestReview`.
+
 **Question:** Was the feedback addressed?
 
 **API:** `GET /repos/{owner}/{repo}/pulls/{number}/commits` (check for commits after review)
@@ -458,6 +490,8 @@ Same logic as `update_issue` but via GraphQL on the discussion body.
 ---
 
 ## 15. `reply_to_pull_request_review_comment`
+
+**Entity:** Reply target for a pull-request review comment. **Evaluator:** `evalGenericSticky` (generic fallback).
 
 **Proposed rule only:** current fallback verifies only target existence and returns weak `unknown`.
 
@@ -477,6 +511,8 @@ Same logic as `update_issue` but via GraphQL on the discussion body.
 
 ## 16. `resolve_pull_request_review_thread`
 
+**Entity:** Pull-request review thread. **Evaluator:** `evalResolveThread` (currently unsupported).
+
 **Proposed rule only:** current runtimes return `unknown` with no evidence.
 
 **Question:** Did it stay resolved?
@@ -493,6 +529,8 @@ Same logic as `update_issue` but via GraphQL on the discussion body.
 ---
 
 ## 17. `push_to_pull_request_branch`
+
+**Entity:** Recorded commits pushed to a pull-request branch. **Evaluator:** `evalPushToPRBranch`.
 
 **Question:** Was the code accepted?
 
@@ -511,6 +549,8 @@ Same logic as `update_issue` but via GraphQL on the discussion body.
 
 ## 18. `mark_pull_request_as_ready_for_review`
 
+**Entity:** Pull-request draft/review state and subsequent review activity. **Evaluator:** `evalMarkReady`.
+
 **Question:** Did someone review it?
 
 **API:** `GET /repos/{owner}/{repo}/pulls/{number}/reviews`
@@ -526,6 +566,8 @@ Same logic as `update_issue` but via GraphQL on the discussion body.
 ---
 
 ## 19. `assign_to_agent`
+
+**Entity:** Assigned issue and attributable agent-authored pull request. **Evaluator:** `evalAssignToAgent`.
 
 **Question:** Did the agent produce a result?
 
@@ -559,6 +601,8 @@ unattributable.
 
 ## 20. `dispatch_workflow`
 
+**Entity:** Dispatched workflow run. **Evaluator:** `evalDispatchWorkflow`.
+
 **Question:** Did the dispatched workflow succeed?
 
 **API:** `GET /repos/{owner}/{repo}/actions/runs/{recorded_run_id}`; no guessed workflow/time-window attribution
@@ -578,6 +622,8 @@ or decimal strings; malformed IDs MUST NOT be partially parsed.
 ---
 
 ## 21. `autofix_code_scanning_alert`
+
+**Entity:** Code-scanning alert. **Evaluator:** `evalGenericSticky` (generic fallback).
 
 **Proposed rule only:** current fallback returns weak `unknown`, not acceptance.
 
@@ -601,6 +647,8 @@ or decimal strings; malformed IDs MUST NOT be partially parsed.
 
 ## 22. `create_code_scanning_alert`
 
+**Entity:** Code-scanning alert. **Evaluator:** `evalGenericSticky` (generic fallback).
+
 **Proposed rule only:** current fallback returns weak `unknown`, not acceptance.
 
 **Question:** Was the alert triaged?
@@ -619,6 +667,8 @@ or decimal strings; malformed IDs MUST NOT be partially parsed.
 
 ## 23. `link_sub_issue`
 
+**Entity:** Parent/child issue relationship. **Evaluator:** `evalGenericSticky` (generic fallback).
+
 **Proposed rule only:** current fallback returns weak `unknown`, not acceptance.
 
 **Question:** Did the link stick?
@@ -635,6 +685,8 @@ or decimal strings; malformed IDs MUST NOT be partially parsed.
 ---
 
 ## 24. `hide_comment`
+
+**Entity:** Hidden issue or pull-request comment. **Evaluator:** `evalHideComment` (currently unsupported).
 
 **Proposed rule only:** current runtimes return `unknown` with no evidence.
 
@@ -653,6 +705,8 @@ or decimal strings; malformed IDs MUST NOT be partially parsed.
 
 ## 25. `assign_milestone`
 
+**Entity:** Issue milestone assignment and recorded milestone number. **Evaluator:** `evalAssignMilestone`.
+
 **Question:** Did the milestone stick?
 
 **API:** `GET /repos/{owner}/{repo}/issues/{number}`
@@ -667,6 +721,8 @@ or decimal strings; malformed IDs MUST NOT be partially parsed.
 ---
 
 ## 26. `update_project`
+
+**Entity:** Project item and recorded field update. **Evaluator:** `evalGenericSticky` (generic fallback).
 
 **Proposed rule only:** current fallback returns weak `unknown`, not acceptance.
 
@@ -685,6 +741,8 @@ or decimal strings; malformed IDs MUST NOT be partially parsed.
 
 ## 27. `update_release`
 
+**Entity:** Release and recorded release update. **Evaluator:** `evalGenericSticky` (generic fallback).
+
 **Proposed rule only:** current fallback returns weak `unknown`, not acceptance.
 
 **Question:** Did the edit stick?
@@ -702,13 +760,19 @@ or decimal strings; malformed IDs MUST NOT be partially parsed.
 
 ## 28. `noop`
 
+**Entity:** No GitHub object; no operation. **Evaluator:** skipped by `EvaluateOutcomes`.
+
 No outcome to evaluate. Skip.
 
 ## 29. `missing_tool`
 
+**Entity:** Missing safe-output tool request; no GitHub object. **Evaluator:** skipped by `EvaluateOutcomes`.
+
 No outcome to evaluate. Skip.
 
 ## 30. `replace_label`
+
+**Entity:** Issue or pull-request label set and the recorded replacement delta. **Evaluator:** `evalReplaceLabel`.
 
 **Question:** Did the label replacement stick? Specifically: is `label_to_add` present on the item and is `label_to_remove` absent?
 
@@ -750,6 +814,43 @@ API failures return `error`; execution-time handler retry policy in
 **References:** See [replace-label-spec.md](replace-label-spec.md) for the full definition of the `replace_label` safe-output type, including the message schema, processing model, and REST interface.
 
 ---
+
+## Safeguards
+
+This matrix covers failure and unverifiable states for every numbered safe-output section. Missing execution evidence or API data MUST NOT be converted into acceptance. Proposed evaluation rules in the operation sections remain inactive until an evaluator implements them.
+
+| Section | Safe output | Failure outcome | Unknown or unverifiable outcome |
+|---|---|---|---|
+| 1 | `create_pull_request` | Primary-object `404` is `rejected`/`deleted`; other primary API failures are `error`/`evaluation_error`. Supplementary effort-evidence failures do not downgrade an `accepted` merged-PR result; they only withhold zero-touch proof. | Missing PR reference is `unknown`/`missing_reference`. |
+| 2 | `create_issue` | Primary-object `404` is `rejected`/`deleted`; API failure or unavailable close actor is an evaluation error. | Missing reference is `unknown`; unavailable actor MUST NOT count as acceptance. |
+| 3 | `add_comment` | Primary-comment `404` is `rejected`/`deleted`; supplementary API failure is `error`. | Supplementary `404` MUST NOT imply deletion; missing comment reference is `unknown`. |
+| 4 | `add_labels` | API failure is `error`/`evaluation_error`. | Missing before-state or added-label delta is `unknown`; target existence alone is insufficient. |
+| 5 | `add_reviewer` | Review API failure is `error`. | Unverified team membership or missing request identity is `unknown`; absence of a review is pending or ignored, not accepted. |
+| 6 | `update_issue` | API failure is `error`; fields reverted or changed independently are `rejected`. | Missing before/after snapshots is `unknown`/`missing_execution_state`. |
+| 7 | `update_pull_request` | API failure is `error`; fields reverted or changed independently are `rejected`. | Missing before/after snapshots is `unknown`/`missing_execution_state`. |
+| 8 | `close_issue` | Issue/event API failure is `error`; reopening is `rejected`. | Missing close-actor evidence is an evaluation error and MUST NOT count as acceptance. |
+| 9 | `close_pull_request` | PR/event API failure is `error`; reopening or a later merge is `rejected`. | Missing close-actor evidence is an evaluation error and MUST NOT count as acceptance. |
+| 10 | `close_discussion` | A future GraphQL failure is `error`. | Current runtime is `unknown`/`unsupported_evaluator`. |
+| 11 | `create_discussion` | A future GraphQL failure is `error`. | Current runtime is `unknown`/`unsupported_evaluator`. |
+| 12 | `update_discussion` | A future GraphQL failure is `error`. | Missing GraphQL evaluator or snapshots is `unknown`; current runtime uses `unsupported_evaluator`. |
+| 13 | `create_pull_request_review_comment` | A future GraphQL failure is `error`. | Current runtime is `unknown`/`unsupported_evaluator`. |
+| 14 | `submit_pull_request_review` | Review API failure is `error`; dismissed recorded review is `rejected`. | Missing or unmatched recorded review ID is `unknown`; another review MUST NOT be borrowed. |
+| 15 | `reply_to_pull_request_review_comment` | Target lookup failure is `error`. | Current generic fallback is `unknown`/`target_exists_only`; missing target reference is `unknown`/`missing_reference`. |
+| 16 | `resolve_pull_request_review_thread` | A future GraphQL failure is `error`. | Current runtime is `unknown`/`unsupported_evaluator`. |
+| 17 | `push_to_pull_request_branch` | PR/ancestry API failure is `error`; closed unmerged PR is `rejected`. | Missing or unverified pushed-commit evidence is `unknown`; merge alone is insufficient. |
+| 18 | `mark_pull_request_as_ready_for_review` | Review/PR API failure is `error`. | Missing or invalid action timestamp MUST NOT count as acceptance; no qualifying review remains pending or ignored. |
+| 19 | `assign_to_agent` | Issue/timeline/API failure is `error`; attributable PR closed unmerged is `rejected`. | Missing repository evidence or no attributable post-action PR is `unknown`. |
+| 20 | `dispatch_workflow` | Run lookup failure is `error`; failed completed run is `rejected`. | Missing or malformed run ID is pending with `missing_run_id`; do not guess a run from time or workflow name. |
+| 21 | `autofix_code_scanning_alert` | Target lookup failure is `error`. | Current generic fallback is `unknown`/`target_exists_only`; existence MUST NOT imply a fix. |
+| 22 | `create_code_scanning_alert` | Target lookup failure is `error`. | Current generic fallback is `unknown`/`target_exists_only`; existence MUST NOT imply triage. |
+| 23 | `link_sub_issue` | Target lookup failure is `error`. | Current generic fallback is `unknown`/`target_exists_only`; existence MUST NOT imply a retained link. |
+| 24 | `hide_comment` | A future GraphQL failure is `error`. | Current runtime is `unknown`/`unsupported_evaluator`. |
+| 25 | `assign_milestone` | Issue API failure is `error`; mismatched or removed milestone is `rejected`. | Missing expected milestone identity is `unknown`/`missing_execution_state`. |
+| 26 | `update_project` | Target lookup failure is `error`. | Current generic fallback is `unknown`/`target_exists_only`; existence MUST NOT imply a retained field value. |
+| 27 | `update_release` | Target lookup failure is `error`. | Current generic fallback is `unknown`/`target_exists_only`; existence MUST NOT imply a retained edit. |
+| 28 | `noop` | Not applicable; no action is evaluated. | Explicitly skipped, not classified as unknown. |
+| 29 | `missing_tool` | Not applicable; no action is evaluated. | Explicitly skipped, not classified as unknown. |
+| 30 | `replace_label` | API failure is `error`; incomplete/reverted replacement is `rejected`. | Missing before/after label state is `unknown`/`missing_execution_state`. |
 
 ## Derived Metrics
 
@@ -808,19 +909,20 @@ safe-output type; status and evidence strength are separate attributes.
 | `noop`, `missing_tool`, `missing_data`, `report_incomplete` | Not evaluated | Skipped |
 | Other generic fallback types | Target existence is not acceptance evidence | Unknown with `target_exists_only`; missing reference unknown; API failure error |
 
-### Sync Follow-ups: Safe-Output Section-to-Test Mapping
+### Sync Notes: Specification Section-to-Implementation and Test Mapping
 
-The 82-case fixture corpus is
-`pkg/cli/testdata/outcome_conformance.json`. Go executes it through
-`pkg/cli/outcome_conformance_test.go`. The executable TLA+ checker
-projects all cases into evidence facts and checks the same expected status,
-strength, signal, and zero-touch result. See [verification scope](outcomes/README.md)
-for the distinction between runtime tests, fixture agreement, and bounded model
-checking. Compiler tests for a safe-output type do not establish evaluator support.
+The evaluator implementation and outcome-conformance tests live in `pkg/cli`; `pkg/workflow` owns safe-output configuration and compilation. Compiler tests do not establish outcome-evaluator support. Evaluator and test evidence per operation lives in [Current Default Acceptance Map](#current-default-acceptance-map) and the Conformance Test Table above; the 95-case fixture corpus is `pkg/cli/testdata/outcome_conformance.json`, executed by `pkg/cli/outcome_conformance_test.go`. The executable TLA+ checker projects the same cases; see [verification scope](outcomes/README.md).
 
-### Structure: Safe-Output Section-to-Implementation Mapping
-
-Each numbered safe-output-type section above corresponds to a dedicated configuration/compilation implementation file under `pkg/workflow/`. This mapping is distinct from the Compliance test mapping above; it maps specification sections to the Go source that defines and compiles the output type (shared cross-cutting logic such as `safe_output_handlers.go` and `compiler_safe_outputs_job.go` is omitted for brevity since it applies to all types).
+| Specification area | Implementation or test path |
+|---|---|
+| `## Implementation`, `### Current Default Acceptance Map` | `pkg/cli/outcome_eval.go`, the `pkg/cli/outcome_eval_*.go` evaluators, `pkg/cli/testdata/outcome_conformance.json` |
+| `## Derived Metrics` | `pkg/cli/outcome_eval.go`, `pkg/cli/outcome_economics.go` |
+| `### Implementation locations` | The 30 `pkg/workflow` paths in the table below |
+| `## Conformance`, `### Conformance Test Table` | `pkg/cli/outcome_conformance_test.go`, `pkg/cli/testdata/outcome_conformance.json` |
+| `### OTel Backend Unavailability` | `pkg/cli/outcome_eval.go` produces JSON/JSONL without an OTLP exporter; downstream export behavior is specified in `specs/otel-observability-spec.md` §16.6 |
+| `### Conformance Safeguard Coverage Requirements` | `pkg/cli/outcome_conformance_test.go`, `pkg/cli/testdata/outcome_conformance.json`; OTLP endpoint filtering is tested by `actions/setup/js/send_otlp_span.test.cjs` |
+| `## Formal Model` | `outcomes/OutcomeEvaluation.tla`, `outcomes/OutcomeEvaluation.cfg`, `outcomes/check.mjs` |
+| `## Legacy Runtime Safeguard Tests`, `## Runtime Test Suite` | `pkg/cli/outcome_eval_formal_test.go`, `pkg/cli/outcome_conformance_test.go` |
 
 | Section | Output type | Implementation file(s) |
 |---|---|---|
@@ -855,15 +957,13 @@ Each numbered safe-output-type section above corresponds to a dedicated configur
 | §29 | `missing_tool` | `pkg/workflow/missing_issue_reporting.go` |
 | §30 | `replace_label` | `pkg/workflow/replace_label.go` |
 
-Sync procedure: when a safe-output type's implementation file is renamed, split, or removed, update the corresponding row in this table in the same change that moves the code.
+When any mapped configuration, evaluator, or test path changes, update this table in the same change. The output-type sections propose future rules where marked; their current evaluator and test entries remain authoritative until implementation changes.
 
 ### OTel Backend Unavailability
 
-When the OTLP exporter is unavailable (e.g., endpoint unreachable, network timeout, authentication failure) during outcome evaluation, the following safeguards **MUST** apply:
+The `gh aw logs --outcomes` evaluator has no OTLP exporter: it classifies outcomes and writes JSON/optional JSONL without making telemetry requests. An unavailable OTLP backend therefore cannot affect CLI classification or suppress the CLI output, and this specification does not require an evaluator-owned audit file or retry loop. A downstream exporter MUST preserve the produced outcome records when its own export fails and MUST NOT report failed delivery as successful; exporter ordering, local mirrors, and failure handling are defined in the [OpenTelemetry Observability Specification](otel-observability-spec.md#16-reliability-and-failure-handling).
 
-1. **Graceful degradation**: Outcome evaluation workers **MUST** complete their classification logic (determining `accepted`, `rejected`, `ignored`, etc.) regardless of OTLP exporter availability. The computed outcome **MUST** be persisted to a local audit fallback log (e.g., a NDJSON file at a known path such as `/tmp/gh-aw/outcome-audit.ndjson`) before any attempt to export to OTLP. If the OTLP export fails, the local audit log entry **MUST** still be written and **MUST NOT** be discarded. This ensures the outcome is recoverable even when the telemetry backend is down.
-
-2. **Audit fallback and retry**: When OTLP export fails, the evaluation worker **SHOULD** schedule a retry using an exponential back-off strategy (initial delay: 5 seconds; maximum delay: 5 minutes; maximum attempts: 5). If all retries are exhausted without a successful export, the worker **MUST** record the export failure in the local audit log with a `export_failed: true` flag and the final error reason. A downstream reconciliation process **SHOULD** periodically sweep the local audit log and re-attempt export for any entries marked `export_failed: true`.
+The CLI conformance corpus covers GitHub API failures that affect evaluation, not OTLP transport failures. The fail-closed check for a default OTLP endpoint with missing credentials is exercised by `actions/setup/js/send_otlp_span.test.cjs` in the runtime exporter, outside the CLI outcome evaluator.
 
 ### Conformance Safeguard Coverage Requirements
 
@@ -871,7 +971,7 @@ Conformance suites **MUST** include explicit safeguard coverage classes in addit
 
 1. **Class A (state success/failure):** validates standard accepted/rejected/ignored/pending transitions from authoritative object state.
 2. **Class B (human override/lifecycle):** validates human edits, deletions, reopen events, and lifecycle outcomes where applicable.
-3. **Class C (API degradation):** validates `404`, `5xx`, timeout, and rate-limit behaviors, including retry metadata and non-terminal handling.
+3. **Class C (API degradation):** validates `404`, `5xx`, timeout, and rate-limit behaviors, including non-terminal handling. OTLP export is not part of CLI evaluation.
 
 Every safe-output type **MUST** have at least one Class A test. Types that query GitHub APIs for evaluation **MUST** also include at least one Class C test case.
 
@@ -920,7 +1020,7 @@ current cross-runtime evidence contract.
 | `P8` Update-Snapshot-Comparison | `TestFormalUpdateSnapshotComparison` | current=after→accepted; current=before or diverged→rejected |
 | `P9` CloseSticky-Reopen-Rejection | `TestFormalCloseStickyReopenRejection` | Reopened object→rejected; lifecycle bot closed→lifecycle_close |
 | `P10` Derived-Metrics-Consistency | `TestFormalDerivedMetricsConsistency` | acceptance_rate and waste_rate formulas; division-by-zero safety |
-| `P11` OTel-Graceful-Degradation | `TestFormalOTelGracefulDegradation` | OTLP failure still writes audit log; outcome not discarded |
+| `P11` Evaluation-API-Degradation | `TestFormalOutcomeSurvivesAPIFailure` | GitHub API transport failure produces a normalized evaluation report; it does not claim an OTLP exporter or audit-file write |
 | `P12` Conformance-Class-Coverage | `TestFormalConformanceClassCoverage` | Class A/C test existence invariant structure |
 | `P14` API-Error-Not-Terminal | `TestFormalAPIErrorNotTerminal` | An authoritative PR fetch error produces `error`, never a terminal outcome |
 | `P15` Zero-Touch-Requires-No-Reviews | `TestFormalZeroTouchRequiresNoReviews` | Requires complete evidence and no post-action non-bot comments, submitted reviews, or edits |
@@ -946,10 +1046,21 @@ Each test function:
 Run the full formal suite:
 
 ```sh
-go test ./pkg/cli/ -run 'TestFormalOutcomeDomainInvariant|TestFormalAPIFailurePending|TestFormal404Classification|TestFormalBotActorProvenance|TestFormalPRMergeAcceptance|TestFormalIssueBotCloseLifecycle|TestFormalLabelStickiness|TestFormalUpdateSnapshotComparison|TestFormalCloseStickyReopenRejection|TestFormalDerivedMetricsConsistency|TestFormalOTelGracefulDegradation|TestFormalConformanceClassCoverage|TestFormalAPIErrorNotTerminal|TestFormalZeroTouchRequiresNoReviews' -v
+go test ./pkg/cli/ -run 'TestFormalOutcomeDomainInvariant|TestFormalAPIFailurePending|TestFormal404Classification|TestFormalBotActorProvenance|TestFormalPRMergeAcceptance|TestFormalIssueBotCloseLifecycle|TestFormalLabelStickiness|TestFormalUpdateSnapshotComparison|TestFormalCloseStickyReopenRejection|TestFormalDerivedMetricsConsistency|TestFormalOutcomeSurvivesAPIFailure|TestFormalConformanceClassCoverage|TestFormalAPIErrorNotTerminal|TestFormalZeroTouchRequiresNoReviews' -v
 ```
 
 ## Change Log
+
+### Version 1.0.3 (Working Draft, 2026-11-05)
+
+- Added explicit entity/evaluator identification to all 30 safe-output sections.
+- Corrected the OTLP-unavailable contract to match the CLI boundary: there is no CLI OTLP exporter or evaluator-owned retry/audit-log implementation; cross-referenced the runtime exporter safeguards.
+- Re-verified the implementation-location table against the repository; all listed paths exist.
+
+### Version 1.0.2 (Working Draft, 2026-11-03)
+
+- Added failure and unknown safeguards for all 30 safe-output sections.
+- Mapped all implementation and conformance sections to source paths and named coverage tests, adding focused outcome fixtures for six previously uncovered operation types.
 
 ### Version 1.0.1 (Working Draft, 2026-08-01)
 

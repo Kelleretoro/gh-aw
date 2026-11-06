@@ -4,32 +4,27 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"regexp"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/setutil"
+	"github.com/github/gh-aw/pkg/workflow"
+	"github.com/github/gh-aw/pkg/workflow/actionslanguageservice"
 	"github.com/github/gh-aw/pkg/workflow/aw"
 	"github.com/github/gh-aw/pkg/workflow/codemod"
 )
 
-var (
-	stepsAnyExprRe        = regexp.MustCompile(`\$\{\{\s*([^}]+?)\s*\}\}`)
-	stepsSecretBodyExprRe = regexp.MustCompile(`^secrets\.([A-Za-z_][A-Za-z0-9_]*)$`)
-	stepsEnvBodyExprRe    = regexp.MustCompile(`^env\.([A-Za-z_][A-Za-z0-9_]*)$`)
-	stepsSecretRefExprRe  = regexp.MustCompile(`\bsecrets\.([A-Za-z_][A-Za-z0-9_]*)\b`)
-	stepsEnvRefExprRe     = regexp.MustCompile(`\benv\.([A-Za-z_][A-Za-z0-9_]*)\b`)
-	stepsGitHubTokenRe    = regexp.MustCompile(`\bgithub\.token\b`)
-	// Property-access chains receive readable names; other expressions receive hashes.
-	stepsGenericExprRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_-]*(\.[a-zA-Z_][a-zA-Z0-9_-]*)*$`)
-)
+var stepsRunExpressionsLog = logger.New("cli:codemod_steps_run_secrets_env")
 
 // getStepsRunSecretsToEnvCodemod hoists run expressions into step-level environment bindings.
 func getStepsRunSecretsToEnvCodemod() Codemod {
 	return Codemod{
 		ID:           "steps-run-secrets-to-env",
 		Name:         "Move step run expressions to env bindings",
-		Description:  "Rewrites all ${{ ... }} expressions interpolated directly in run commands to $VARS (or $env:VARS for PowerShell steps) and adds step-level env bindings for strict-mode compatibility. Note: expressions inside single-quoted strings are rewritten too; since single quotes suppress shell variable expansion, those sections should be double-quoted if the substituted value is required.",
+		Description:  "Moves executable run expressions into step env bindings, using the compiler's Bash heredoc boundaries. Preserves quoted heredoc bodies and shell comments; unproven heredoc boundaries require manual migration. Note: ordinary single-quoted shell strings still require double quotes to expand the generated variables.",
 		IntroducedIn: "0.26.0",
+		Guided:       true,
 		Apply: func(content string, frontmatter map[string]any) (string, bool, error) {
 			sections := []string{"pre-steps", "steps", "post-steps", "pre-agent-steps"}
 			if !hasTopLevelSection(frontmatter, sections) {
@@ -42,12 +37,14 @@ func getStepsRunSecretsToEnvCodemod() Codemod {
 						if !ok {
 							continue
 						}
-						for _, value := range steps {
+						for index, value := range steps {
 							step, ok := value.(map[string]any)
 							if !ok {
 								continue
 							}
-							hoistStepRunExpressions(step)
+							if err := hoistStepRunExpressions(step); err != nil {
+								return fmt.Errorf("%s[%d].run: %w; no changes to this workflow are written until manual blockers are resolved", section, index, err)
+							}
 						}
 					}
 					return nil
@@ -57,46 +54,53 @@ func getStepsRunSecretsToEnvCodemod() Codemod {
 	}
 }
 
-func hoistStepRunExpressions(step map[string]any) {
+func hoistStepRunExpressions(step map[string]any) error {
 	run, ok := step["run"].(string)
-	if !ok {
-		return
+	if !ok || !strings.Contains(run, "${{") {
+		return nil
 	}
 	env, ok := step["env"].(map[string]any)
 	if !ok {
 		if value, exists := step["env"]; exists && value != nil {
-			return
+			return nil
 		}
 		env = map[string]any{}
 	}
 	shell, shellIsString := step["shell"].(string)
 	powershell := shellIsString && (strings.EqualFold(shell, "pwsh") || strings.EqualFold(shell, "powershell"))
 	bindings := map[string]string{}
-	lines := strings.Split(run, "\n")
 	changed := false
-	for i, line := range lines {
-		// As before, comment-only shell lines (including heredoc comments) stay untouched.
-		if strings.HasPrefix(strings.TrimSpace(line), "#") {
-			continue
-		}
-		code, comment := splitRunShellComment(line)
-		updated, added := replaceStepExpressionRefs(code, powershell, bindings)
-		if len(added) == 0 {
-			continue
-		}
-		lines[i] = updated + comment
-		changed = true
+	transform := func(segment string) string {
+		updated, added := replaceStepExpressionRefs(segment, powershell, bindings)
+		changed = changed || len(added) > 0
 		for _, binding := range added {
 			bindings[binding.Name] = binding.Expression
 			if _, exists := env[binding.Name]; !exists {
 				env[binding.Name] = binding.Expression
 			}
 		}
+		return updated
+	}
+	var updatedRun string
+	if powershell {
+		lines := strings.Split(run, "\n")
+		for i, line := range lines {
+			code, comment := splitRunShellComment(line)
+			lines[i] = transform(code) + comment
+		}
+		updatedRun = strings.Join(lines, "\n")
+	} else {
+		var err error
+		updatedRun, err = workflow.TransformExecutableShellContent(run, transform)
+		if err != nil {
+			return err
+		}
 	}
 	if changed {
-		step["run"] = strings.Join(lines, "\n")
+		step["run"] = updatedRun
 		step["env"] = env
 	}
+	return nil
 }
 
 // Folded YAML joins authored shell-comment lines onto the preceding command.
@@ -142,7 +146,11 @@ type stepExpressionBinding struct {
 }
 
 func replaceStepExpressionRefs(line string, shellIsPowerShell bool, existingBindings map[string]string) (string, []stepExpressionBinding) { //nolint:largefunc // Keep the existing expression deduplication and collision-resolution state machine together.
-	matches := stepsAnyExprRe.FindAllStringSubmatchIndex(line, -1)
+	matches, err := actionslanguageservice.ExtractExpressions(line)
+	if err != nil {
+		stepsRunExpressionsLog.Printf("Cannot scan run expressions; preserving original line")
+		return line, nil
+	}
 	if len(matches) == 0 {
 		return line, nil
 	}
@@ -156,15 +164,9 @@ func replaceStepExpressionRefs(line string, shellIsPowerShell bool, existingBind
 	ordered := make([]stepExpressionBinding, 0, len(matches))
 
 	for _, match := range matches {
-		if len(match) < 4 {
-			continue
-		}
-		var capture [4]int
-		copy(capture[:], match)
-		fullStart, fullEnd := capture[0], capture[1]
-		bodyStart, bodyEnd := capture[2], capture[3]
+		fullStart, fullEnd := match.Start, match.End
 		fullExpression := line[fullStart:fullEnd]
-		body := strings.TrimSpace(line[bodyStart:bodyEnd])
+		body := strings.TrimSpace(match.Content)
 
 		result.WriteString(line[last:fullStart])
 
@@ -172,7 +174,7 @@ func replaceStepExpressionRefs(line string, shellIsPowerShell bool, existingBind
 			if shellIsPowerShell {
 				result.WriteString("$env:" + cachedName)
 			} else {
-				result.WriteString("$" + cachedName)
+				result.WriteString(stepBashExpressionReference(cachedName, line[fullEnd:]))
 			}
 			last = fullEnd
 			continue
@@ -197,7 +199,7 @@ func replaceStepExpressionRefs(line string, shellIsPowerShell bool, existingBind
 		if shellIsPowerShell {
 			result.WriteString("$env:" + envName)
 		} else {
-			result.WriteString("$" + envName)
+			result.WriteString(stepBashExpressionReference(envName, line[fullEnd:]))
 		}
 		if !setutil.Contains(registeredNames, envName) {
 			registeredNames[envName] = struct{}{}
@@ -213,40 +215,65 @@ func replaceStepExpressionRefs(line string, shellIsPowerShell bool, existingBind
 	return result.String(), ordered
 }
 
+func stepBashExpressionReference(name, suffix string) string {
+	first, _ := utf8.DecodeRuneInString(suffix)
+	if strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", first) {
+		return "${" + name + "}"
+	}
+	return "$" + name
+}
+
 func mapRunExpressionToEnvBinding(body string) (string, string, bool) {
-	if stepsSecretBodyExprRe.MatchString(body) {
-		secretName := strings.TrimPrefix(body, "secrets.")
-		return secretName, fmt.Sprintf("${{ secrets.%s }}", secretName), true
+	expression, err := actionslanguageservice.ParseSyntax(body)
+	if err != nil || expression == nil {
+		stepsRunExpressionsLog.Printf("Cannot parse run expression")
+		return "", "", false
 	}
-
-	if stepsEnvBodyExprRe.MatchString(body) {
-		envName := strings.TrimPrefix(body, "env.")
-		return "GH_AW_ENV_" + envName, fmt.Sprintf("${{ env.%s }}", envName), true
+	path, static := actionslanguageservice.Reference(expression)
+	if static && len(path) == 2 {
+		if path[0] == "secrets" && stepBindingIdentifier(path[1], false) {
+			return path[1], fmt.Sprintf("${{ secrets.%s }}", path[1]), true
+		}
+		if path[0] == "env" && stepBindingIdentifier(path[1], false) {
+			return "GH_AW_ENV_" + path[1], fmt.Sprintf("${{ env.%s }}", path[1]), true
+		}
+		if path[0] == "github" && path[1] == "token" {
+			return "GH_AW_GITHUB_TOKEN", "${{ github.token }}", true
+		}
 	}
-
-	if body == "github.token" {
-		return "GH_AW_GITHUB_TOKEN", "${{ github.token }}", true
+	references := actionslanguageservice.References(expression)
+	for _, context := range []string{"secrets", "env", "github"} {
+		for _, reference := range references {
+			if len(reference) < 2 || reference[0] != context {
+				continue
+			}
+			if context == "github" && reference[1] == "token" {
+				return hashedBindingName("GH_AW_GITHUB_TOKEN", body), fmt.Sprintf("${{ %s }}", body), true
+			}
+			if context != "github" && stepBindingIdentifier(reference[1], false) {
+				prefix := "GH_AW_ENV_"
+				if context == "secrets" {
+					prefix = "GH_AW_SECRET_"
+				}
+				return hashedBindingName(prefix+reference[1], body), fmt.Sprintf("${{ %s }}", body), true
+			}
+		}
 	}
-
-	if secretRef := stepsSecretRefExprRe.FindString(body); secretRef != "" {
-		return hashedBindingName("GH_AW_SECRET_"+strings.TrimPrefix(secretRef, "secrets."), body), fmt.Sprintf("${{ %s }}", body), true
+	readable := static
+	for _, segment := range path {
+		readable = readable && stepBindingIdentifier(segment, true)
 	}
-
-	if envRef := stepsEnvRefExprRe.FindString(body); envRef != "" {
-		return hashedBindingName("GH_AW_ENV_"+strings.TrimPrefix(envRef, "env."), body), fmt.Sprintf("${{ %s }}", body), true
-	}
-
-	if stepsGitHubTokenRe.MatchString(body) {
-		return hashedBindingName("GH_AW_GITHUB_TOKEN", body), fmt.Sprintf("${{ %s }}", body), true
-	}
-
-	if stepsGenericExprRe.MatchString(body) {
-		replacer := strings.NewReplacer(".", "_", "-", "_")
-		name := "EXPR_" + strings.ToUpper(replacer.Replace(body))
+	if readable {
+		name := "EXPR_" + strings.ToUpper(strings.ReplaceAll(strings.Join(path, "_"), "-", "_"))
 		return name, fmt.Sprintf("${{ %s }}", body), true
 	}
 	name := hashedBindingName("EXPR", body)
 	return name, fmt.Sprintf("${{ %s }}", body), true
+}
+
+// stepBindingIdentifier constrains generated shell identifiers, not Actions syntax.
+func stepBindingIdentifier(value string, allowHyphen bool) bool {
+	return actionslanguageservice.ActionsIdentifier(value, allowHyphen)
 }
 
 // hashedBindingName suffixes a binding name with a stable expression-body hash.

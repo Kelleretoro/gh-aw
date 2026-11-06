@@ -49,6 +49,7 @@ import (
 	"github.com/github/gh-aw/pkg/linters/osexitinlibrary"
 	"github.com/github/gh-aw/pkg/linters/osgetenvlibrary"
 	"github.com/github/gh-aw/pkg/linters/osisnotexist"
+	"github.com/github/gh-aw/pkg/linters/osopenreadallpreferreadfile"
 	"github.com/github/gh-aw/pkg/linters/ossetenvlibrary"
 	"github.com/github/gh-aw/pkg/linters/packagelevelmutableslicemap"
 	panicinlibrarycode "github.com/github/gh-aw/pkg/linters/panic-in-library-code"
@@ -60,6 +61,7 @@ import (
 	"github.com/github/gh-aw/pkg/linters/seenmapbool"
 	"github.com/github/gh-aw/pkg/linters/slicemakezerolength"
 	"github.com/github/gh-aw/pkg/linters/sortslice"
+	"github.com/github/gh-aw/pkg/linters/splitindexzero"
 	"github.com/github/gh-aw/pkg/linters/sprintfbool"
 	"github.com/github/gh-aw/pkg/linters/sprintferrdot"
 	"github.com/github/gh-aw/pkg/linters/sprintferrorsnew"
@@ -143,6 +145,7 @@ var allAnalyzers = []*analysis.Analyzer{
 	osexitinlibrary.Analyzer,
 	osgetenvlibrary.Analyzer,
 	osisnotexist.Analyzer,
+	osopenreadallpreferreadfile.Analyzer,
 	ossetenvlibrary.Analyzer,
 	packagelevelmutableslicemap.Analyzer,
 	panicinlibrarycode.Analyzer,
@@ -155,6 +158,7 @@ var allAnalyzers = []*analysis.Analyzer{
 	seenmapbool.Analyzer,
 	slicemakezerolength.Analyzer,
 	sortslice.Analyzer,
+	splitindexzero.Analyzer,
 	sprintferrdot.Analyzer,
 	sprintferrorsnew.Analyzer,
 	sprintfbool.Analyzer,

@@ -89,7 +89,8 @@ type AWFConfigFile struct {
 	APIProxy *AWFAPIProxyConfig `json:"apiProxy,omitempty"`
 
 	// Enclaves configures the unified AWF-owned script and agent enclave subsystem.
-	Enclaves []map[string]any `json:"enclaves,omitempty"`
+	Enclaves           []map[string]any `json:"enclaves,omitempty"`
+	EnclaveDebugPublic *bool            `json:"enclaveDebugPublic,omitempty"`
 
 	// Container contains container execution configuration.
 	Container *AWFContainerConfig `json:"container,omitempty"`
@@ -227,6 +228,9 @@ type AWFAPIProxyConfig struct {
 }
 
 type AWFModelRoutingConfig struct {
+	// Provider is the native routing provider ("anthropic" or "openai"). It is
+	// omitted for GitHub Copilot routing, which is AWF's default provider.
+	Provider        string                   `json:"provider,omitempty"`
 	Objective       AWFModelRoutingObjective `json:"objective"`
 	Task            AWFModelRoutingTask      `json:"task"`
 	CandidateModels []string                 `json:"candidateModels,omitempty"`

@@ -111,17 +111,6 @@ func (e *CopilotEngine) GetRequiredSecretNames(workflowData *WorkflowData) []str
 		copilotLog.Printf("Added %d HTTP MCP header secrets", len(headerSecrets))
 	}
 
-	// Add mcp-scripts secret names
-	if IsMCPScriptsEnabled(workflowData.MCPScripts) {
-		mcpScriptsSecrets := collectMCPScriptsSecrets(workflowData.MCPScripts)
-		for varName := range mcpScriptsSecrets {
-			secrets = append(secrets, varName)
-		}
-		if len(mcpScriptsSecrets) > 0 {
-			copilotLog.Printf("Added %d mcp-scripts secrets", len(mcpScriptsSecrets))
-		}
-	}
-
 	copilotLog.Printf("Total required secrets: %d", len(secrets))
 	return append(secrets, fallbackProviderSecretNames(workflowData)...)
 }
@@ -204,6 +193,9 @@ func (e *CopilotEngine) GetFirewallLogsCollectionStep(workflowData *WorkflowData
 	// This ensures session files are in /tmp/gh-aw/ where secret redaction can scan them
 	sessionCopyStep := generateCopilotSessionFileCopyStep()
 	steps = append(steps, sessionCopyStep)
+	if workflowData.EngineConfig != nil && workflowData.EngineConfig.Durable != nil {
+		steps = append(steps, durableSessionStep(workflowData, "trim-copilot"))
+	}
 
 	return steps
 }

@@ -222,6 +222,7 @@ func (e *PiEngine) GetInstallationSteps(workflowData *WorkflowData) []GitHubActi
 			version = workflowData.EngineConfig.Version
 		}
 
+		cooldownDays := resolveEngineCooldownDays(workflowData)
 		npmSteps := GenerateNpmInstallSteps(
 			"@earendil-works/pi-coding-agent",
 			version,
@@ -230,7 +231,7 @@ func (e *PiEngine) GetInstallationSteps(workflowData *WorkflowData) []GitHubActi
 			NPMInstallOptions{
 				IncludeNodeSetup:  true,
 				RunInstallScripts: false,
-				CooldownEnabled:   false,
+				CooldownDays:      &cooldownDays,
 			},
 		)
 
@@ -243,7 +244,8 @@ func (e *PiEngine) GetInstallationSteps(workflowData *WorkflowData) []GitHubActi
 				"Install Pi CLI in microVM path",
 				"pi",
 				false,
-				false,
+				true,
+				cooldownDays,
 			))
 		}
 
@@ -343,6 +345,7 @@ func (e *PiEngine) GetExecutionSteps(workflowData *WorkflowData, logFile string)
 	piCommand := e.buildPiCommand(workflowData, commandName, piArgs, piModelsJSONSetup, driverConfigured)
 	command := e.buildPiExecutionCommand(workflowData, logFile, piCommand, firewallEnabled, modelConfigured, profile)
 	env := e.buildPiExecutionEnv(workflowData, profile, backend, firewallEnabled, modelConfigured, piModelsJSONSetup != "")
+	applyDurableExecutionEnv(env, workflowData)
 	step := e.buildPiExecutionStep(workflowData, command, env)
 	return []GitHubActionStep{step}
 }

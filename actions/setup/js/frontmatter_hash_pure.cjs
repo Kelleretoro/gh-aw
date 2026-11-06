@@ -31,6 +31,18 @@ async function defaultFileReader(filePath) {
 }
 
 /**
+ * @param {any} error - Reader error, possibly wrapped with a cause
+ * @returns {boolean} Whether the file is genuinely absent
+ */
+function isFileNotFound(error) {
+  if (!error) return false;
+  const status = error.status || error.response?.status;
+  if (status !== undefined) return status === HTTP_STATUS_NOT_FOUND;
+  if (error.code !== undefined) return error.code === "ENOENT";
+  return error.cause ? isFileNotFound(error.cause) : false;
+}
+
+/**
  * Parses a boolean flag from frontmatter text using simple text scanning.
  * Matches lines of the form "key: true" or "key: false" at the top level.
  * Returns false when the key is absent or the value is not "true".
@@ -53,6 +65,7 @@ function parseBoolFromFrontmatter(frontmatterText, key) {
  * @param {string} workflowPath - Path to the workflow file
  * @param {Object} [options] - Optional configuration
  * @param {Function} [options.fileReader] - Custom file reader function (async (filePath) => content); defaults to fs.readFileSync
+ * @param {(filePath: string, error: Error) => void} [options.onMissingImport] - Called when an import file is missing
  * @param {"local"|"github-api"} [options.readerMode] - Reader source; set to "github-api" for API-backed readers, including wrappers
  * @param {boolean} [options.verbose] - When true, emits detailed debug logging via core.info()
  *                                      for every step of the computation. Useful when diagnosing
@@ -61,6 +74,7 @@ function parseBoolFromFrontmatter(frontmatterText, key) {
  */
 async function computeFrontmatterHash(workflowPath, options = {}) {
   const fileReader = options.fileReader || defaultFileReader;
+  const onMissingImport = options.onMissingImport;
   const readerMode = options.readerMode || "local";
   const verbose = options.verbose === true;
   // log is a thin helper that only emits when verbose mode is active.
@@ -93,7 +107,7 @@ async function computeFrontmatterHash(workflowPath, options = {}) {
   log(`inlined-imports: ${inlinedImports}`);
 
   // Process imports using text-based parsing
-  const { importedFiles, importedFrontmatterTexts } = await processImportsTextBased(frontmatterText, baseDir, undefined, fileReader);
+  const { importedFiles, importedFrontmatterTexts } = await processImportsTextBased(frontmatterText, baseDir, undefined, fileReader, onMissingImport);
 
   log(`Imported files (${importedFiles.length}): ${JSON.stringify(importedFiles)}`);
 
@@ -191,9 +205,10 @@ function extractFrontmatterAndBody(content) {
  * @param {string} baseDir - Base directory for resolving imports
  * @param {Set<string>} visited - Set of visited files for cycle detection
  * @param {Function} fileReader - File reader function (async (filePath) => content)
+ * @param {(filePath: string, error: Error) => void} [onMissingImport] - Called when an import file is missing
  * @returns {Promise<{importedFiles: string[], importedFrontmatterTexts: string[]}>}
  */
-async function processImportsTextBased(frontmatterText, baseDir, visited = new Set(), fileReader = defaultFileReader) {
+async function processImportsTextBased(frontmatterText, baseDir, visited = new Set(), fileReader = defaultFileReader, onMissingImport) {
   const importedFiles = [];
   const importedFrontmatterTexts = [];
 
@@ -226,13 +241,14 @@ async function processImportsTextBased(frontmatterText, baseDir, visited = new S
 
       // Recursively process imports in the imported file
       const importBaseDir = path.dirname(fullPath);
-      const nestedResult = await processImportsTextBased(importFrontmatterText, importBaseDir, visited, fileReader);
+      const nestedResult = await processImportsTextBased(importFrontmatterText, importBaseDir, visited, fileReader, onMissingImport);
 
       // Add nested imports
       importedFiles.push(...nestedResult.importedFiles);
       importedFrontmatterTexts.push(...nestedResult.importedFrontmatterTexts);
     } catch (err) {
-      // Skip files that can't be read
+      if (!isFileNotFound(err)) throw err;
+      onMissingImport?.(fullPath, /** @type {Error} */ err);
       continue;
     }
   }
@@ -332,22 +348,13 @@ function validateNormalizedFrontmatterHashInputSize(normalizedFrontmatterText, n
  * @returns {string[]} Array of relevant expressions (sorted)
  */
 function extractRelevantTemplateExpressions(markdown) {
-  const expressions = [];
-  const regex = /\$\{\{([^}]+)\}\}/g;
-  let match;
-
-  while ((match = regex.exec(markdown)) !== null) {
-    const expr = match[0]; // Full expression including ${{ }}
-    const content = match[1].trim();
-
-    // Check if it contains env. or vars.
-    if (content.includes("env.") || content.includes("vars.")) {
-      expressions.push(expr);
-    }
-  }
-
-  // Remove duplicates and sort
-  return [...new Set(expressions)].sort();
+  return [
+    ...new Set(
+      scanTemplateExpressions(markdown)
+        .filter(match => match.content.includes("env.") || match.content.includes("vars."))
+        .map(match => match.expression)
+    ),
+  ].sort();
 }
 
 /**
@@ -356,16 +363,45 @@ function extractRelevantTemplateExpressions(markdown) {
  * @returns {string[]}
  */
 function extractAllTemplateExpressions(markdown) {
+  return [
+    ...new Set(
+      scanTemplateExpressions(markdown)
+        .filter(match => match.content.trim())
+        .map(match => match.expression)
+    ),
+  ].sort();
+}
+
+/**
+ * Scan interpolation boundaries without interpreting Actions grammar.
+ * Single quotes protect closing braces; doubled quotes preserve quote state.
+ * Unclosed openings do not discard complete expressions before or after them.
+ * @param {string} source
+ * @returns {{expression: string, content: string}[]}
+ */
+function scanTemplateExpressions(source) {
   const expressions = [];
-  const regex = /\$\{\{([^}]+)\}\}/g;
-  let match;
-
-  while ((match = regex.exec(markdown)) !== null) {
-    if (!match[1].trim()) continue;
-    expressions.push(match[0]);
+  let offset = 0;
+  while (offset < source.length) {
+    const start = source.indexOf("${{", offset);
+    if (start === -1) break;
+    let inString = false;
+    let end = start + 3;
+    for (; end < source.length; end++) {
+      if (source[end] === "'") {
+        inString = !inString;
+      } else if (!inString && source[end] === "}" && source[end + 1] === "}") {
+        break;
+      }
+    }
+    if (end === source.length) {
+      offset = start + 3;
+      continue;
+    }
+    expressions.push({ expression: source.slice(start, end + 2), content: source.slice(start + 3, end) });
+    offset = end + 2;
   }
-
-  return [...new Set(expressions)].sort();
+  return expressions;
 }
 
 /**
@@ -454,23 +490,29 @@ function extractRuntimeImportReferences(markdown) {
  * @returns {Promise<string|null>}
  */
 async function readRuntimeImportBodyForHash(ref, baseDir, seen, fileReader, readerMode) {
+  let firstReadError;
   for (const candidate of runtimeImportHashCandidatePaths(ref.path, baseDir)) {
     const key = `${candidate}:${ref.startLine ?? 0}-${ref.endLine ?? 0}`;
     if (seen.has(key)) return null;
     // API candidates use the allowlisted paths below and the reader's remote symlink resolution; local realpath checks inspect the unrelated runner checkout.
     if (readerMode !== "github-api" && fs.existsSync(candidate) && !runtimeImportHashRealPathAllowed(candidate, baseDir)) continue;
+    let content;
     try {
-      let content = await fileReader(candidate);
-      seen.add(key);
-      if (ref.startLine !== null || ref.endLine !== null) {
-        content = applyRuntimeImportLineRangeForHash(content, ref.startLine, ref.endLine);
-      }
-      const { markdown } = extractFrontmatterAndBody(content);
-      return markdown;
+      content = await fileReader(candidate);
     } catch (err) {
+      if (isFileNotFound(err)) continue;
+      firstReadError ||= err;
       continue;
     }
+
+    seen.add(key);
+    if (ref.startLine !== null || ref.endLine !== null) {
+      content = applyRuntimeImportLineRangeForHash(content, ref.startLine, ref.endLine);
+    }
+    const { markdown } = extractFrontmatterAndBody(content);
+    return markdown;
   }
+  if (firstReadError) throw firstReadError;
   return null;
 }
 
@@ -644,6 +686,7 @@ async function collectImportedBodies(frontmatterText, baseDir, visited = new Set
       const nestedBodies = await collectImportedBodies(importFrontmatterText, importBaseDir, visited, fileReader);
       importedBodyTexts.push(...nestedBodies);
     } catch (err) {
+      if (!isFileNotFound(err)) throw err;
       continue;
     }
   }
@@ -945,7 +988,8 @@ function createGitHubFileReader(github, owner, repo, ref) {
       }
 
       const errorMessage = getErrorMessage(error);
-      throw new Error(`${ERR_SYSTEM}: Failed to read file ${filePath} from GitHub: ${errorMessage}`);
+      const statusMessage = status !== undefined ? ` (HTTP ${status})` : "";
+      throw new Error(`${ERR_SYSTEM}: Failed to read file ${filePath} from GitHub${statusMessage}: ${errorMessage}`, { cause: error });
     }
   }
 

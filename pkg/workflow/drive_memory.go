@@ -153,11 +153,13 @@ func generateDriveMemoryPersistence(builder *strings.Builder, data *WorkflowData
 			continue
 		}
 		if threatDetectionEnabled {
+			recoveryStepID := "validate_recovery_drive_" + SanitizeWorkflowIDForCacheKey(drive.ID)
+			generateRecoveryEnvelopeValidationStep(builder, recoveryStepID, data, pinAction, "${{ github.workspace }}/"+driveMemoryMountPathFor(drive.ID))
 			fmt.Fprintf(builder, "      - name: Upload drive-memory data as artifact (%s)\n", drive.ID)
 			if driveHasValidationStep(drive) {
-				fmt.Fprintf(builder, "        if: always() && steps.%s.outcome == 'success'\n", driveMemoryValidationStepID(drive.ID))
+				fmt.Fprintf(builder, "        if: always() && %s && steps.%s.outcome == 'success' && steps.%s.outcome == 'success'\n", secretRedactionSuccessCondition(data), recoveryStepID, driveMemoryValidationStepID(drive.ID)) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 			} else {
-				builder.WriteString("        if: always()\n")
+				fmt.Fprintf(builder, "        if: always() && %s && steps.%s.outcome == 'success'\n", secretRedactionSuccessCondition(data), recoveryStepID) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 			}
 			fmt.Fprintf(builder, "        uses: %s\n", pinAction("actions/upload-artifact"))
 			builder.WriteString("        with:\n")
@@ -237,7 +239,7 @@ func (c *Compiler) buildUpdateDriveMemoryJob(data *WorkflowData, threatDetection
 		BuildPropertyAccess(fmt.Sprintf("needs.%s.result", constants.AgentJobName)),
 		BuildStringLiteral("success"),
 	)
-	condition := RenderCondition(BuildAnd(BuildAnd(BuildFunctionCall("always"), buildDetectionSuccessCondition()), agentSucceeded))
+	condition := RenderCondition(BuildAnd(BuildAnd(BuildFunctionCall("always"), buildDetectionAcceptedCondition()), agentSucceeded))
 	perms := NewPermissionsEmpty()
 	perms.Set(PermissionContents, PermissionRead)
 	perms.Set(PermissionIdToken, PermissionWrite)

@@ -3,10 +3,11 @@ import os from "os";
 import path from "path";
 import http from "http";
 import { createRequire } from "node:module";
+import { execFileSync } from "node:child_process";
 import vm from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  applyAgenticWorkflowsRunnerIdentity,
+  applyBuiltinMCPRunnerIdentity,
   applyOTLPIgnoreIfMissing,
   clearGatewayStartupMarker,
   createGatewayStderrPath,
@@ -35,10 +36,90 @@ import {
   validateGatewayAgentIdentifiers,
   waitForSafeOutputsReadiness,
   retryGatewayStartup,
+  startGatewayWithRetry,
   httpGet,
 } from "./start_mcp_gateway.cjs";
 import { writeMcpConfiguration } from "./mcp_configuration.cjs";
 import { applyGatewayRuntimeTimeouts } from "./tool_timeouts.cjs";
+
+describe("MCP gateway container startup retry", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not restart a successful gateway", async () => {
+    const start = vi.fn().mockResolvedValue({ gatewayPid: 123 });
+    await expect(startGatewayWithRetry(start)).resolves.toEqual({ gatewayPid: 123 });
+    expect(start).toHaveBeenCalledOnce();
+  });
+
+  it("recovers on the single retry", async () => {
+    vi.useFakeTimers();
+    const start = vi.fn().mockRejectedValueOnce(new Error("ERR_SYSTEM: container exited")).mockResolvedValue({ gatewayPid: 456 });
+    const result = startGatewayWithRetry(start);
+    await vi.runAllTimersAsync();
+    await expect(result).resolves.toEqual({ gatewayPid: 456 });
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports the pre-agent step after exactly two failed attempts", async () => {
+    vi.useFakeTimers();
+    const start = vi.fn().mockRejectedValue(new Error("ERR_SYSTEM: Gateway failed to become ready"));
+    const result = expect(startGatewayWithRetry(start)).rejects.toThrow('Pre-agent failure in step "Start MCP Gateway" after 2 startup attempts: ERR_SYSTEM: Gateway failed to become ready');
+    await vi.runAllTimersAsync();
+    await result;
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry invalid configuration", async () => {
+    const start = vi.fn().mockRejectedValue(new Error("ERR_CONFIG: invalid agent ID"));
+    await expect(startGatewayWithRetry(start)).rejects.toThrow("ERR_CONFIG: invalid agent ID");
+    expect(start).toHaveBeenCalledOnce();
+  });
+
+  it("does not retry safe-output configuration errors", async () => {
+    const start = vi.fn().mockRejectedValue(new Error("ERR_SAFE_OUTPUTS_GATEWAY_CONFIG: missing gateway port"));
+    await expect(startGatewayWithRetry(start)).rejects.toThrow("ERR_SAFE_OUTPUTS_GATEWAY_CONFIG: missing gateway port");
+    expect(start).toHaveBeenCalledOnce();
+  });
+
+  it("preserves one startup deadline across attempts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1000);
+    const deadline = 5000;
+    const attemptDeadlines = [];
+    const start = vi
+      .fn()
+      .mockImplementationOnce(async sharedDeadline => {
+        attemptDeadlines.push(sharedDeadline);
+        throw new Error("ERR_SYSTEM: transient launch failure");
+      })
+      .mockImplementationOnce(async sharedDeadline => {
+        attemptDeadlines.push(sharedDeadline);
+        return { gatewayPid: 456 };
+      });
+    const result = startGatewayWithRetry(start, deadline);
+    await vi.runAllTimersAsync();
+
+    await expect(result).resolves.toEqual({ gatewayPid: 456 });
+    expect(attemptDeadlines).toEqual([deadline, deadline]);
+  });
+
+  it("does not restart after the shared startup deadline expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1000);
+    const start = vi.fn(async () => {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      throw new Error("ERR_SYSTEM: gateway startup timed out");
+    });
+    const result = startGatewayWithRetry(start, 1100);
+    const rejection = expect(result).rejects.toThrow("after 1 startup attempt");
+    await vi.advanceTimersByTimeAsync(100);
+
+    await rejection;
+    expect(start).toHaveBeenCalledOnce();
+  });
+});
 
 describe("MCP gateway runner proxy environment", () => {
   it.each([
@@ -121,7 +202,7 @@ describe("MCP gateway runner proxy environment", () => {
 
   it("adds runner proxy flags before launching the gateway", () => {
     const source = fs.readFileSync(new URL("./start_mcp_gateway.cjs", import.meta.url), "utf8");
-    expect(source.indexOf("args = injectProxyEnvArgs(args, gatewayEnv)")).toBeLessThan(source.indexOf("const child = spawn(cmd, args"));
+    expect(source.indexOf("args = injectProxyEnvArgs(args, gatewayEnv)")).toBeLessThan(source.indexOf("child = spawn(cmd, args"));
   });
 
   it.each(["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"])("redacts %s values in gateway diagnostics", name => {
@@ -137,7 +218,7 @@ describe("MCP gateway CA launcher arguments", () => {
     const require = createRequire(import.meta.url);
     const spawn = vi.fn(() => ({
       on: vi.fn(),
-      stdin: { write: vi.fn(), end: vi.fn() },
+      stdin: { write: vi.fn(), end: vi.fn(), on: vi.fn() },
       unref: vi.fn(),
       // Stop before health polling; this test covers the launch boundary.
       pid: undefined,
@@ -164,6 +245,7 @@ describe("MCP gateway CA launcher arguments", () => {
         chmodSync: vi.fn(),
         rmSync: vi.fn(),
         openSync: vi.fn(() => 42),
+        closeSync: vi.fn(),
         mkdtempSync: vi.fn(() => directory),
       },
       os: { tmpdir: () => directory },
@@ -179,14 +261,16 @@ describe("MCP gateway CA launcher arguments", () => {
     try {
       fs.writeFileSync(caPath, "certificate validated by gateway", { mode: 0o600 });
       const source = fs.readFileSync(new URL("./start_mcp_gateway.cjs", import.meta.url), "utf8");
-      await vm.runInNewContext(`${source}\nmain();`, {
+      await vm.runInNewContext(`${source}\nsleep = async () => {}; main().catch(err => core.setFailed(err.message));`, {
         require: id => mocks[id] || require(id),
         module: { exports: {} },
         process: { env, umask: vi.fn(), on: vi.fn() },
         core,
       });
 
-      expect(spawn).toHaveBeenCalledOnce();
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(mocks.fs.closeSync).toHaveBeenCalledTimes(4);
+      expect(mocks.child_process.execSync).toHaveBeenCalledTimes(2);
       const [command, args, options] = spawn.mock.calls[0];
       const launchedConfig = JSON.parse(spawn.mock.results[0].value.stdin.write.mock.calls[0][0]);
       const target = launchedConfig.mcpServers.private.caCertFile;
@@ -208,24 +292,72 @@ describe("MCP gateway CA launcher arguments", () => {
       ]);
       expect(options.env.NO_PROXY).toBe(inheritedProxy ? "host.docker.internal,awf-enclave-mcp" : undefined);
       expect(launchedConfig.mcpServers.public).not.toHaveProperty("caCertFile");
-      expect(core.setFailed).toHaveBeenCalledExactlyOnceWith("ERR_SYSTEM: Failed to start gateway container");
+      expect(core.setFailed).toHaveBeenCalledExactlyOnceWith('ERR_SYSTEM: Pre-agent failure in step "Start MCP Gateway" after 2 startup attempts: ERR_SYSTEM: Failed to start gateway container');
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
 });
 
-describe("agenticworkflows backend ownership", () => {
+describe("MCP transported-data startup rejection", () => {
+  it("fails before publishing configuration or spawning the gateway without disclosing the payload", async () => {
+    const require = createRequire(import.meta.url);
+    const expression = `GH_AW_MCP_EXPR_${"A".repeat(64)}`;
+    const core = { info: vi.fn(), warning: vi.fn(), error: vi.fn(), setFailed: vi.fn() };
+    const spawn = vi.fn();
+    const writeMcpConfiguration = vi.fn();
+    const config = {
+      gateway: { port: 8080, domain: "localhost", agentId: "test-agent" },
+      mcpServers: { remote: { type: "http", url: "https://example.invalid/mcp", headers: { "X-Value": `\${${expression}}` } } },
+    };
+    const mocks = {
+      fs: {
+        readFileSync: vi.fn(() => Buffer.from(JSON.stringify(config))),
+        mkdirSync: vi.fn(),
+        chmodSync: vi.fn(),
+      },
+      child_process: { spawn, execSync: vi.fn() },
+      "./shim.cjs": {},
+      "./symlink_guard.cjs": { lstatGuard: vi.fn(() => ({})) },
+      "./mcp_configuration.cjs": { writeMcpConfiguration },
+    };
+    const source = fs.readFileSync(new URL("./start_mcp_gateway.cjs", import.meta.url), "utf8");
+    await vm.runInNewContext(`${source}\nmain().catch(err => core.setFailed(err.message));`, {
+      require: id => mocks[id] || require(id),
+      module: { exports: {} },
+      process: {
+        env: {
+          RUNNER_TEMP: "/tmp/test-runner",
+          MCP_GATEWAY_DOCKER_COMMAND: "docker run --rm -i --network host gateway:latest --config-stdin",
+          [expression]: "private-title-${GITHUB_TOKEN}",
+          GITHUB_TOKEN: "dummy-private-credential",
+        },
+        umask: vi.fn(),
+        on: vi.fn(),
+      },
+      core,
+    });
+    expect(core.setFailed).toHaveBeenCalledExactlyOnceWith("ERR_CONFIG: Failed to resolve MCP configuration expressions: ERR_CONFIG: Transported MCP configuration data must not contain gateway environment references");
+    expect(spawn).not.toHaveBeenCalled();
+    expect(writeMcpConfiguration).not.toHaveBeenCalled();
+    const diagnostics = JSON.stringify([core.info.mock.calls, core.warning.mock.calls, core.error.mock.calls, core.setFailed.mock.calls]);
+    expect(diagnostics).not.toContain("private-title");
+    expect(diagnostics).not.toContain("GITHUB_TOKEN");
+    expect(diagnostics).not.toContain("dummy-private-credential");
+  });
+});
+
+describe.each(["agenticworkflows", "safeoutputs"])("%s backend ownership", name => {
   it.each(["localhost/gh-aw:dev", "alpine:3.24"])("uses the runner identity without widening private artifact modes (%s)", container => {
     const env = { GITHUB_TOKEN: "${GITHUB_TOKEN}", GITHUB_ACTOR: "${GITHUB_ACTOR}" };
     const backend = { container, args: ["--network", "host", "-w", "/workspace"], env };
     const other = { container: "example/server", args: [] };
-    const config = { mcpServers: { agenticworkflows: backend, other } };
-    applyAgenticWorkflowsRunnerIdentity(config, 1001, 123);
+    const config = { mcpServers: { [name]: backend, other } };
+    applyBuiltinMCPRunnerIdentity(config, 1001, 123);
     expect(backend.args).toEqual(["--network", "host", "-w", "/workspace", "--user", "1001:123"]);
     expect(backend.env).toEqual({ HOME: "/tmp", ...env });
     expect(other).toEqual({ container: "example/server", args: [] });
-    applyAgenticWorkflowsRunnerIdentity(config, 1001, 123);
+    applyBuiltinMCPRunnerIdentity(config, 1001, 123);
     expect(backend.args.filter(arg => arg === "--user")).toHaveLength(1);
   });
 
@@ -234,8 +366,8 @@ describe("agenticworkflows backend ownership", () => {
     (...args) => {
       const backend = { container: "example/server", args, env: { HOME: "/custom" } };
       const original = structuredClone(backend);
-      applyAgenticWorkflowsRunnerIdentity({ mcpServers: { agenticworkflows: backend } }, 1001, 123);
-      applyAgenticWorkflowsRunnerIdentity({ mcpServers: { agenticworkflows: backend } }, 1001, 123);
+      applyBuiltinMCPRunnerIdentity({ mcpServers: { [name]: backend } }, 1001, 123);
+      applyBuiltinMCPRunnerIdentity({ mcpServers: { [name]: backend } }, 1001, 123);
       expect(backend).toEqual(original);
     }
   );
@@ -243,25 +375,25 @@ describe("agenticworkflows backend ownership", () => {
   it.each(["-update", "-unshare"])("preserves %s as Docker's attached -u username, not an unrelated flag", arg => {
     const backend = { container: "example/server", args: [arg], env: { HOME: "/custom" } };
     const original = structuredClone(backend);
-    applyAgenticWorkflowsRunnerIdentity({ mcpServers: { agenticworkflows: backend } }, 1001, 123);
+    applyBuiltinMCPRunnerIdentity({ mcpServers: { [name]: backend } }, 1001, 123);
     expect(backend).toEqual(original);
   });
 
   it("does not confuse --userns with an explicit container user", () => {
     const backend = { container: "example/server", args: ["--userns=host"], env: { HOME: "/custom" } };
-    applyAgenticWorkflowsRunnerIdentity({ mcpServers: { agenticworkflows: backend } }, 1001, 123);
+    applyBuiltinMCPRunnerIdentity({ mcpServers: { [name]: backend } }, 1001, 123);
     expect(backend).toEqual({ container: "example/server", args: ["--userns=host", "--user", "1001:123"], env: { HOME: "/custom" } });
   });
 
   it("preserves a configured HOME and supports default container arguments", () => {
     const backend = { container: "alpine:3.24", env: { HOME: "/custom" } };
-    applyAgenticWorkflowsRunnerIdentity({ mcpServers: { agenticworkflows: backend } }, 1001, 123);
+    applyBuiltinMCPRunnerIdentity({ mcpServers: { [name]: backend } }, 1001, 123);
     expect(backend).toEqual({ container: "alpine:3.24", args: ["--user", "1001:123"], env: { HOME: "/custom" } });
   });
 
-  it.each([{}, { mcpServers: {} }, { mcpServers: { agenticworkflows: { url: "https://example.com/mcp" } } }])("leaves absent and HTTP backends unchanged", config => {
+  it.each([{}, { mcpServers: {} }, { mcpServers: { [name]: { url: "https://example.com/mcp" } } }])("leaves absent and HTTP backends unchanged", config => {
     const original = structuredClone(config);
-    applyAgenticWorkflowsRunnerIdentity(config, 1001, 123);
+    applyBuiltinMCPRunnerIdentity(config, 1001, 123);
     expect(config).toEqual(original);
   });
 
@@ -273,17 +405,110 @@ describe("agenticworkflows backend ownership", () => {
     [1.5, 123],
   ])("rejects invalid runner identities (%s, %s)", (uid, gid) => {
     const backend = { container: "alpine:3.24" };
-    expect(() => applyAgenticWorkflowsRunnerIdentity({ mcpServers: { agenticworkflows: backend } }, uid, gid)).toThrow("Runner identity is required");
+    expect(() => applyBuiltinMCPRunnerIdentity({ mcpServers: { [name]: backend } }, uid, gid)).toThrow("Runner identity is required");
     expect(backend).toEqual({ container: "alpine:3.24" });
   });
 
   it.each([{ args: "invalid" }, { args: [42] }, { env: [] }, { env: null }])("rejects malformed backend configuration without publishing it", fields => {
-    expect(() => applyAgenticWorkflowsRunnerIdentity({ mcpServers: { agenticworkflows: { container: "alpine:3.24", ...fields } } }, 1001, 123)).toThrow(/Invalid agenticworkflows container/);
+    expect(() => applyBuiltinMCPRunnerIdentity({ mcpServers: { [name]: { container: "alpine:3.24", ...fields } } }, 1001, 123)).toThrow(`Invalid ${name} container`);
   });
 
   it("applies identity before serializing the configuration sent to the gateway", () => {
     const source = fs.readFileSync(new URL("./start_mcp_gateway.cjs", import.meta.url), "utf8");
-    expect(source.indexOf("applyAgenticWorkflowsRunnerIdentity(configObj)")).toBeLessThan(source.indexOf("mcpConfig = JSON.stringify(configObj)"));
+    const identityIndex = source.indexOf("applyBuiltinMCPRunnerIdentity(configObj)");
+    expect(identityIndex).toBeGreaterThan(-1);
+    expect(identityIndex).toBeLessThan(source.indexOf("mcpConfig = JSON.stringify(configObj)"));
+  });
+});
+
+describe("safeoutputs asset ownership", () => {
+  it("publishes the runner identity and writable HOME before launching the gateway", async () => {
+    const require = createRequire(import.meta.url);
+    const core = { info: vi.fn(), warning: vi.fn(), error: vi.fn(), setFailed: vi.fn() };
+    const spawn = vi.fn();
+    const writeMcpConfiguration = vi.fn(() => {
+      throw new Error("stop before gateway launch");
+    });
+    const config = {
+      gateway: { port: 8080, domain: "localhost", agentId: "test-agent" },
+      mcpServers: {
+        safeoutputs: { container: "ghcr.io/github/gh-aw-node@sha256:test", args: ["-w", "${GITHUB_WORKSPACE}"], env: { RUNNER_TEMP: "${RUNNER_TEMP}" } },
+      },
+    };
+    const mocks = {
+      fs: {
+        readFileSync: vi.fn(() => Buffer.from(JSON.stringify(config))),
+        mkdirSync: vi.fn(),
+        chmodSync: vi.fn(),
+      },
+      child_process: { spawn, execSync: vi.fn() },
+      "./shim.cjs": {},
+      "./symlink_guard.cjs": { lstatGuard: vi.fn(() => ({})) },
+      "./mcp_configuration.cjs": { writeMcpConfiguration },
+    };
+    const source = fs.readFileSync(new URL("./start_mcp_gateway.cjs", import.meta.url), "utf8");
+    await vm.runInNewContext(`${source}\nmain().catch(err => core.setFailed(err.message));`, {
+      require: id => mocks[id] || require(id),
+      module: { exports: {} },
+      process: {
+        env: {
+          RUNNER_TEMP: "/tmp/test-runner",
+          GITHUB_WORKSPACE: "/workspace",
+          MCP_GATEWAY_DOCKER_COMMAND: "docker run --rm -i --network host gateway:latest --config-stdin",
+        },
+        getuid: () => 1001,
+        getgid: () => 123,
+        umask: vi.fn(),
+        on: vi.fn(),
+      },
+      core,
+    });
+    expect(writeMcpConfiguration).toHaveBeenCalledOnce();
+    expect(writeMcpConfiguration.mock.calls[0][1].mcpServers.safeoutputs).toMatchObject({
+      args: ["-w", "${GITHUB_WORKSPACE}", "--user", "1001:123"],
+      env: { HOME: "/tmp", RUNNER_TEMP: "${RUNNER_TEMP}" },
+    });
+    expect(core.setFailed).toHaveBeenCalledExactlyOnceWith("stop before gateway launch");
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("applies the policy to both built-ins even when one has an explicit user", () => {
+    const agenticworkflows = { container: "alpine:3.24", args: ["--user", "42:43"] };
+    const safeoutputs = { container: "ghcr.io/github/gh-aw-node@sha256:test", args: ["-w", "/workspace"] };
+    applyBuiltinMCPRunnerIdentity({ mcpServers: { agenticworkflows, safeoutputs } }, 1001, 123);
+    expect(agenticworkflows.args).toEqual(["--user", "42:43"]);
+    expect(safeoutputs.args).toEqual(["-w", "/workspace", "--user", "1001:123"]);
+    expect(safeoutputs.env).toEqual({ HOME: "/tmp" });
+  });
+
+  it.skipIf(process.platform !== "linux")("keeps guarded assets and private Claim directories readable by the host uploader", () => {
+    const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "safeoutputs-ownership-")));
+    try {
+      const backend = { container: "ghcr.io/github/gh-aw-node@sha256:test" };
+      applyBuiltinMCPRunnerIdentity({ mcpServers: { safeoutputs: backend } });
+      expect(backend.args).toEqual(["--user", `${process.getuid()}:${process.getgid()}`]);
+      const [uid, gid] = backend.args[1].split(":").map(Number);
+      const files = [path.join(directory, "assets", "chart.png"), path.join(directory, "assets", "claims", "claim-1", "chart.png")];
+      const guard = path.join(import.meta.dirname, "symlink_guard.cjs");
+      execFileSync(process.execPath, ["-e", 'const { writeGuardedFile } = require(process.argv[1]); for (const file of process.argv.slice(2)) writeGuardedFile(file, Buffer.from("chart"));', guard, ...files], {
+        uid,
+        gid,
+        env: backend.env,
+        timeout: 10000,
+      });
+      for (const file of files) {
+        expect(fs.statSync(file).uid).toBe(process.getuid());
+        expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+        expect(fs.statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
+      }
+      const uploaded = execFileSync(process.execPath, ["-e", 'const fs = require("fs"); for (const file of process.argv.slice(1)) process.stdout.write(fs.readFileSync(file));', ...files], {
+        timeout: 10000,
+        encoding: "utf8",
+      });
+      expect(uploaded).toBe("chartchart");
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 
@@ -335,12 +560,12 @@ describe("start_mcp_gateway logging", () => {
 
   it.each([false, true])("times health and safe-output readiness separately when readiness fails: %s", async fails => {
     const source = fs.readFileSync(new URL("./start_mcp_gateway.cjs", import.meta.url), "utf8");
-    const start = source.indexOf("  if (succeeded) {");
-    const end = source.indexOf("\n  } else {", start);
+    const start = source.indexOf("    if (succeeded) {");
+    const end = source.indexOf("\n    } else {", start);
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
     const runSuccessBlock = new AsyncFunction(
       "{ nowMs, printTiming, waitForSafeOutputsReadiness, core, writeGatewayStartupMarker }",
-      `const succeeded = true, healthCheckStart = 10, gatewayStartTime = 0;
+      `const succeeded = true, healthCheckStart = 10, gatewayStartupStartedAt = 0;
        const configObj = {}, gatewayPort = 8080, agentId = "test", healthRetryConfig = {}, gatewayStartupMarker = "marker";
        ${source.slice(start, end)}
        }`
@@ -361,7 +586,8 @@ describe("start_mcp_gateway logging", () => {
       writeGatewayStartupMarker: marker,
     });
     if (fails) {
-      await expect(result).rejects.toBe(failure);
+      const rejection = expect(result).rejects.toBe(failure);
+      await rejection;
       expect(marker).not.toHaveBeenCalled();
     } else {
       await result;
@@ -708,7 +934,9 @@ describe("start_mcp_gateway startup diagnostics", () => {
       [undefined, "readiness-test-key", "a numeric MCP_GATEWAY_PORT"],
       ["1234", undefined, "MCP_GATEWAY_AGENT_ID"],
     ])("requires safe-output gateway configuration with a stable error code", async (port, agentId, message) => {
-      await expect(waitForSafeOutputsReadiness(config, port, agentId, retryConfig)).rejects.toThrow(`ERR_SAFE_OUTPUTS_GATEWAY_CONFIG: MCP gateway safeoutputs readiness requires ${message}`);
+      const start = vi.fn(() => waitForSafeOutputsReadiness(config, port, agentId, retryConfig));
+      await expect(startGatewayWithRetry(start)).rejects.toThrow(`ERR_SAFE_OUTPUTS_GATEWAY_CONFIG: MCP gateway safeoutputs readiness requires ${message}`);
+      expect(start).toHaveBeenCalledOnce();
     });
 
     it.each(["safeoutputs", "safe-outputs"])("probes the exact configured %s backend endpoint", async serverName => {
@@ -752,12 +980,15 @@ describe("start_mcp_gateway startup diagnostics", () => {
     it("fails immediately without accepting tools after an authentication failure", async () => {
       const port = await startBackend(() => [{ name: "noop" }], { initStatus: 401 });
 
-      const error = await waitForSafeOutputsReadiness(config, port, "readiness-test-key", retryConfig).catch(err => err);
+      const start = vi.fn(() => waitForSafeOutputsReadiness(config, port, "readiness-test-key", retryConfig));
+      const error = await startGatewayWithRetry(start).catch(err => err);
       expect(error.message).toContain("permanent authentication or MCP protocol failure");
       expect(error.message).toContain("Last probe: initialize failed (HTTP 401).");
       expect(error.cause).toBeInstanceOf(Error);
+      expect(error.nonRetryable).toBe(true);
       expect(error.stack).not.toContain("readiness-test-key");
 
+      expect(start).toHaveBeenCalledOnce();
       expect(requests).toEqual(["initialize"]);
       expect(JSON.stringify(global.core.warning.mock.calls)).not.toContain("readiness-test-key");
     });
@@ -765,12 +996,15 @@ describe("start_mcp_gateway startup diagnostics", () => {
     it.each(['{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"readiness-test-key"}}', "malformed readiness-test-key"])("fails immediately on permanent tools/list protocol failures", async listResponse => {
       const port = await startBackend(() => [], { listResponse });
 
-      const error = await waitForSafeOutputsReadiness(config, port, "readiness-test-key", retryConfig).catch(err => err);
+      const start = vi.fn(() => waitForSafeOutputsReadiness(config, port, "readiness-test-key", retryConfig));
+      const error = await startGatewayWithRetry(start).catch(err => err);
       expect(error.message).toContain("permanent authentication or MCP protocol failure");
       expect(error.message).toContain("Last probe: tools/list failed (HTTP 200).");
       expect(error.cause).toBeInstanceOf(Error);
+      expect(error.nonRetryable).toBe(true);
       expect(error.stack).not.toContain("readiness-test-key");
 
+      expect(start).toHaveBeenCalledOnce();
       expect(requests.filter(method => method === "initialize")).toHaveLength(1);
       expect(JSON.stringify(global.core.warning.mock.calls)).not.toContain("readiness-test-key");
     });
@@ -893,7 +1127,7 @@ describe("start_mcp_gateway startup diagnostics", () => {
 
     it("gates startup completion and outputs on safeoutputs readiness", () => {
       const source = fs.readFileSync(new URL("./start_mcp_gateway.cjs", import.meta.url), "utf8");
-      const gate = source.indexOf("await waitForSafeOutputsReadiness(configObj, gatewayPort, agentId, healthRetryConfig, gatewayStartTime)");
+      const gate = source.indexOf("await waitForSafeOutputsReadiness(configObj, gatewayPort, agentId, healthRetryConfig, gatewayStartupStartedAt)");
       expect(gate).toBeGreaterThan(0);
       expect(gate).toBeLessThan(source.indexOf("writeGatewayStartupMarker(gatewayStartupMarker)"));
       expect(gate).toBeLessThan(source.indexOf("fs.appendFileSync(githubOutput, outputs"));
@@ -902,7 +1136,7 @@ describe("start_mcp_gateway startup diagnostics", () => {
       expect(source).toContain("core.setFailed(/^ERR_[A-Z]+:/.test(text) ? text : `${ERR_SYSTEM}: ${text}`)");
       expect(source).toContain("setFailed(getErrorMessage(err));");
       expect(source).toContain("setFailed(message);");
-      expect(source).toContain("const startupDeadline = gatewayStartTime + healthRetryConfig.backendStartupTimeoutMs + MCP_GATEWAY_HEALTH_REGISTRATION_MARGIN_MS");
+      expect(source).toContain("const startupDeadline = gatewayStartupStartedAt + healthRetryConfig.backendStartupTimeoutMs + MCP_GATEWAY_HEALTH_REGISTRATION_MARGIN_MS");
       expect(source).toContain("httpGet(healthUrl, Math.min(2000, remainingMs))");
     });
   });

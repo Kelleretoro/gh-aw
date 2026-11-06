@@ -7,11 +7,68 @@ sidebar:
 
 The `checkout:` frontmatter field controls how `actions/checkout` is invoked in the agent job. Configure custom checkout settings, check out multiple repositories, or disable checkout entirely.
 
-By default, the agent checks out the repository where the workflow is running with a shallow fetch (`fetch-depth: 1`). If triggered by a `pull_request` event, it also checks out the PR head ref. For `pull_request_target` events, checkout of the PR head branch is **disabled by default** — the head branch may be deleted (merged/closed PRs) or inaccessible (fork PRs), causing the step to hard-fail. For most workflows, this default checkout is sufficient and no `checkout:` configuration is necessary.
+By default, the agent checks out the repository where the workflow is running with a shallow fetch (`fetch-depth: 1`). If triggered by a `pull_request` event, it also checks out the PR's selected immutable commit, as described in [PR Revision Binding](#pr-revision-binding). For `pull_request_target` events, automatic PR checkout is **disabled by default**; `pull-request-floating-head` does not enable it. For most workflows, this default checkout is sufficient and no `checkout:` configuration is necessary.
 
 Before the agent job, activation separately checks out workflow configuration to load runtime imports and skills. On `pull_request`, `pull_request_review`, and `pull_request_review_comment` events, this sparse checkout uses the PR **base SHA**, not the PR head; on other events it retains the normal activation ref. For reusable `workflow_call` workflows, it uses the resolved callee SHA when there is no active PR event, and skips cross-repository checkout if authentication may fall back to the caller's repository-scoped `GITHUB_TOKEN`. The `checkout:` options below describe the agent job and do not override this activation checkout.
 
 Use `checkout:` when you need to check out additional branches, check out multiple repositories, or to disable checkout entirely for workflows that don't need to access code or can access code dynamically through the GitHub Tools.
+
+## Checkout and Host Step Order
+
+The relevant agent-job order is:
+
+1. Repository checkout, using `checkout.ref` when configured.
+2. Imported `steps:` (including shared toolchain setup).
+3. The workflow's own `steps:`.
+4. Automatic "Checkout PR branch", when enabled for the event.
+5. `pre-agent-steps:`.
+6. The sandboxed engine.
+
+> [!WARNING]
+> Imported, workflow-owned, and pre-agent steps execute on the host, outside the sandbox. Setting `checkout.ref` to an untrusted branch can make those steps execute branch-controlled code with the job's available credentials. The compiler warns when a ref expression uses `needs.*`, `github.event.*`, `inputs.*`, `github.head_ref`, `github.base_ref`, `github.ref`, or `github.ref_name` while `steps:` or `pre-agent-steps:` are present. It exempts the exact default-branch expression for the current repository and the supported pull-request base SHA/ref expressions for that repository. Unparseable expressions are treated conservatively. Warnings identify the checkout entry and ref; no warning establishes that a ref is trusted.
+
+Keep the agent workspace on a trusted ref and, when needed, fetch untrusted refs only to inspect their contents as data. Do not switch the host workspace to an untrusted branch or run its scripts: a manual checkout can execute Git hooks and can expose branch-controlled agent configuration. For PR-head work, use compiler-managed automatic PR checkout so the trusted agent configuration is restored; disabling that checkout also disables its paired configuration restore.
+
+## PR Revision Binding
+
+By default, the compiler-generated "Checkout PR branch" step fetches a specific commit SHA from the current repository's `origin`, then verifies the checked-out `HEAD` before reporting success or recording a patch baseline. It does not resolve a moving `refs/pull/N/head` during fetch.
+
+| Trigger | Selected revision by default | Head movement |
+|---------|------------------------------|---------------|
+| `pull_request`, except `labeled` and `unlabeled` | Event-recorded PR head SHA | Retains the event revision, even if the branch moves or is deleted. |
+| `pull_request` label events | Event-recorded PR head SHA | Must match the live head before and after fetch. |
+| `pull_request_review` / `pull_request_review_comment` | Review or review-comment `commit_id` | Must match the live head before and after fetch. |
+| Revision-bound `workflow_dispatch` | Supplied `aw_context.pr_head_sha` | Must match the live head before and after fetch. |
+| `issue_comment`, routed comment commands, or manual PR dispatch without revision evidence | Current API head SHA | Pins the selected head and rejects a detected change during fetch; does not establish revision approval. |
+
+These rules apply only when the compiler generates automatic PR checkout. The [floating-head opt-in](#allow-floating-head) replaces event/review revision selection with current-head selection.
+
+Centralized command/label dispatch propagates event-recorded revision evidence in `aw_context.pr_head_sha`. A revision-bound dispatch must provide a full 40-character commit SHA matching the current PR head. Missing required evidence, malformed PR context, API failures, and detected head changes stop checkout rather than continuing on the previous workspace.
+
+Issue comments contain no historical PR head SHA. Comment commands therefore authorize **current-head execution**, not approval of a particular revision. They require valid comment creation/edit and PR update timestamps and warn when the PR was updated after the triggering comment; the resolved head is pinned and checked again after fetch. Timestamps cannot prove which revision was reviewed: unrelated activity, including the router's status comment, also updates the PR. Manual PR dispatch without command/label markers or a supplied revision also selects the current head; it is not revision approval. Workflows requiring revision approval should use a revision-bearing PR/review event or disable automatic PR checkout with `checkout: { pull-request: false }`. A comment command alone is not suitable for approving privileged execution of PR code.
+
+These checks preserve the existing actor permission floor and same-repository bot restrictions. A matching SHA proves commit identity, not that PR code is safe to execute with credentials. Fetching still requires credentials available to the checkout step; the helper does not persist credentials, widen sparse paths, or unshallow a repository.
+
+After successful checkout, the unified session records a `workflow.pr_checkout_revision` event from `runtime/pr-checkout` with `prNumber` and the full, lowercase `selectedSha`. This records commit identity without adding repository content or credentials; checkout log messages use 12-character SHA prefixes.
+
+> [!NOTE]
+> Immutable checkout requires the current repository's `origin` to serve the selected commit by SHA, including reachable unadvertised commits, fork PR commits, and retained commits after branch deletion. Support depends on the Git server's commit availability and upload-pack SHA fetch policy; local tests do not establish compatibility with every GitHub.com or GitHub Enterprise Server configuration. If the server cannot serve that commit, checkout fails with diagnostic guidance rather than falling back to a moving PR ref.
+
+### Allow Floating Head
+
+To select the current PR head at execution time instead of the triggering event or review revision, explicitly opt in:
+
+```aw wrap
+checkout:
+  pull-request-floating-head: true
+```
+
+The default is `false`. The value must be a literal boolean; strings such as `"true"` and expressions are rejected. With `true`, checkout ignores event/review SHA and comment freshness evidence, resolves the current head through the PR API, and uses the current commit count for fetch depth. It still fetches that specific SHA, rechecks the head after fetch, and verifies actual `HEAD`. A head change during fetch fails; this option does not restore mutable-ref fetching or bypass the server's SHA-fetch requirements.
+
+> [!WARNING]
+> Floating-head checkout can execute commits pushed after a label, review, or command. It authorizes current-head execution, not approval of those commits. Do not enable it when the triggering event is intended to approve privileged execution of a specific revision.
+
+Actor permissions, fork/bot restrictions, dispatch repository/shape validation, and safe-output lifecycle checks remain enforced. The setting applies workflow-wide when any entry in a `checkout:` list enables it; it does not enable checkout when `checkout: false`, `pull-request: false`, or the compiler's PR-target policy suppresses the PR checkout step. Recompile the workflow with the updated compiler/runtime to apply the setting.
 
 ## Custom Checkout Settings
 
@@ -48,6 +105,8 @@ checkout:
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `pull-request` | boolean | Set `false` to disable automatic PR checkout and its paired base-config snapshot/restore steps. The normal repository checkout remains enabled. |
+| `pull-request-floating-head` | boolean | Select the current API head instead of event/review revision evidence. Defaults to `false`; literal boolean only. Applies workflow-wide if any checkout entry enables it. See [Allow Floating Head](#allow-floating-head). |
 | `repository` | string | Explicit repository in `owner/repo` format, or a newline-separated list with `multi: true`. Without `multi`, expressions must resolve to exactly one repository and need no allowlist. Does not support wildcards. Defaults to the current repository. |
 | `repo` | string | Alias for `repository`; specify only one. Does not support wildcards. |
 | `multi` | boolean | Explicitly enables runtime repository-list expansion and its restrictions. Defaults to `false`; must be a literal boolean. |
@@ -180,18 +239,21 @@ This is equivalent to omitting the checkout step from the agent job. Custom dev-
 
 ## PR Head Checkout and Branch Deletion
 
-PR head checkout fetches the repository's retained `refs/pull/<number>/head`
-ref, including for same-repository PRs. A queued review can therefore check out
-the PR head even if the PR merges and its source branch is deleted before the
-agent starts. The local branch keeps the PR's source branch name; checkout does
-not recreate the remote branch or fall back to the base branch.
+PR head checkout fetches the immutable commit selected by the
+[revision-binding rules](#pr-revision-binding), including for same-repository
+PRs. Source-branch deletion does not change the selected revision, but checkout
+still requires that commit to be available from `origin`. A queued review
+rejects a detected head change instead of checking out a later revision.
+The local branch keeps the PR's source branch name; checkout does not recreate
+the remote branch or fall back to the base branch.
 
 A failed PR checkout stops the agent job; it never continues on the previous
-base checkout. If an originally open PR closes and its remote ref disappears
-during checkout, the run records lifecycle invalidation separately from ordinary
-checkout errors. Authentication, permission, network, and unknown errors remain
-failures. Workflows triggered on an already closed or merged PR use the retained
-PR head ref and still require a successful checkout.
+base checkout. If an originally open PR closes and fetching the selected commit
+fails with a missing-ref or `upload-pack: not our ref <sha>` error, a live closure check records lifecycle invalidation
+separately from ordinary checkout errors. Authentication, permission, network,
+unknown errors, and unavailable state evidence remain failures. Workflows triggered
+on an already closed or merged PR still require a successful checkout of the
+selected commit.
 
 For work triggered while a PR was open, the safe-output manager checks live PR
 state before each handler, deferred retry, and buffered review submission. If the
@@ -200,6 +262,13 @@ workflows and staged previews are preserved. Configured safe-output tokens need
 read access to the triggering PR; a failed state lookup is an error, not proof of
 closure. PR-branch pushes also refuse to recreate deleted target branches.
 These checks cannot make a PR-state lookup and a later GitHub write atomic.
+
+For body-only review loops, a bot explicitly listed in `on.bots` can trigger PR
+checkout through `pull_request: edited` without pushing a commit. The event sender
+must be a Bot whose login matches the triggering actor, and the runtime, PR head,
+and PR base repository IDs must match. Unlisted bots and fork PRs still require
+write-or-higher collaborator permission. Filter body edits with an `if:` condition
+on `github.event.changes.body` to avoid re-reviewing unrelated edits.
 
 ## Disabling the PR Branch Checkout
 
@@ -230,6 +299,124 @@ checkout:
 
 This differs from `checkout: false`, which disables checkout entirely (including any additional configured repositories). With `permissions.contents: none`, only the workflow's own repository is skipped.
 
+Safe-output patch and bundle generation is **local-only**. It never fetches
+missing refs or objects from the agent-writable checkout, even when safe-output
+API credentials are configured. All Git transports, including external remote
+helpers and partial-clone lazy fetches, are disabled during artifact generation.
+Repository-configured external diffs, text conversion, hooks, fsmonitor, and
+signing are also disabled. Filtered artifacts are synthesized from committed
+objects with index-only plumbing, without checkout or clean/smudge filters.
+Raw repo-memory staging pins parent-directory descriptors before reading files;
+it requires Linux descriptor-relative paths and fails closed on other platforms.
+Prepare the required refs with `checkout.fetch` and sufficient history with
+`checkout.fetch-depth` before agent execution; partial clones must also have the
+required blobs locally. Incremental updates require the pre-agent PR-head baseline
+recorded by the PR checkout step or an existing `origin/<branch>` tracking ref.
+Missing baselines are reported rather than replaced with a broader diff.
+Full-mode generation can use the local base branch when its `origin` tracking
+ref is absent, including cross-repository checkouts. Filtered bundles preserve
+the checkout's shallow boundaries; deeper history is only needed when the
+required baseline cannot be resolved locally. Failure messages retain fixed
+checkout and workflow-compilation guidance without exposing raw Git stderr,
+checkout paths, or caller-supplied ref names.
+
+When local generation cannot resolve required refs or objects, non-staged PR
+outputs can instead return `result: "queued"` with `recovery: "object-pack"`.
+This is not publication success. The agent packages available local objects
+without fetching; the trusted safe-outputs job fetches the authorized baseline
+into a new isolated bare repository, validates the objects, and regenerates the
+patch and bundle before applying the existing file, size, and publication policies.
+Agent repository configuration, remotes, hooks, and alternates are never copied.
+
+The fallback selects objects reachable from the pinned tip, using available
+local baseline refs as exclusion hints. It omits unrelated branches, tags,
+unreachable history, and objects already reachable from those hints. Hints
+reduce transfer size but never authorize a publisher baseline or a remote
+request. The default 100,000-object and 64 MiB uncompressed limits apply to the selected
+objects, not the entire monorepo. The existing patch artifact previews every
+packed object. Recovery rejects redacted or mismatched previews.
+After redaction and before upload, the artifact guard also blocks recovery
+envelopes whose paired previews changed or disappeared. Publisher rejection
+alone cannot protect bytes already available in a downloadable artifact.
+
+By default, the trusted publisher starts with a depth-one, treeless fetch of the authorized
+baseline. If required commit ancestry is absent, it increases depth geometrically
+through 16, 64, 256, 1,024, 4,096, 16,384, and at most 65,536 commits, keeping the
+first resolved revision pinned. Only the required trusted baseline/boundary tree
+snapshots are then fetched without blobs, rather than downloading every
+intermediate monorepo tree. It compares trees before importing agent objects
+and fetches only required old/new blobs whose identities were independently read
+from trusted fetched trees. Unchanged large files are not hydrated; missing
+agent-created bytes are rejected rather than requested from upload hints.
+Servers without filtering support fail explicitly instead of retrying an
+unfiltered clone. Authentication and other fetch failures are not retried.
+
+All fetching finishes before agent objects are imported. By default, requests have a
+60-second command deadline and share a 180-second network-operation deadline.
+Tree inspection is limited to one million entries, required baseline blob
+hydration to 64 MiB, and the uploaded pack/import to 80 MiB. Hydration size is
+checked after transfer; these limits are not a downloaded-byte budget.
+
+#### Repository-configured recovery limits
+
+GitHub Actions repository configuration variables (`Settings > Secrets and
+variables > Actions > Variables`) configure the following budgets without
+changing workflow frontmatter. The compiler binds them explicitly into the agent
+runtime, nested safe-outputs MCP container, upload-validation steps, and trusted
+publisher. Upload validation and publishing independently use repository values;
+uploaded metadata and agent-written environment files cannot override their limits.
+Existing compiled workflows require recompilation with the matching setup runtime.
+
+| Repository variable | Default | Controls |
+|---|---:|---|
+| `GH_AW_OBJECT_PACK_MAX_BYTES` | `67108864` | Uncompressed objects, hydration, and derived pack/preview/header/output-buffer bounds |
+| `GH_AW_OBJECT_PACK_MAX_OBJECTS` | `100000` | Selected/parsed objects and derived tree/scan entry and fetch-batch budgets |
+| `GH_AW_OBJECT_PACK_TIMEOUT_MS` | `60000` | Each command and the derived shared network deadline |
+| `GH_AW_OBJECT_PACK_FETCH_DEPTHS` | `1,16,64,256,1024,4096,16384,65536` | Finite, strictly increasing history search depths |
+
+For byte budget `B`, pack/import and Git graph buffers are `ceil(5B/4)`, previews
+are `2B`, total envelope headers are `max(1, floor(B/16384))`, diagnostic buffers
+are `max(1, floor(B/64))`, and nested regeneration Git buffers are `ceil(25B/16)`.
+Uncompressed object and post-transfer hydration budgets are each `B`.
+For object budget `N`, tree and scan entry budgets are each `10N`, and fetch
+batches contain at most `max(1, ceil(256N/100000))` IDs. The shared network deadline
+is three times the command timeout. These ratios preserve all existing defaults:
+80 MiB packs, 128 MiB previews, 4 KiB headers, 1 MiB diagnostic buffers, 100 MiB
+nested Git buffers, one million tree/scan entries, 256-ID batches, and 180 seconds
+for network operations.
+
+Empty or unset variables retain defaults. Numeric settings accept positive decimal
+integers only; zero does not disable a limit. Depths accept a comma-separated
+strictly increasing list of positive integers. Invalid settings fail closed
+instead of being ignored or clamped. Node.js buffer/string and subprocess-timer
+capacities, Git's depth range, and the pack format's object-count range still apply.
+Configured budgets must also keep every derived buffer and timer representable.
+
+For example, `gh variable set GH_AW_OBJECT_PACK_MAX_BYTES --body 134217728`
+raises the byte budget to 128 MiB, packs to 160 MiB, and previews to 256 MiB.
+Larger budgets can increase
+runner memory, CPU, and network use; no setting relaxes repository authorization,
+preview validation, native object validation, or the fetch-before-import boundary.
+
+Incremental recovery requires the triggering PR's exact pre-agent head SHA and
+an authorized head repository; an uploaded baseline or a newer remote head cannot
+replace it. Dynamic PR updates without that trusted event baseline, staged
+outputs, larger selected changes, exhausted recovery budgets, and missing agent-created content still
+require checkout provisioning. Full recovery uses the authorized base branch and
+preserves the trusted dispatch-SHA baseline for same-repository feature runs.
+Publisher credentials must authorize the fetched repository independently of any
+credentials previously used by `actions/checkout`.
+
+Fallback issues keep the original object-pack uploads immutable. Their recovery
+commands require a clean, complete clone and reconstruct a binary patch from the
+publisher-resolved baseline and tip, retaining configured exclusions. Object-pack
+envelopes and previews cannot be applied directly with `git fetch` or `git am`.
+
+GitHub Actions debug logging includes `[object_pack_transport]` resolution
+stages, decision booleans, and object/byte counts. These traces omit repository
+identities, refs, commit IDs, filesystem paths, credentials, object contents, and
+raw subprocess diagnostics.
+
 ## `pull_request_target` Checkout
 
 For `pull_request_target` workflows, the "Checkout PR branch" step is auto-disabled when no `checkout:` key is present in frontmatter. This prevents hard failures when the PR head branch is deleted (merged/closed events) or inaccessible (fork PRs).
@@ -256,6 +443,7 @@ on:
   pull_request_target:
     types: [closed]
     branches: [main]
+    forks: ["dotnet/*"]
     acknowledge-risk: true
     allowed-checkouts:
       - repository: dotnet/AspNetCore.Docs
@@ -271,7 +459,7 @@ checkout:
 
 `on.pull_request_target.allowed-checkouts` defaults to no additional trusted checkouts. Each entry requires a literal `owner/repository` and a non-empty literal branch, tag, or commit SHA. Matching is exact and case-sensitive; repository/ref pairs cannot be combined across entries. Expressions, wildcards, and `refs/pull/...` refs are rejected in the policy. Every configured checkout must independently satisfy the policy or the existing base-checkout rules. Do not configure `checkout.fetch` for these checkouts: follow-up fetches can add refs beyond the trusted checkout, so they do not satisfy the policy. External repositories with omitted or PR-dependent refs remain rejected. Wiki checkouts are not covered by this allowlist.
 
-`on.pull_request_target.acknowledge-risk` defaults to `false`. Setting it to `true` suppresses **only** the strict-mode dangerous-trigger warning, including for `checkout: false` or a supported base checkout. It neither allows other checkouts nor disables unrelated warnings, strict validation, or safe-update checks. An allowlist without acknowledgment still emits the trigger warning.
+`on.pull_request_target.acknowledge-risk` defaults to `false`. Setting it to `true` suppresses **only** the strict-mode dangerous-trigger warning, including for `checkout: false` or a supported base checkout. It neither allows other checkouts nor bypasses [fork-pattern validation](/gh-aw/reference/triggers/#fork-filtering-forks), actor authorization, the unrestricted-forks warning, other strict validation, or safe-update checks. An allowlist without acknowledgment still emits the trigger warning.
 
 > [!CAUTION]
 > This policy records maintainer trust, not proof that checked-out code is safe. Prefer immutable commit SHAs; literal branches and tags can move. Keep workflow code and helpers on trusted base refs, read source PR changes as data, and never execute PR-controlled code with privileged credentials. Checkout authentication (`github-app` or `github-token`) and safe-output publication must still be configured separately. This example illustrates compilation policy, not runtime authentication or publication validation.
@@ -319,7 +507,7 @@ checkout:
 
 ## Cross-Organization safe_outputs Authentication (`safe-outputs-github-app`)
 
-By default, the safe_outputs job uses `GITHUB_TOKEN` to check out repositories — `safe-outputs.github-app` and `safe-outputs.github-token` are **not** used for checkout and only govern PR/push API operations. This design prevents cross-org token confusion when the safe-outputs app is scoped to a target organization that differs from the workflow repository's organization.
+By default, the safe_outputs job uses `GITHUB_TOKEN` to check out repositories. The only exception is the default workspace checkout when the global `safe-outputs.github-app` serves `create-pull-request` or `push-to-pull-request-branch` for the workflow repository (no `target-repo`/`head-repo`, no per-handler app or token): it persists the minted App token so pushes run as the App and trigger workflows. Additional checkouts, per-handler apps and cross-repository targets never inherit the global App token for checkout, which prevents cross-org token confusion when the app is scoped to a different organization.
 
 For workflows that target a different organization, use `safe-outputs-github-app` on the relevant checkout entry to supply a checkout token for the safe_outputs job:
 

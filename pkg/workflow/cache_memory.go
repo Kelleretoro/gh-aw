@@ -262,6 +262,8 @@ func generateCacheMemoryArtifactUpload(builder *strings.Builder, data *WorkflowD
 		builder.WriteString("        env:\n")
 		fmt.Fprintf(builder, "          GH_AW_CACHE_DIR: %s\n", cacheDir)
 		builder.WriteString("        run: bash \"${RUNNER_TEMP}/gh-aw/actions/check_cache_memory_git_integrity.sh\"\n")
+		recoveryStepID := "validate_recovery_cache_" + SanitizeWorkflowIDForCacheKey(cache.ID)
+		generateRecoveryEnvelopeValidationStep(builder, recoveryStepID, data, pinAction, cacheDir)
 
 		// Add upload-artifact step for each cache (runs always)
 		if useBackwardCompatiblePaths {
@@ -271,9 +273,9 @@ func generateCacheMemoryArtifactUpload(builder *strings.Builder, data *WorkflowD
 		}
 		fmt.Fprintf(builder, "        uses: %s\n", pinAction("actions/upload-artifact"))
 		if cacheHasValidationStep(cache) {
-			fmt.Fprintf(builder, "        if: always() && steps.%s.outcome == 'success'\n", cacheMemoryValidationStepID(cache.ID))
+			fmt.Fprintf(builder, "        if: always() && %s && steps.%s.outcome == 'success' && steps.%s.outcome == 'success'\n", secretRedactionSuccessCondition(data), recoveryStepID, cacheMemoryValidationStepID(cache.ID)) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 		} else {
-			builder.WriteString("        if: always()\n")
+			fmt.Fprintf(builder, "        if: always() && %s && steps.%s.outcome == 'success'\n", secretRedactionSuccessCondition(data), recoveryStepID) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 		}
 		builder.WriteString("        with:\n")
 		// Always use the new artifact name and path format, with prefix in workflow_call context
@@ -553,16 +555,16 @@ func (c *Compiler) buildUpdateCacheMemoryJob(data *WorkflowData, threatDetection
 	// Prepend setup steps to all cache steps
 	steps = append(setupSteps, steps...)
 
-	// Job condition: run only if detection job succeeded (no threats found),
-	// AND the agent job succeeded (do not persist cache when agent failed or was skipped).
-	// Using always() so this condition is evaluated even if an upstream job is skipped/failed.
-	// Detection always runs when the agent ran (even for noop), so detection.result == 'success'
-	// is sufficient — detection short-circuits with success=true when there is nothing to analyze.
+	// Warning mode can leave the detection job successful with a rejected verdict.
+	// Require its explicit acceptance as well as successful agent/job completion.
 	agentSucceeded := BuildEquals(
 		BuildPropertyAccess(fmt.Sprintf("needs.%s.result", constants.AgentJobName)),
 		BuildStringLiteral("success"),
 	)
-	jobCondition := RenderCondition(BuildAnd(BuildAnd(BuildFunctionCall("always"), buildDetectionSuccessCondition()), agentSucceeded))
+	jobCondition := RenderCondition(BuildAnd(
+		BuildAnd(BuildAnd(BuildFunctionCall("always"), buildDetectionAcceptedCondition()), agentSucceeded),
+		cacheWriteAllowedCondition(),
+	))
 
 	// Set up permissions for the cache update job.
 	// actions: write is required only when this job actually emits cache-save steps.
@@ -594,6 +596,10 @@ func (c *Compiler) buildUpdateCacheMemoryJob(data *WorkflowData, threatDetection
 		Needs:       []string{string(constants.AgentJobName), string(constants.DetectionJobName), string(constants.ActivationJobName)},
 		Env:         jobEnv,
 		Steps:       steps,
+	}
+	if !data.GHES && !data.DryRun {
+		// Only this detection-gated publisher may save; it never restores caches.
+		job.CacheMode = "write-only"
 	}
 
 	return job, nil

@@ -1,8 +1,9 @@
 # Security Architecture Specification Validation
 
 **Document**: Validation of `security-architecture-spec.md` against compiled `.lock.yml` files  
-**Date**: October 26, 2026<br>
+**Date**: November 3, 2026<br>
 **Last completed targeted formal revalidation**: v1.1.1 (RS-05a) / 2026-10-09
+**Current compiled-lock structure check**: 2026-11-03
 **Validator**: GitHub Copilot Agent  
 **Scope**: Cross-reference specification requirements with actual implementation
 
@@ -10,13 +11,15 @@
 
 ## Executive Summary
 
-⚠️ **VALIDATION STATUS**: The specification reflected the implementation at the time of full validation on 2026-07-15 and the last completed RS-05a targeted formal revalidation, v1.1.1 on 2026-10-09. The v1.1.2 review-checkout update and v1.1.3 and v1.1.5 branch-event updates have runtime evidence but have not received targeted formal revalidation (see §7b); v1.1.4 concerns transport security, not branch events. This document does not claim otherwise. These validations do not replace the full revalidation required by the policy in `security-architecture-spec.md` §11.
+The v1.1.8 floating-head opt-in adds current-head/non-approval selection with immutable fetch and actual-HEAD verification. Its parser/schema and compiler wiring tests are `TestCheckoutPullRequestFloatingHead`, `TestMainWorkflowSchema_PullRequestFloatingHead`, `TestPRCheckoutFloatingHeadEnvironment`, and `TestCompilePRFloatingHead`; the `explicit floating-head checkout` runtime suite covers moved heads, missing event evidence, fetch-time races, actual-HEAD mismatch, and retained authorization/context failures. This extension has not received targeted formal revalidation. The event-specific mappings below describe the default (`pull-request-floating-head: false`) policy.
 
-All major security architecture claims in the specification have been verified against actual workflow implementations:
+⚠️ **VALIDATION STATUS**: The last full validation was completed on 2026-07-15; the last targeted formal RS-05a revalidation remains v1.1.1 / 2026-10-09. On 2026-11-03, the ten-job structure was checked against `.github/workflows/security-review.lock.yml` (see §1). This targeted check is not a full revalidation. It confirms the job chain but also shows that write permissions are workflow-specific: `activation`, `safe_outputs`, `conclusion`, and `push_evals_state` have repository write scopes, while the `agent` job includes `copilot-requests: write`. The v1.1.2 review-checkout update, v1.1.3, v1.1.5, and v1.1.6 branch-event updates, and v1.1.7 immutable-revision update have runtime evidence but have not received targeted formal revalidation (see §7b); v1.1.4 concerns transport security, not branch events. These validations do not replace the full revalidation required by `security-architecture-spec.md` §11.
+
+The following claims were verified during the historical full validation; the current targeted pass refreshes the ten-job structure and selected SG/input-sanitization evidence. It does not complete a full revalidation or reverify PM-08:
 - ✅ Job architecture (activation, agent, safe_outputs)
 - ✅ **Input sanitization** (markdown safety, URL filtering, HTML tag filtering, ANSI removal)
-- ✅ Permission management (read-only agent jobs, write permissions in safe output jobs)
-- ✅ Fork protection (repository ID validation)
+- ✅ Permission management (historically verified; current job scopes are workflow-specific)
+- ⚠️ Fork protection (historically reported as verified; current lock check leaves PM-08 UNVERIFIED)
 - ✅ Role-based access control (pre_activation with membership checks)
 - ✅ PM-11 formal coverage (`TestFormalPM11_PreActivationContainsMembershipStep`)
 - ✅ Output isolation evidence for handler coverage, token precedence, and write-job separation
@@ -32,6 +35,25 @@ All major security architecture claims in the specification have been verified a
 
 ## Detailed Validation
 
+### Current Compiled Job Structure (2026-11-03)
+
+Evidence was checked in `.github/workflows/security-review.lock.yml`. The generated file declares ten top-level jobs; their YAML declaration order is not execution order.
+
+| Job | Current evidence | Observed structure and permissions |
+|---|---|---|
+| `pre_activation` | `security-review.lock.yml:2884-2949` | Checks command position and membership; grants `contents: read` and `pull-requests: read`. |
+| `admission` | `security-review.lock.yml:583-600` | Depends on `pre_activation`; grants `contents: read` and `id-token: write`. |
+| `activation` | `security-review.lock.yml:93-107`, `:298-310` | Depends on `admission` and `pre_activation` (its `if:` checks `needs.admission.result`); checks the lock timestamp. It also has `issues: write` and `pull-requests: write`. |
+| `agent` | `security-review.lock.yml:635-650` | Depends on `activation`; repository content and issue/PR permissions are read, with `copilot-requests: write`. |
+| `detection` | `security-review.lock.yml:2330-2350` | Depends on `activation` and `agent`; runs before safe outputs and has `contents: read`, `copilot-requests: write`. |
+| `evals` | `security-review.lock.yml:2708-2724` | Depends on `activation`, `agent`, and `detection`; grants `contents: read` and `copilot-requests: write`. |
+| `push_evals_state` | `security-review.lock.yml:2951-2960` | Depends on `activation` and `evals`; grants `contents: write`, a repository-content writer. |
+| `safe_outputs` | `security-review.lock.yml:3038-3051`, `:3142-3144` | Depends on `activation`, `agent`, and `detection`; processes outputs with `checks`, `issues`, and `pull-requests` write permissions. |
+| `conclusion` | `security-review.lock.yml:1862-1887` | Runs after the workflow jobs using `always()`; has `checks`, `issues`, and `pull-requests` write permissions for reporting/cleanup. |
+| `conclusion_admission` | `security-review.lock.yml:2279-2290` | Depends on `conclusion`; grants `contents: read` and `id-token: write`. |
+
+This evidence supersedes the former reference to the absent `security-guard.lock.yml` for job topology. It does not establish that all workflows use identical job permissions or that every security requirement in this report has been revalidated.
+
 ### 1. Job Architecture (Section 5.2 - OI-01)
 
 **Specification Claim**:
@@ -40,47 +62,9 @@ All major security architecture claims in the specification have been verified a
 > 2. **Agent Job**: Executes AI agent with read-only permissions
 > 3. **Safe Output Jobs**: Perform validated GitHub API operations with write permissions
 
-**Implementation Validation** (`security-guard.lock.yml`):
+**Implementation Validation** (`.github/workflows/security-review.lock.yml`, checked 2026-11-03): See the current ten-job evidence table above. Repository write permissions are not exclusive to `safe_outputs`: the representative workflow also grants write scopes to `activation`, `conclusion`, and `push_evals_state` (`contents: write`), and `id-token: write` to `admission` and `conclusion_admission`; the agent has `copilot-requests: write` but no repository-content write permission.
 
-```yaml
-jobs:
-  pre_activation:     # Role-based access control
-    runs-on: ubuntu-slim
-    permissions:
-      contents: read
-    
-  activation:         # ✅ Activation job
-    needs: pre_activation
-    runs-on: ubuntu-slim
-    permissions:
-      contents: read
-    
-  agent:              # ✅ Agent job with read-only permissions
-    needs: activation
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-      pull-requests: read
-      security-events: read
-    
-  detection:          # ✅ Threat detection layer
-    needs: agent
-    runs-on: ubuntu-slim
-    permissions: {}
-    
-  safe_outputs:       # ✅ Safe output job with write permissions
-    needs:
-      - agent
-      - detection
-    permissions:
-      contents: read
-      discussions: write
-      issues: write
-      pull-requests: write
-```
-
-**Status**: ✅ **VERIFIED** - All three job types present with correct permission separation.
+**Status**: ⚠️ **PARTIALLY VERIFIED** — The ten-job structure and representative permission scopes are current for this lock file only. Workflow-wide permission isolation remains subject to full revalidation.
 
 ---
 
@@ -162,33 +146,9 @@ sanitized = applyTruncation(content, maxLength);  // 0.5MB / 65k lines
 > **PM-01**: A conforming implementation MUST set read-only permissions as the default
 > **PM-02**: Unspecified permissions MUST default to `none`
 
-**Implementation Validation** (`security-guard.lock.yml`):
+**Implementation Validation** (`.github/workflows/security-review.lock.yml`, checked 2026-11-03): The workflow-level default is `permissions: {}`. The ten-job table in §1 records the job-level scopes. This representative workflow grants repository write scopes to `activation`, `safe_outputs`, `conclusion`, and `push_evals_state` (`contents: write`); the agent has `copilot-requests: write` but no repository-content write permission.
 
-```yaml
-# Top-level permissions (line 31)
-permissions: {}  # ✅ All permissions explicitly none at workflow level
-
-jobs:
-  activation:
-    permissions:
-      contents: read  # ✅ Read-only
-      
-  agent:
-    permissions:
-      actions: read          # ✅ Read-only
-      contents: read         # ✅ Read-only
-      pull-requests: read    # ✅ Read-only (NOT write)
-      security-events: read  # ✅ Read-only
-      
-  safe_outputs:
-    permissions:
-      contents: read           # ✅ Read access maintained
-      discussions: write       # ✅ Write only where needed
-      issues: write           # ✅ Write only where needed
-      pull-requests: write    # ✅ Write only where needed
-```
-
-**Status**: ✅ **VERIFIED** - Read-only permissions in agent jobs, write permissions isolated to safe_outputs.
+**Status**: ⚠️ **PARTIALLY VERIFIED** — The lock confirms default-deny permissions and distinguishes agent repository access from safe-output writes, but it does not support a blanket claim that all write permissions are isolated to `safe_outputs`.
 
 ---
 
@@ -199,27 +159,9 @@ jobs:
 > - Block forks by default
 > - Generate repository ID comparison: `github.event.pull_request.head.repo.id == github.repository_id`
 
-**Implementation Validation** (`security-guard.lock.yml`, lines 44, 1182):
+**Implementation Validation** (`.github/workflows/security-review.lock.yml`, checked 2026-11-03): The `head.repo.id == github.repository_id` comparison appears in step-level conditions at lines 252 and 326. These conditions do not establish a job-wide fork block for every trigger path.
 
-```yaml
-# In activation job condition (line 44)
-activation:
-  needs: pre_activation
-  if: >
-    (needs.pre_activation.outputs.activated == 'true') && 
-    (((github.event_name != 'pull_request') || (github.event.pull_request.draft == false)) &&
-    ((github.event_name != 'pull_request') || 
-     (github.event.pull_request.head.repo.id == github.repository_id)))  # ✅ Fork protection
-     
-# Also in pre_activation job (line 1180-1182)
-pre_activation:
-  if: >
-    ((github.event_name != 'pull_request') || (github.event.pull_request.draft == false)) &&
-    ((github.event_name != 'pull_request') ||
-    (github.event.pull_request.head.repo.id == github.repository_id))  # ✅ Fork protection
-```
-
-**Status**: ✅ **VERIFIED** - Repository ID comparison present in multiple job conditions.
+**Status**: ⚠️ **UNVERIFIED** — The current lock evidence is insufficient to verify the complete PM-08 claim. The evidence gap needs a dedicated PM-08 follow-up issue, to be created and linked here; [#74553](https://github.com/github/gh-aw/issues/74553) is the maintenance checklist, not the PM-08 tracker. Do not close the PM-08 tracker without revalidation. Do not rely on the former job-level assertion.
 
 ---
 
@@ -229,7 +171,7 @@ pre_activation:
 > **PM-10**: The implementation MUST support role-based execution restrictions
 > **PM-11**: Role checks MUST be performed at runtime using membership validation
 
-**Implementation Validation** (`security-guard.lock.yml`, lines 1199-1210):
+**Implementation Validation** (`.github/workflows/security-review.lock.yml`, lines 2884-2949; checked 2026-11-03):
 
 ```yaml
 pre_activation:
@@ -287,41 +229,9 @@ PM-11 (pre_activation membership validation) is now covered by a dedicated forma
 > **TD-01**: A conforming implementation with complete conformance MUST provide automated threat detection
 > **TD-04**: The implementation MUST detect: Prompt Injection, Secret Leaks, Malicious Patches
 
-**Implementation Validation** (`security-guard.lock.yml`, lines 1114-1176):
+**Implementation Validation** (`.github/workflows/security-review.lock.yml`, lines 2330-2350 and 3038-3045; checked 2026-11-03): `detection` depends on `activation` and `agent`; `safe_outputs` depends on `agent` and `detection` and requires the detection job to succeed.
 
-```yaml
-detection:  # ✅ Threat detection job
-  needs: agent
-  runs-on: ubuntu-slim
-  permissions: {}  # ✅ No permissions (analysis only)
-  timeout-minutes: 10
-  outputs:
-    success: ${{ steps.parse_results.outputs.success }}
-  steps:
-    - name: Setup threat detection workspace
-      # ... setup steps ...
-      
-    - name: Run threat detection analysis
-      run: |
-        copilot --add-dir /tmp/ --add-dir /tmp/gh-aw/ \
-          --disable-builtin-mcps \
-          --share /tmp/gh-aw/sandbox/agent/logs/conversation.md \
-          --prompt "$COPILOT_CLI_INSTRUCTION" \
-          2>&1 | tee /tmp/gh-aw/threat-detection/detection.log
-          
-    - name: Parse threat detection results  # ✅ Result validation
-      id: parse_results
-      uses: actions/github-script@...
-      
-safe_outputs:
-  needs:
-    - agent
-    - detection
-  if: ((!cancelled()) && (needs.agent.result != 'skipped')) && 
-      (needs.detection.outputs.success == 'true')  # ✅ Blocks if threats detected
-```
-
-**Status**: ✅ **VERIFIED** - Threat detection job executes between agent and safe_outputs, blocking execution if threats detected.
+**Status**: ✅ **VERIFIED** — The current lock confirms job placement and dependency gating. The detailed detection behavior remains covered by the implementation and test evidence cited below.
 
 ---
 
@@ -330,17 +240,9 @@ safe_outputs:
 **Specification Claim**:
 > **CS-10**: In strict mode, the implementation MUST enforce action pinning to commit SHAs
 
-**Implementation Validation** (multiple workflows):
+**Implementation Validation** (`.github/workflows/security-review.lock.yml`, checked 2026-11-03): Its manifest records eight external action repositories at commit SHAs; the 96 external `uses:` references in the generated file are SHA-pinned. Ten `./actions/setup` references are repository-local actions, not external references.
 
-```yaml
-# ✅ All actions pinned to SHA with version comments
-- uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-- uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-- uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-- uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
-```
-
-**Status**: ✅ **VERIFIED** - All actions use 40-character SHA commits with version comments.
+**Status**: ✅ **VERIFIED** — External actions in this representative lock are SHA-pinned.
 
 ---
 
@@ -350,24 +252,9 @@ safe_outputs:
 > **RS-01**: The implementation MUST validate that compiled workflows are up-to-date
 > **RS-02**: Timestamp validation MUST compare source `.md` and compiled `.lock.yml` times
 
-**Implementation Validation** (`security-guard.lock.yml`, lines 62-71):
+**Implementation Validation** (`.github/workflows/security-review.lock.yml`, lines 298-310; checked 2026-11-03): The activation job sets `GH_AW_WORKFLOW_FILE` to `security-review.lock.yml` and invokes `check_workflow_timestamp_api.cjs`.
 
-```yaml
-activation:
-  steps:
-    - name: Check workflow file timestamps
-      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
-      env:
-        GH_AW_WORKFLOW_FILE: "security-guard.lock.yml"  # ✅ Identifies lock file
-      with:
-        script: |
-          const { setupGlobals } = require('/opt/gh-aw/actions/setup_globals.cjs');
-          setupGlobals(core, github, context, exec, io);
-          const { main } = require('/opt/gh-aw/actions/check_workflow_timestamp_api.cjs');  # ✅ Timestamp check
-          await main();
-```
-
-**Status**: ✅ **VERIFIED** - Timestamp validation step present in activation job using `check_workflow_timestamp_api.cjs`.
+**Status**: ✅ **VERIFIED** — The timestamp-check step is present in the current representative lock.
 
 ---
 
@@ -404,58 +291,20 @@ The rendered job condition is a runtime policy gate. It permits non-`workflow_ru
 
 ---
 
-### 7b. workflow_dispatch + aw_context PR Checkout Validation (Section 11.3 - RS-05a)
+### 7b. PR Checkout Authorization and Revision Isolation (Section 11.3 - RS-05a)
 
 **Specification Claim**:
-> **RS-05a**: For `workflow_dispatch` triggers where the `aw_context` input encodes a pull request context, the implementation MUST enforce: repository scope check, actor trust, parse resilience, and ref isolation.
+> **RS-05a**: All PR checkout paths enforce actor trust and immutable revision isolation. `workflow_dispatch` PR contexts additionally require repository scope validation and explicit failure on malformed context.
 
-**Implementation Validation** (`actions/setup/js/checkout_pr_branch.cjs`, lines 200–230):
+**Implementation mapping** (`actions/setup/js/checkout_pr_branch.cjs` and `actions/setup/js/aw_context.cjs`):
 
-```js
-// Parse aw_context from workflow_dispatch input
-if (!pullRequest && eventName === "workflow_dispatch") {
-  const awContextStr = context.payload.inputs?.aw_context;
-  if (awContextStr) {
-    try {
-      const awContext = JSON.parse(awContextStr);               // parse resilience: catch block below
-      if (awContext.item_type === "pull_request" && awContext.item_number) {
-        if (awContext.repo) {
-          const currentRepo = `${context.repo.owner}/${context.repo.repo}`;
-          if (awContext.repo !== currentRepo) {
-            core.warning(`Cross-repository workflow_dispatch is not supported: aw_context.repo ` +
-              `(${awContext.repo}) does not match current repository (${currentRepo}), skipping checkout`);
-            // pullRequest remains null — checkout skipped (repository scope check)
-          } else {
-            pullRequest = { number: awContext.item_number, state: "open" };
-          }
-        } else {
-          pullRequest = { number: awContext.item_number, state: "open" };
-        }
-      }
-    } catch (e) {
-      core.warning(`Failed to parse aw_context: ${getErrorMessage(e)}`);  // parse resilience
-    }
-  }
-}
-```
+The dispatch parser validates JSON object shape, canonical positive PR numbers, and any supplied non-empty repository identity before actor/API/git operations. Invalid supplied PR context calls `core.setFailed()` and outputs `checkout_pr_success=false`; absent context or a valid non-PR context skips PR checkout. `resolvePRHeadSha()` validates the full SHA and binds ordinary PR events to their recorded head, reviews to `commit_id`, and revision-bound dispatches to propagated `pr_head_sha`. Label/review/dispatch paths reject detected head movement, while ordinary PR events retain their event revision.
 
-Actor trust and ref isolation are provided by the shared `assertTrustedCheckoutRuntime()` call and the `exec.exec("git", [...])` array invocation that apply to all PR checkout paths. The fork-runtime rejection inside `assertTrustedCheckoutRuntime()` is itself scoped to `context.eventName === "workflow_dispatch"`, and fails closed when `context.payload.repository` is absent. Centralized command and label dispatches validate the originating `aw_context.actor` instead of the `github-actions[bot]` dispatcher only when GitHub also supplies `sender.type == "Bot"`; they fail closed when the command/label marker or actor is absent. Bot/app identity does not bypass the write-or-higher permission floor except for the separately verified same-repository `opened`, `synchronize`, `ready_for_review`, or `reopened` PR branch-event path in RS-05a; `labeled` remains subject to that permission floor.
+Issue comments and unbound manual dispatch select the current API head, not an approved revision. `validateCommentContext()` requires valid comment and PR update timestamps and warns about newer PR updates without inferring a historical SHA. Immutable fetch uses an argument array from the current `origin`; API checkout paths recheck the selected head after fetch, and `assertCheckedOutRevision()` verifies actual `HEAD` before success or baseline export. These checks do not establish live GitHub.com or custom GitHub Enterprise Server support for fetching the selected SHA.
 
-**Trust-boundary limitation:** `github-actions[bot]` is the shared identity of repository workflows using `GITHUB_TOKEN`, not proof of one specific caller workflow. GitHub does not include an immutable caller-workflow identity in the target `workflow_dispatch` event. This validation therefore assumes that `actions: write` is granted only to trusted repository workflows; any such workflow can construct `aw_context`, so untrusted code must not receive that permission.
+Actor trust is provided by the shared `assertTrustedCheckoutRuntime()` call. Fork-runtime rejection is scoped to `workflow_dispatch` and fails closed unless `repository.fork` is boolean `false`. Centralized command and label dispatches validate the originating `aw_context.actor` instead of the `github-actions[bot]` dispatcher only when GitHub also supplies `sender.type == "Bot"`; missing markers or inconsistent identities fail closed. The same-repository bot branch-event and allow-listed comment/review exceptions remain subject to the identity, repository, action, and body-only edit constraints in RS-05a; `labeled` retains the collaborator permission floor.
 
-```js
-async function assertTrustedCheckoutRuntime() {
-  if (context.eventName === "workflow_dispatch") {
-    const repository = context.payload.repository;
-    if (!repository) {
-      throw new Error(`${ERR_PERMISSION}: Refusing PR checkout: unable to determine repository fork status for workflow_dispatch`);
-    }
-    if (repository.fork === true) {
-      throw new Error(`${ERR_PERMISSION}: Refusing PR checkout in forked repository runtime context`);
-    }
-  }
-  // ... permission-floor check below applies except for the verified same-repository bot PR branch-event path
-```
+**Trust-boundary limitation:** `github-actions[bot]` is the shared identity of repository workflows using `GITHUB_TOKEN`, not proof of one specific caller workflow. GitHub does not include an immutable caller-workflow identity in the target `workflow_dispatch` event. This validation therefore assumes that `actions: write` is granted only to trusted repository workflows; any such workflow can construct `aw_context`, so untrusted code must not receive that permission. A matching SHA proves commit identity, not that PR code is safe to execute with credentials.
 
 **Unit test coverage** (`actions/setup/js/checkout_pr_branch.test.cjs`):
 
@@ -465,11 +314,21 @@ async function assertTrustedCheckoutRuntime() {
 | non-PR `item_type` → skip | parse validation |
 | no `aw_context` input → skip | parse resilience |
 | no `inputs` at all → skip | parse resilience |
-| invalid JSON → warn + skip | parse resilience |
-| missing `item_number` → skip | item_number guard |
+| invalid JSON or a non-object context → explicit failure | parse resilience |
+| missing or invalid PR `item_number` → explicit failure | item_number guard |
 | `aw_context.repo` matches current repo → checkout | repository scope |
-| `aw_context.repo` mismatches → warn + skip | repository scope |
+| `aw_context.repo` mismatches → explicit failure | repository scope |
 | successful checkout → output `true` | ref isolation |
+| ordinary PR event fetches its recorded SHA after head movement or branch deletion | immutable event revision |
+| labels/reviews reject stale head evidence; reviews use `commit_id` | revision binding |
+| missing required dispatch SHA, malformed SHA, API failure, or head movement during fetch → failure | revision isolation (negative cases) |
+| actual checked-out `HEAD` mismatch → failure before success or baseline export | actual revision verification |
+| uppercase event, review, dispatch, or API SHA → canonical lowercase selection | hexadecimal commit identity |
+| historical fork/closed-event checkout retains its event commit count and merge base after a ten-to-one force push | event revision history depth |
+| missing-commit fetch plus confirmed live closure → lifecycle invalidation; SHA-fetch policy rejection remains an ordinary fatal error | missing-object and transport-policy distinction |
+| comment timestamps are required; newer updates warn and select the current head, not an approved revision | current-head/non-approval semantics |
+| unbound manual dispatch selects and rechecks the current API head | current-head semantics |
+| `aw_context.test.cjs` propagates event-recorded SHAs and triggering comment edit time | dispatch revision evidence |
 | same-repo PR checkout allowed when runtime repository is itself a fork (`pull_request`) | fork-runtime rejection scope |
 | `workflow_dispatch` PR replay rejected when runtime repository is a fork | fork-runtime rejection |
 | `workflow_dispatch` PR replay rejected when payload has no `repository` data (fail closed) | fork-runtime rejection (unverifiable case) |
@@ -478,10 +337,12 @@ async function assertTrustedCheckoutRuntime() {
 | bot/app actor with write-or-higher repository permission allowed | actor trust |
 | bot/app actor without write-or-higher repository permission rejected for `workflow_dispatch`, `issue_comment`, `pull_request_review_comment`, and `pull_request_review` | actor trust |
 | same-repository bot `opened`, `synchronize`, `ready_for_review`, and `reopened` PR events allowed only when sender and runtime, head, and base repository IDs match; lifecycle actions are not branch-push evidence | actor trust exception |
+| allow-listed same-repository bot `edited` PR event allowed only when `changes` contains a non-null object-valued `body` field and no other fields, with sender and runtime, head, and base repository IDs matching | actor trust exception |
 | same-repository bot `labeled` PR events retain the collaborator permission floor on both `pull_request` and `pull_request_target` | actor trust exception (negative case) |
 | allow-listed App comments on `issue_comment` and `pull_request_review_comment`, and reviews on `pull_request_review`, allowed only when sender and matching comment/review author match, sender and runtime actor are canonically equivalent, and runtime, head, and base repository IDs match | actor trust exception |
 | unlisted bot comments/reviews, differing sender/comment/review author identities, fork PRs, and missing or mismatched repository IDs retain the collaborator permission floor | actor trust exception (negative cases) |
-| bot exception rejected for forked heads, missing runtime ID, mismatched sender, non-bot sender, actions outside the trusted allowlist such as `labeled` or `edited`, and missing or mismatched base ID | actor trust exception (independent negative cases) |
+| allow-listed bot `edited` events with missing/malformed changes, no body change, a title/base change, or a mixed body/title or body/base edit retain the collaborator permission floor | actor trust exception (negative cases) |
+| bot exception rejected for forked heads, missing runtime ID, mismatched sender, non-bot sender, actions outside the trusted allowlist such as `labeled`, and missing or mismatched base ID | actor trust exception (independent negative cases) |
 | centralized `workflow_dispatch` validates the originating `aw_context.actor`, not `github-actions[bot]` | actor trust |
 | centralized `workflow_dispatch` without `aw_context.actor` is rejected | actor trust (fail closed) |
 | centralized actor propagation without `sender.type == "Bot"` is rejected | actor trust (identity signal) |
@@ -507,10 +368,10 @@ async function assertTrustedCheckoutRuntime() {
 | `centralized_dispatch_rejects_router_self_propagation` | `unsat` | centralized dispatch cannot identify `github-actions[bot]` as the originating actor |
 | `workflow_dispatch_rejects_cross_repository_aw_context` | `unsat` | cross-repository workflow_dispatch PR replay cannot reach checkout |
 | `workflow_dispatch_rejects_noncanonical_pr_number` | `unsat` | non-canonical PR numbers cannot reach checkout |
-| `workflow_dispatch_uses_refs_pull_checkout` | `unsat` | workflow_dispatch PR replay cannot reach checkout without `refs/pull/N/head` isolation |
+| `workflow_dispatch_uses_api_head_checkout` | `unsat` | workflow_dispatch PR replay cannot reach checkout without the model's abstract API-head checkout path; this does not prove revision freshness |
 | `non_dispatch_pr_trigger_allows_forked_runtime_after_trust` | `sat` | the model admits non-workflow_dispatch PR triggers from structurally forked runtime repositories once actor trust holds |
 
-**Status**: **RUNTIME TESTS PASS; FORMAL REVALIDATION PENDING** — RS-05a runtime coverage includes the same-repository bot exceptions for `opened`, `synchronize`, `ready_for_review`, and `reopened`; `labeled` remains subject to the collaborator permission floor on both `pull_request` and `pull_request_target`. The branch-event updates in v1.1.3 and v1.1.5 have runtime evidence; v1.1.4 concerns transport security and is outside this branch-event validation. The last completed targeted formal revalidation remains v1.1.1 / 2026-10-09. The Z3 artifact's `pr_action_proves_branch_access` guard abstracts membership in the explicit PR action allowlist; it does not assert that a branch push occurred. Runtime regression cases and the TLA+ model cover the concrete action set and rejection guards. The targeted `checkout_pr_branch.test.cjs` suite passed on 2026-10-26, including fail-closed `labeled` cases. The Z3 solver and pinned TLA+ Tools were unavailable in the validation environment, so the Z3 proof and TLC model were not rerun and targeted formal revalidation remains pending. Existing `workflow_dispatch`, ref-isolation, and fork-runtime evidence remains applicable; the full revalidation policy is in `security-architecture-spec.md` §11.
+**Status**: **RUNTIME EVIDENCE RECORDED; FORMAL REVALIDATION PENDING** — RS-05a runtime coverage includes the same-repository bot exceptions for `opened`, `synchronize`, `ready_for_review`, and `reopened`; explicitly allow-listed `edited` events bypass the permission floor only when `changes` contains a non-null object-valued `body` field and no other fields. `labeled` and edits with missing, non-body, malformed, or mixed change metadata retain the collaborator permission floor. The branch-event updates in v1.1.3, v1.1.5, and v1.1.6 and immutable-revision update in v1.1.7 have implementation and regression-test mappings above; v1.1.4 concerns transport security. The last completed targeted formal revalidation remains v1.1.1 / 2026-10-09. The targeted `checkout_pr_branch.test.cjs` suite passed on 2026-10-27. The updated bounded TLA+ model and Z3 proof were not rerun because the pinned TLA+ Tools and Z3 solver are unavailable in this environment. The SMT model is an authorization abstraction: `pr_action_proves_branch_access` abstracts action-allowlist membership, not webhook change fields or a branch push, and `api_head_checkout` does not model stale event evidence, fetch-time races, actual checked-out commit identity, or live GitHub fetch support. Expected solver results above are not newly executed proof evidence. The full revalidation policy is in `security-architecture-spec.md` §11.
 
 ---
 
@@ -518,14 +379,14 @@ async function assertTrustedCheckoutRuntime() {
 
 **Specification References Network Isolation** but actual enforcement is engine-specific. Let me check for AWF references:
 
-**Implementation Validation** (`security-guard.lock.yml`, line 145):
+**Implementation Validation** (`.github/workflows/security-review.lock.yml`, lines 819 and 2468; checked 2026-11-03):
 
 ```yaml
 - name: Install AWF binary
-  run: bash /opt/gh-aw/actions/install_awf_binary.sh v0.11.2  # ✅ AWF firewall
+  run: bash "${RUNNER_TEMP}/gh-aw/actions/install_awf_binary.sh" v0.29.5 --rootless
 ```
 
-**Status**: ✅ **VERIFIED** - AWF (Agent Workflow Firewall) binary installed for network isolation.
+**Status**: ✅ **VERIFIED** — AWF is installed in the current representative lock; this alone does not establish the full network-isolation threat model.
 
 ---
 
@@ -574,30 +435,9 @@ Sandbox isolation was previously undocumented in this report; representative com
 **Specification Claim**:
 > **OI-06**: Safe output jobs MUST validate agent output before execution
 
-**Implementation Validation** (`security-guard.lock.yml`, lines 1243-1250+):
+**Implementation Validation** (`.github/workflows/security-review.lock.yml`, lines 3038-3051 and 3142-3144; checked 2026-11-03): The `safe_outputs` job depends on the agent and detection jobs and runs the `Process Safe Outputs` dispatcher step.
 
-```yaml
-safe_outputs:
-  steps:
-    - name: Download agent output artifact
-      continue-on-error: true
-      uses: actions/download-artifact@...
-      with:
-        name: agent-output  # ✅ Downloads agent output
-        path: /tmp/gh-aw/safeoutputs/
-        
-    - name: Setup agent output environment variable
-      run: |
-        # ✅ Reads output for validation
-        
-    - name: Process safe outputs  # ✅ Validation and execution
-      id: process_safe_outputs
-      uses: actions/github-script@...
-      env:
-        # Output configuration and validation
-```
-
-**Status**: ✅ **VERIFIED** - Agent output downloaded, validated, and processed in safe_outputs job.
+**Status**: ✅ **VERIFIED** — The current lock confirms processing is in the separate safe-output job. Validation details are implemented by the dispatcher in `pkg/workflow/`.
 
 ---
 
@@ -607,58 +447,54 @@ safe_outputs:
 > **RS-16**: The implementation MUST configure automatic concurrency control to prevent race conditions
 > **RS-17**: Concurrency control MUST use GitHub Actions' native `concurrency` field
 
-**Implementation Validation** (`security-guard.lock.yml`, lines 33-35):
+**Implementation Validation** (`.github/workflows/security-review.lock.yml`, lines 78-80; checked 2026-11-03):
 
 ```yaml
 concurrency:
-  group: "gh-aw-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
-  cancel-in-progress: true
+  group: "gh-aw-${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}"
+  queue: max
 ```
 
-**Implementation Validation** (`security-compliance.lock.yml`, lines 42-43):
+**Implementation Validation** (`.github/workflows/security-compliance.lock.yml`, lines 83-85, checked 2026-11-03):
 
 ```yaml
 concurrency:
-  group: "gh-aw-${{ github.workflow }}-${{ github.event.issue.number }}"
-  # cancel-in-progress omitted (defaults to false, sequential queueing)
+  group: "gh-aw-${{ github.workflow }}-${{ github.event.issue.number || github.run_id }}"
+  queue: max
 ```
 
-**Key Features Verified**:
-- ✅ Dynamic group identifiers include workflow name and context (PR number, issue number, or ref)
-- ✅ `cancel-in-progress: true` for PR workflows (latest run cancels older runs)
-- ✅ `cancel-in-progress` omitted for issue workflows (sequential processing)
-- ✅ Prevents race conditions on the same resource
-- ✅ Reduces resource exhaustion by canceling superseded runs
+**Current observation**: Both locks use an issue number (and, for security-review, PR number) with a `github.run_id` fallback and `queue: max`, so runs without an issue number get distinct groups rather than a shared issue-less group; neither sets `cancel-in-progress` at the workflow level. The former cancellation-pattern statements are not established by this check.
 
 **Concurrency Patterns**:
 
-| Workflow Type | Group Pattern | Cancel-in-Progress | Behavior |
-|---------------|---------------|-------------------|----------|
-| Pull Request | `workflow-PR#` | `true` | Latest run cancels older |
-| Issue-based | `workflow-Issue#` | `false` (omitted) | Runs queue sequentially |
-| Scheduled | `workflow` | `false` (omitted) | One at a time |
+| Workflow | Current group pattern | Queue setting | Evidence |
+|----------|----------------------|--------------|----------|
+| Security Review Agent | Workflow plus issue/PR/run ID | `queue: max` | `.github/workflows/security-review.lock.yml:78-80` (2026-11-03) |
+| Security Compliance | Workflow plus issue number, falling back to run ID | `queue: max` | `.github/workflows/security-compliance.lock.yml:83-85` |
 
-**Status**: ✅ **VERIFIED** - Concurrency control properly configured with context-aware grouping and appropriate cancellation policies.
+**Status**: ✅ **VERIFIED** — Context-aware concurrency grouping is present in the cited locks. Cancellation behavior is workflow-specific and was not established by the current check.
 
 ---
 
 ## Specification Accuracy Summary
 
-| Section | Requirement | Status | Evidence Location |
-|---------|-------------|--------|-------------------|
-| **3.2** | Security Guarantees (SG-01 to SG-07) | ✅ Verified | Multiple implementations |
-| **4.3** | Input Sanitization (IS-04 to IS-09) | ✅ Verified | `sanitize_content_core.cjs` |
-| **5.2** | Job Architecture (OI-01) | ✅ Verified | `jobs:` section structure |
-| **5.4** | Output Validation (OI-06) | ✅ Verified | `safe_outputs.steps` |
-| **7.2** | Permission Defaults (PM-01, PM-02) | ✅ Verified | `permissions:` blocks |
-| **7.5** | Fork Protection (PM-08) | ✅ Verified | Job `if:` conditions |
-| **7.6** | Role-Based Access (PM-10, PM-11) | ✅ Verified | `pre_activation.steps` |
-| **9.1** | Threat Detection (TD-01) | ✅ Verified | `detection:` job |
-| **10.6** | Action Pinning (CS-10) | ✅ Verified | All `uses:` statements |
-| **11.1** | Timestamp Validation (RS-01, RS-02) | ✅ Verified | `activation.steps` |
-| **11.3** | workflow_run Repository Validation (RS-05) | ✅ Verified | `role_checks.go`, `TestFormalRS003_WorkflowRunRepositoryValidation` |
-| **11.3** | workflow_dispatch PR Checkout (RS-05a) | ✅ Verified | `checkout_pr_branch.cjs` lines 200–230 |
-| **11.8** | Concurrency Control (RS-16 to RS-22) | ✅ Verified | `concurrency:` blocks |
+The evidence date in each row distinguishes the 2026-11-03 lock check from older evidence. Historical entries are not represented as a full revalidation.
+
+| Section | Requirement | Current status | Evidence location and date |
+|---------|-------------|---------------|----------------------------|
+| **3.2** | Security Guarantees (SG-01 to SG-07) | ✅ Selected formal coverage rechecked 2026-11-03 | `pkg/workflow/security_architecture_sg_formal_test.go` (`TestFormalSG01`–`TestFormalSG07`, `TestFormalBasicConformance_AllFourControls`, threat-detection and PM-11 tests) |
+| **4.3** | Input Sanitization (IS-04 to IS-09) | ✅ Rechecked 2026-11-03 | `actions/setup/js/sanitize_content_core.cjs`; `sanitize_content.test.cjs`, `sanitize_label_content.test.cjs`, `sanitize_content_core_parser.test.cjs` (615 tests passed) |
+| **5.2** | Job Architecture (OI-01) | ✅ Verified for representative lock | `.github/workflows/security-review.lock.yml:93,635,1862,2330,2884,3038` (2026-11-03) |
+| **5.4** | Output Validation (OI-06) | ✅ Verified for representative lock | `.github/workflows/security-review.lock.yml:3038-3051,3142-3144` (2026-11-03) |
+| **7.2** | Permission Defaults (PM-01, PM-02) | ⚠️ Partially verified; scopes are workflow-specific | `.github/workflows/security-review.lock.yml:103-107,642-650,1879-1883,2338-2340,3047-3050` (2026-11-03) |
+| **7.5** | Fork Protection (PM-08) | ❌ **UNVERIFIED** — current evidence is limited to step conditions; job-wide enforcement is not established | `.github/workflows/security-review.lock.yml:252,326` (2026-11-03); tracked by a dedicated PM-08 follow-up issue (to be linked) |
+| **7.6** | Role-Based Access (PM-10, PM-11) | ✅ Verified in representative lock | `.github/workflows/security-review.lock.yml:2884-2949` (2026-11-03) |
+| **9.1** | Threat Detection (TD-01) | ✅ Verified for job placement and dependency | `.github/workflows/security-review.lock.yml:2330-2350,3038-3045` (2026-11-03) |
+| **10.6** | Action Pinning (CS-10) | ✅ Verified for external action references | `.github/workflows/security-review.lock.yml` (96 external SHA-pinned references; 2026-11-03) |
+| **11.1** | Timestamp Validation (RS-01, RS-02) | ✅ Verified in representative lock | `.github/workflows/security-review.lock.yml:298-310` (2026-11-03) |
+| **11.3** | workflow_run Repository Validation (RS-05) | Historical formal evidence | `pkg/workflow/role_checks.go`, `pkg/workflow/*test.go`; historical full validation 2026-07-15 |
+| **11.3** | PR Checkout Authorization and Revision Isolation (RS-05a) | Runtime evidence; formal revalidation pending | `actions/setup/js/checkout_pr_branch.cjs`, `checkout_pr_branch.test.cjs`, `aw_context.test.cjs` (runtime suite 2026-10-27); §7b |
+| **11.8** | Concurrency Control (RS-16 to RS-22) | ✅ Verified in representative lock | `.github/workflows/security-review.lock.yml:78-80` (2026-11-03) |
 
 ---
 
@@ -799,7 +635,7 @@ Create a new appendix with a checklist for validating compiled lock files:
 - [ ] All actions pinned to SHA commits
 - [ ] Fork protection in pull_request conditions
 - [ ] Read-only permissions in agent job
-- [ ] Write permissions only in safe_outputs job
+- [ ] Review and document workflow-specific write scopes, including activation and conclusion jobs
 - [ ] Timestamp validation in activation job
 - [ ] Threat detection job between agent and safe_outputs
 - [ ] Role-based access control in pre_activation
@@ -826,15 +662,7 @@ pre_activation:
 
 ## Conclusion
 
-✅ **The specification accurately describes the security architecture as implemented in compiled `.lock.yml` files.**
-
-All major security claims are verifiable:
-- Multi-layer job architecture with permission separation
-- Fork protection via repository ID validation
-- Role-based access control with runtime checks
-- Threat detection between agent and safe outputs
-- Action pinning to immutable SHAs
-- Runtime timestamp validation
+The 2026-11-03 targeted pass confirms the ten-job topology in the representative lock and selected formal/sanitization tests. It does not complete the full revalidation: PM-08 remains UNVERIFIED for this lock, and permission scopes are workflow-specific.
 
 The specification provides an accurate formalization of the security architecture that can be used for:
 - Security audits and reviews
@@ -842,4 +670,13 @@ The specification provides an accurate formalization of the security architectur
 - Compliance certification
 - Future security enhancements
 
-**Validation Grade**: **A** (Excellent accuracy with minor opportunities for enhancement)
+**Historical full-validation grade**: **A** (2026-07-15).
+**Current targeted check**: **Partial; no overall grade assigned** pending full revalidation and resolution of the PM-08 evidence gap.
+
+## Change Log
+
+### 2026-11-03
+
+- Refreshed the ten-job evidence against `.github/workflows/security-review.lock.yml`.
+- Corrected permission-scope statements and marked PM-08 UNVERIFIED where current evidence is insufficient.
+- Preserved the historical full-validation grade and the outstanding RS-05a formal revalidation qualification.

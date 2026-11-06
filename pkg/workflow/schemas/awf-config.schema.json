@@ -6,6 +6,10 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "enclaveDebugPublic": {
+      "type": "boolean",
+      "description": "Retain bounded redacted host-only diagnostics for verified static public-only Docker or Cloud Hypervisor enclaves. False disables automatic capture."
+    },
     "$schema": {
       "type": "string",
       "description": "JSON Schema URL for IDE validation and autocomplete."
@@ -361,6 +365,12 @@
           "additionalProperties": false,
           "required": ["objective", "task"],
           "properties": {
+            "provider": {
+              "type": "string",
+              "enum": ["copilot", "openai", "anthropic"],
+              "default": "copilot",
+              "description": "Provider slot whose native model catalogue is routed. Defaults to Copilot."
+            },
             "candidateModels": {
               "type": "array",
               "items": { "type": "string" },

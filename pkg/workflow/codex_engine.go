@@ -159,7 +159,7 @@ func (e *CodexEngine) GetInstallationSteps(workflowData *WorkflowData) []GitHubA
 		return buildNpmEngineInstallStepsWithAWF(nil, workflowData, false)
 	}
 
-	steps := BuildStandardNpmEngineInstallStepsNoCooldown(
+	steps := BuildStandardNpmEngineInstallSteps(
 		"@openai/codex",
 		string(constants.DefaultCodexVersion),
 		"Install Codex CLI",
@@ -201,7 +201,8 @@ func generateCodexMicroVMCLIInstallStep(workflowData *WorkflowData) GitHubAction
 		"Install Codex CLI in microVM path",
 		"codex",
 		false,
-		false,
+		true,
+		resolveEngineCooldownDays(workflowData),
 	)
 }
 
@@ -517,6 +518,7 @@ func (e *CodexEngine) buildCodexExecutionEnv(workflowData *WorkflowData, firewal
 	applyCodexModelEnv(env, workflowData, modelConfigured, modelEnvVar)
 	applyEngineCwdEnv(env, workflowData)
 	applyEngineAndAgentEnv(env, workflowData, codexEngineLog)
+	env["CODEX_HOME"] = codexHome(workflowData)
 	if isCodexAzureOIDC(workflowData) {
 		// Non-secret launch policy; the harness also verifies fresh AWF reflection.
 		env["GH_AW_CODEX_OIDC_AUTH"] = "azure"
@@ -524,9 +526,9 @@ func (e *CodexEngine) buildCodexExecutionEnv(workflowData *WorkflowData, firewal
 	if !firewallEnabled && provider == LLMProviderOpenAI && workflowData.EngineConfig != nil && workflowData.EngineConfig.APITarget != "" {
 		env["OPENAI_BASE_URL"] = "https://" + path.Join(workflowData.EngineConfig.APITarget, "v1")
 	}
-	applyMCPScriptsSecretEnv(env, workflowData)
 	applyModelRoutingEnv(env, workflowData)
 	applyModelAliasesEnv(env, workflowData)
+	applyDurableExecutionEnv(env, workflowData)
 	return env
 }
 

@@ -12,6 +12,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestBuildSafeOutputInputsConfigIncludesMaxLength(t *testing.T) {
+	maxLength := 40000
+	result := buildSafeOutputInputsConfig(map[string]*InputDefinition{
+		"payload": {
+			Type:      "string",
+			MaxLength: &maxLength,
+		},
+		"legacy": {
+			Type: "string",
+		},
+	})
+
+	require.Equal(t, maxLength, result["payload"].(map[string]any)["maxLength"])
+	assert.NotContains(t, result["legacy"].(map[string]any), "maxLength")
+}
+
 // TestGenerateSafeOutputsConfigDispatchWorkflow tests that generateSafeOutputsConfig correctly
 // includes dispatch_workflow configuration with workflow_files mapping.
 func TestGenerateSafeOutputsConfigDispatchWorkflow(t *testing.T) {
@@ -91,6 +107,61 @@ func TestGenerateSafeOutputsConfigNeutralizesUnresolvableNeedsExpression(t *test
 	require.True(t, ok, "Expected approve_workflow_run key in config")
 	assert.Equal(t, []any{}, approveConfig["allowed_pull_requests"],
 		"allowed_pull_requests should be neutralized to an empty array in the agent job's config")
+}
+
+func TestGenerateSafeOutputsConfigExcludesGitHubTokens(t *testing.T) {
+	for _, token := range []string{
+		"${{ steps.mint.outputs.token }}",
+		"${{ secrets.CUSTOM_TOKEN }}",
+	} {
+		t.Run(token, func(t *testing.T) {
+			data := &WorkflowData{
+				SafeOutputs: &SafeOutputsConfig{
+					AddComments: &AddCommentsConfig{
+						BaseSafeOutputConfig: BaseSafeOutputConfig{GitHubToken: token, Max: strPtr("1")},
+					},
+					CreateIssues: &CreateIssuesConfig{
+						BaseSafeOutputConfig: BaseSafeOutputConfig{GitHubToken: token},
+					},
+					CreatePullRequests:      &CreatePullRequestsConfig{HeadGitHubToken: token},
+					PushToPullRequestBranch: &PushToPullRequestBranchConfig{HeadGitHubToken: token},
+					DispatchRepository: &DispatchRepositoryConfig{
+						Tools: map[string]*DispatchRepositoryToolConfig{
+							"trigger_ci": {GitHubToken: token, EventType: "ci"},
+						},
+					},
+					Mentions: &MentionsConfig{GitHubToken: token, AllowedTeams: []string{"my-org/my-team"}},
+				},
+				CommentMemoryConfig: &CommentMemoryConfig{
+					BaseSafeOutputConfig: BaseSafeOutputConfig{GitHubToken: token},
+				},
+			}
+
+			result, err := generateSafeOutputsConfig(data)
+			require.NoError(t, err)
+			assert.NotContains(t, result, token)
+			assert.NotContains(t, result, "github-token")
+
+			var parsed map[string]any
+			require.NoError(t, json.Unmarshal([]byte(result), &parsed))
+			assert.InDelta(t, float64(1), parsed["add_comment"].(map[string]any)["max"], 0.0001)
+			assert.Contains(t, parsed, "mentions")
+			assert.NotContains(t, parsed["comment_memory"], "github-token")
+			for _, handler := range []string{"add_comment", "create_issue"} {
+				assert.Contains(t, parsed, handler)
+				assert.Equal(t, token, handlerRegistry[handler](data.SafeOutputs)["github-token"],
+					"generating agent config must not mutate handler credentials")
+			}
+			for _, handler := range []string{"create_pull_request", "push_to_pull_request_branch"} {
+				assert.Contains(t, parsed, handler)
+				assert.Equal(t, token, handlerRegistry[handler](data.SafeOutputs)["head-github-token"])
+			}
+			tools := parsed["dispatch_repository"].(map[string]any)["tools"].(map[string]any)
+			assert.Equal(t, "ci", tools["trigger_ci"].(map[string]any)["event_type"])
+			handlerTools := handlerRegistry["dispatch_repository"](data.SafeOutputs)["tools"].(map[string]any)
+			assert.Equal(t, token, handlerTools["trigger_ci"].(map[string]any)["github-token"])
+		})
+	}
 }
 
 func TestGenerateSafeOutputsConfigNeutralizesAllUnresolvableNeedsForms(t *testing.T) {
@@ -468,6 +539,7 @@ func TestPopulateDispatchWorkflowFilesFindsLockFile(t *testing.T) {
 // TestGenerateCustomJobToolDefinition tests that generateCustomJobToolDefinition produces
 // valid MCP tool definitions from SafeJobConfig input definitions.
 func TestGenerateCustomJobToolDefinition(t *testing.T) {
+	maxLength := 40000
 	tests := []struct {
 		name      string
 		jobName   string
@@ -506,13 +578,49 @@ func TestGenerateCustomJobToolDefinition(t *testing.T) {
 			},
 		},
 		{
+			name:    "string input with explicit max length",
+			jobName: "large_payload_job",
+			jobConfig: &SafeJobConfig{
+				Inputs: map[string]*InputDefinition{
+					"payload": {
+						Type:      "string",
+						MaxLength: &maxLength,
+					},
+				},
+			},
+			check: func(t *testing.T, result map[string]any) {
+				schema := result["inputSchema"].(map[string]any)
+				props := schema["properties"].(map[string]any)
+				payloadProp := props["payload"].(map[string]any)
+				assert.Equal(t, 40000, payloadProp["maxLength"])
+			},
+		},
+		{
+			name:    "unset type with explicit max length",
+			jobName: "default_string_job",
+			jobConfig: &SafeJobConfig{
+				Inputs: map[string]*InputDefinition{
+					"payload": {
+						MaxLength: &maxLength,
+					},
+				},
+			},
+			check: func(t *testing.T, result map[string]any) {
+				schema := result["inputSchema"].(map[string]any)
+				props := schema["properties"].(map[string]any)
+				payloadProp := props["payload"].(map[string]any)
+				assert.Equal(t, 40000, payloadProp["maxLength"])
+			},
+		},
+		{
 			name:    "boolean input",
 			jobName: "bool_job",
 			jobConfig: &SafeJobConfig{
 				Inputs: map[string]*InputDefinition{
 					"flag": {
-						Type:     "boolean",
-						Required: false,
+						Type:      "boolean",
+						Required:  false,
+						MaxLength: &maxLength,
 					},
 				},
 			},
@@ -521,6 +629,7 @@ func TestGenerateCustomJobToolDefinition(t *testing.T) {
 				props := schema["properties"].(map[string]any)
 				flagProp := props["flag"].(map[string]any)
 				assert.Equal(t, "boolean", flagProp["type"], "flag type should be boolean")
+				assert.NotContains(t, flagProp, "maxLength")
 				assert.Nil(t, schema["required"], "required should be absent when no required fields")
 			},
 		},
@@ -750,9 +859,11 @@ func TestGenerateSafeOutputsConfigSafeJobMax(t *testing.T) {
 	findingCfg, ok := parsed["emit-finding"].(map[string]any)
 	require.True(t, ok, "emit-finding should be present in config")
 	assert.InDelta(t, float64(25), findingCfg["max"], 0.0001, "max should be 25")
+	assert.Equal(t, false, findingCfg["supports_dependencies"], "separate safe jobs must reject runtime dependencies")
 
 	singleCfg, ok := parsed["single-output"].(map[string]any)
 	require.True(t, ok, "single-output should be present in config")
+	assert.Equal(t, false, singleCfg["supports_dependencies"])
 	_, hasMax := singleCfg["max"]
 	assert.False(t, hasMax, "max should be absent when not configured (lets runtime default to 1)")
 }
@@ -1338,7 +1449,7 @@ func TestGenerateSafeOutputsConfigClosePullRequest(t *testing.T) {
 	assert.InDelta(t, float64(3), closePRConfig["max"], 0.0001, "max should be 3")
 	assert.Equal(t, "*", closePRConfig["target"], "target should be set")
 	assert.Equal(t, "org/repo", closePRConfig["target-repo"], "target-repo should be set")
-	assert.Equal(t, "${{ secrets.MY_TOKEN }}", closePRConfig["github-token"], "github-token should be set")
+	assert.NotContains(t, closePRConfig, "github-token", "agent config must not contain handler credentials")
 	assert.Equal(t, "[my-prefix]", closePRConfig["required_title_prefix"], "required_title_prefix should be set")
 
 	allowedRepos, ok := closePRConfig["allowed_repos"].([]any)

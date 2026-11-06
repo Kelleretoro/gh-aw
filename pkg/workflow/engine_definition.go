@@ -202,10 +202,11 @@ type EngineInstallationDefinition struct {
 	BinaryName         string `yaml:"binary-name,omitempty"`
 	IncludeNodeSetup   bool   `yaml:"include-node-setup,omitempty"`
 	PostInstallScripts bool   `yaml:"post-install-scripts,omitempty"`
-	Cooldown           bool   `yaml:"cooldown,omitempty"`
-	VerifyCommand      string `yaml:"verify-command,omitempty"`
-	VerifyStepName     string `yaml:"verify-step-name,omitempty"`
-	DocumentationURL   string `yaml:"docs-url,omitempty"`
+	// Deprecated: workflow engine.cooldown replaces this compiler-ignored metadata.
+	Cooldown         *bool  `yaml:"cooldown,omitempty"`
+	VerifyCommand    string `yaml:"verify-command,omitempty"`
+	VerifyStepName   string `yaml:"verify-step-name,omitempty"`
+	DocumentationURL string `yaml:"docs-url,omitempty"`
 }
 
 // EngineConfigFileDefinition describes a configuration file that should be written
@@ -268,6 +269,7 @@ type EngineBehaviorDefinition struct {
 	Plugins             *EnginePluginsDefinition      `yaml:"plugins,omitempty"`
 	ConfigFile          *EngineConfigFileDefinition   `yaml:"config-file,omitempty"`
 	Execution           *EngineExecutionDefinition    `yaml:"execution,omitempty"`
+	Durable             *EngineDurableDefinition      `yaml:"durable,omitempty"`
 	MCP                 *EngineMCPDefinition          `yaml:"mcp,omitempty"`
 	// HarnessScript is the JavaScript source of a Node.js harness that spawns the
 	// engine CLI.  When non-empty the script is written to
@@ -287,6 +289,15 @@ type EngineBehaviorDefinition struct {
 	// A createEngineLogParser wrapper is automatically appended so the author only
 	// needs to provide the parsing function; the wrapper handles exports and bootstrap.
 	LogParser string `yaml:"log-parser,omitempty"`
+}
+
+// EngineDurableDefinition reuses normal installation and execution behavior for
+// engines whose durable harness differs from their ordinary invocation.
+type EngineDurableDefinition struct {
+	Files         []string                       `yaml:"files,omitempty"`
+	Installation  []EngineInstallationDefinition `yaml:"installation,omitempty"`
+	Execution     *EngineExecutionDefinition     `yaml:"execution,omitempty"`
+	HarnessScript string                         `yaml:"harness-script,omitempty"`
 }
 
 // AuthBinding maps a logical authentication role to a secret name.

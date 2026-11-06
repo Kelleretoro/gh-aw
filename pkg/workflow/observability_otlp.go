@@ -12,22 +12,21 @@ import (
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/sliceutil"
 	"github.com/github/gh-aw/pkg/typeutil"
+	"github.com/github/gh-aw/pkg/workflow/actionslanguageservice"
 	"github.com/github/gh-aw/pkg/workflow/compilerenv"
 )
 
 var otlpLog = logger.New("workflow:observability_otlp")
 
-var sentryEndpointNeverMatchPattern = regexp.MustCompile(`$^`)
-
-var sentryEndpointExpressionPattern = func() *regexp.Regexp {
-	//nolint:regexpcompileinfunction // The pattern is initialized once at package load.
-	re, err := regexp.Compile(`(?i)^\$\{\{\s*secrets\.` + regexp.QuoteMeta(constants.OTELSentryEndpointSecretName) + `\s*\}\}$`) //nolint:regexpdynamicpattern // The secret name is quoted and the fixed pattern is valid.
-	if err != nil {
-		return sentryEndpointNeverMatchPattern
+var sentryEndpointExpressionPattern = expressionReferencePattern(true, []string{"secrets", constants.OTELSentryEndpointSecretName}, 2, -1)
+var otlpResourceAttributeSecretRefPattern = actionslanguageservice.Pattern{Filter: func(_ string, expression *actionslanguageservice.Expression) []string {
+	for _, path := range actionslanguageservice.References(expression) {
+		if strings.EqualFold(path[0], "secrets") || strings.EqualFold(path[0], "vars") {
+			return []string{}
+		}
 	}
-	return re
-}()
-var otlpResourceAttributeSecretRefPattern = regexp.MustCompile(`\$\{\{\s*(secrets|vars)\.`)
+	return nil
+}}
 
 // workflowEnvHasKey reports whether the given top-level key is already defined in a
 // workflow's raw `env:` block text. Used to avoid emitting a duplicate YAML mapping key
@@ -882,6 +881,12 @@ func buildOTLPHeaderEnvLines(entries []otlpEndpointEntry, existingEnv string) st
 // already present there are skipped to avoid emitting a duplicate YAML mapping key.
 func buildOTLPPayloadEnvLines(workflowData *WorkflowData, entries []otlpEndpointEntry, ifMissingMode string, existingEnv string) string {
 	var lines string
+	if !workflowEnvHasKey(existingEnv, "GH_AW_OTLP_LOGS_ENABLED") {
+		lines += "\n  GH_AW_OTLP_LOGS_ENABLED: ${{ vars.GH_AW_OTLP_LOGS_ENABLED }}"
+	}
+	if !workflowEnvHasKey(existingEnv, "GH_AW_OTLP_LOGS_MAX_BYTES") {
+		lines += "\n  GH_AW_OTLP_LOGS_MAX_BYTES: ${{ vars.GH_AW_OTLP_LOGS_MAX_BYTES }}"
+	}
 	if encoded := encodeOTLPEndpoints(entries); encoded != "" {
 		if workflowEnvHasKey(existingEnv, "GH_AW_OTLP_ENDPOINTS") {
 			otlpLog.Printf("Skipping GH_AW_OTLP_ENDPOINTS injection: already defined by user")
@@ -956,6 +961,7 @@ func (c *Compiler) injectOTLPConfig(workflowData *WorkflowData) {
 		envKeyLines = append(envKeyLines, line)
 	}
 	addEnvLine("OTEL_EXPORTER_OTLP_ENDPOINT", "  OTEL_EXPORTER_OTLP_ENDPOINT: "+firstEndpoint)
+	addEnvLine(compilerenv.OTLPProtocol, fmt.Sprintf("  %s: ${{ vars.%s }}", compilerenv.OTLPProtocol, compilerenv.OTLPProtocol))
 	addEnvLine("OTEL_SERVICE_NAME", "  OTEL_SERVICE_NAME: "+serviceName)
 	addEnvLine("OTEL_RESOURCE_ATTRIBUTES", "  OTEL_RESOURCE_ATTRIBUTES: '"+escapeYAMLSingleQuoted(otelResourceAttributes(workflowData))+"'")
 	otlpEnvLines := strings.Join(envKeyLines, "\n")

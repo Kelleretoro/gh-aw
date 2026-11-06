@@ -20,6 +20,7 @@ func TestNewLintCommand(t *testing.T) {
 	assert.Equal(t, "lint", cmd.Name(), "Command name should be 'lint'")
 	require.NotNil(t, cmd.Flags().Lookup("dir"), "lint command should have a --dir flag")
 	assert.Equal(t, "d", cmd.Flags().Lookup("dir").Shorthand, "--dir should have -d shorthand")
+	assert.Equal(t, "j", cmd.Flags().Lookup("json").Shorthand, "--json should have -j shorthand")
 	assert.Equal(t,
 		"Workflow directory (default: $GH_AW_WORKFLOWS_DIR or .github/workflows)",
 		cmd.Flags().Lookup("dir").Usage,
@@ -112,15 +113,33 @@ func TestActionlintCacheModeCompatibility(t *testing.T) {
 		},
 		{
 			name:    "job cache policy",
+			message: `unexpected key "cache-mode" for "job" section. expected one of "concurrency", "container", "defaults", "env", "environment"`,
+			ignored: true,
+		},
+		{
+			name:    "job cache policy without expected keys",
 			message: `unexpected key "cache-mode" for "job" section`,
+			ignored: true,
 		},
 		{
 			name:    "step cache policy",
 			message: `unexpected key "cache-mode" for "step" section`,
 		},
 		{
+			name:    "run step cache policy",
+			message: `unexpected key "cache-mode" for step to run shell command. expected one of "continue-on-error", "env", "id", "if", "name", "run", "shell", "timeout-minutes", "working-directory"`,
+		},
+		{
 			name:    "misspelled workflow key",
 			message: `unexpected key "cache-modes" for "workflow" section`,
+		},
+		{
+			name:    "misspelled job key",
+			message: `unexpected key "cache-modes" for "job" section`,
+		},
+		{
+			name:    "invalid job section suffix",
+			message: `unexpected key "cache-mode" for "job" sectional`,
 		},
 		{
 			name:    "other workflow key",
@@ -133,6 +152,10 @@ func TestActionlintCacheModeCompatibility(t *testing.T) {
 		{
 			name:    "other diagnostic mentioning the key",
 			message: `invalid expression: unexpected key "cache-mode" for "workflow" section`,
+		},
+		{
+			name:    "other diagnostic mentioning the job key",
+			message: `invalid expression: unexpected key "cache-mode" for "job" section`,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

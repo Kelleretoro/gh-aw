@@ -50,11 +50,17 @@ type Input struct {
 	// Document optionally supplies authored AW fields, including the prompt.
 	// Either AST may be supplied independently. Workflow is never a projection
 	// of AW frontmatter; when both are supplied it is the compiled graph.
-	Document   *aw.Document
-	JavaScript *taint.JavaScriptOptions
+	Document *aw.Document
+	// AuthoredJobs contains resolved custom job declarations, including imports,
+	// when linting a compiled workflow.
+	AuthoredJobs map[string]any
+	JavaScript   *taint.JavaScriptOptions
 	// AllowActionRefs permits well-formed mutable references as warnings.
 	// Malformed references remain errors regardless of this compiler allowance.
 	AllowActionRefs bool
+	// GeneratedActionRefs records exact compiler-owned action references. Their
+	// well-formed tag fallbacks remain warnings; authored pinning is enforced separately.
+	GeneratedActionRefs map[string]struct{}
 	// SafeOutputJobs includes imported integration jobs resolved by the compiler.
 	SafeOutputJobs []string
 }
@@ -252,5 +258,7 @@ func Default() *Runner {
 		ExcessivePermissionsRule(),
 		ObfuscationRule(),
 		BashCasePatternRule(),
+		PrivilegedCheckoutRule(),
+		ArtifactExecutionRule(),
 	}}
 }

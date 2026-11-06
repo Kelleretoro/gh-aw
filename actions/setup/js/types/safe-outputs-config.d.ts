@@ -16,6 +16,7 @@ interface CreateIssueConfig extends SafeOutputConfig {
   "title-prefix"?: string;
   "body-footer"?: string;
   "deduplicate-by-title"?: boolean | number;
+  "deduplicate-by-labels"?: string[];
   labels?: string[];
   "target-repo"?: string;
   "allowed-repos"?: string[];
@@ -249,6 +250,10 @@ interface PushToPullRequestBranchConfig extends SafeOutputConfig {
  */
 interface MergePullRequestConfig extends SafeOutputConfig {
   "required-labels"?: string[];
+  "required-title-prefix"?: string;
+  "required-checks"?: string[];
+  "required-check-apps"?: Record<string, number>;
+  "required-approvers"?: string[];
   "allowed-labels"?: string[];
   "allowed-branches"?: string[];
   "allowed-files"?: string[];

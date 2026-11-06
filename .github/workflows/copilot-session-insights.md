@@ -14,8 +14,14 @@ permissions:
   actions: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 
-engine: claude
+engine:
+  id: claude
+  model-provider: github
+  model-routing:
+    goal: cost
+    mode: economy
 strict: true
 
 network:

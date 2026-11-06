@@ -29,8 +29,9 @@ var defaultGhAwActionlintIgnorePatterns = []string{
 	`property "workflow_(repository|sha|ref|file_path)" is not defined in object type`,
 	// GitHub is rolling out queue under concurrency before actionlint support.
 	`unexpected key "queue" for "concurrency" section`,
-	// Dry-run workflows use GitHub's workflow-level cache policy before actionlint support.
+	// Generated workflows use GitHub's workflow/job cache policies before actionlint support.
 	`^unexpected key "cache-mode" for "workflow" section(\.|$)`,
+	`^unexpected key "cache-mode" for "job" section(\.|$)`,
 	// gh-aw injects additional activation context properties in generated workflows.
 	`property "(activation|activated)" is not defined in object type`,
 	// gh-aw injects additional artifact context properties in generated workflows.
@@ -66,7 +67,7 @@ All registered AST rules run by default. Use --rules to select AST rules and ski
 	cmd.Flags().Bool("pyflakes", false, "Enable pyflakes integration in actionlint")
 	cmd.Flags().StringSlice("rules", nil, "Select built-in AST rules and skip actionlint (default: all AST rules plus actionlint; empty selects all)")
 	cmd.Flags().Bool("list-rules", false, "List available built-in AST lint rules")
-	cmd.Flags().Bool("json", false, "Emit structured diagnostics (requires --rules)")
+	cmd.Flags().BoolP("json", "j", false, "Emit structured diagnostics (requires --rules)")
 	cmd.Flags().Bool("debug", false, "Include secret-leak analysis coverage warnings for investigation")
 	registerJavaScriptLintFlags(cmd)
 	// The root routes help to stderr. Structured lint reports belong on stdout.

@@ -59,7 +59,7 @@ An imported workflow can only be imported once per workflow.
 
 In markdown, use `{{#runtime-import filepath}}` to inject the content of another file directly into the body at that position. This is useful for sharing reusable prompt snippets, tone instructions, or reference material across workflows.
 
-Imported markdown can include safe GitHub Actions expressions such as `${{ needs.pre_activation.outputs.activated }}` or `${{ needs.build.outputs.version }}`. gh-aw validates those expressions across the full nested runtime-import tree at compile time, so shared prompt files can reuse job outputs without weakening expression-safety checks.
+Repository-local imported markdown is an author source: it shares the main workflow's compiler-selected non-secret bindings, including `env.*`, compound expressions, and conditions. gh-aw validates available files across the nested local runtime-import tree at compile time. Job-output references must be available before activation, such as `${{ needs.pre_activation.outputs.activated }}`. Runtime imports accept only local files within `.github` or explicit `.agents/` paths and perform no network fetching. For external content, put the URL in ordinary prompt instructions for the agent to retrieve inside the AWF sandbox under the configured network policy. Frontmatter compile-time imports are unchanged.
 
 ```aw wrap
 ---
@@ -82,7 +82,7 @@ Use `{{#runtime-import? filepath}}` to silently skip a missing file instead of f
 {{#runtime-import? .github/shared/optional.md}}    # optional — skipped if missing
 ```
 
-Paths are resolved within the `.github` folder. You can specify paths with or without the `.github/` prefix — both `.github/shared/editorial.md` and `shared/editorial.md` refer to the same file. See [Runtime Imports](/gh-aw/reference/templating/#runtime-imports) for URLs, line ranges, and security details.
+Paths are resolved within the `.github` folder. You can specify paths with or without the `.github/` prefix — both `.github/shared/editorial.md` and `shared/editorial.md` refer to the same file. Local compile-time imports may follow symlinks only when the target remains within the allowed folder (`.github`, or `.agents` for `/.agents/` imports). The allowed folder itself must not be a symlink. Dangling symlinks and symlinked parent directories that escape that folder are rejected. File reads retain the allowed folder selected during resolution, including with `inlined-imports: true`, and remain confined to it if symlinks change after path validation. Nested folders named `.github` or `.agents` do not change that boundary. Runtime imports are local-only; external retrieval belongs to the agent inside the AWF sandbox. See [Runtime Imports](/gh-aw/reference/templating/#runtime-imports) for line ranges and security details.
 
 ## Shared Workflow Components
 
@@ -135,7 +135,7 @@ import-schema:
     type: object
     description: Configuration object
     properties:
-      apiKey:
+      project:
         type: string
         required: true
       timeout:
@@ -149,7 +149,7 @@ mcp-servers:
 ---
 
 Deploy ${{ github.aw.import-inputs.count }} items to ${{ github.aw.import-inputs.region }}.
-API key: ${{ github.aw.import-inputs.config.apiKey }}.
+Project: ${{ github.aw.import-inputs.config.project }}.
 Languages: ${{ github.aw.import-inputs.languages }}.
 ```
 
@@ -168,7 +168,7 @@ Each field supports `required: true` and an optional `default` value.
 
 ### Accessing inputs in shared workflows
 
-Use `${{ github.aw.import-inputs.<key> }}` to substitute a top-level value; use dotted notation for object sub-fields (e.g. `${{ github.aw.import-inputs.config.apiKey }}`). Substitution applies to both frontmatter and body, so inputs can drive any field such as `mcp-servers` or `runtimes`.
+Use `${{ github.aw.import-inputs.<key> }}` to substitute a top-level value; use dotted notation for object sub-fields (e.g. `${{ github.aw.import-inputs.config.project }}`). Substitution applies to both frontmatter and body, so inputs can drive any field such as `mcp-servers` or `runtimes`. Values used in prompt bodies must be non-secret; environment filtering cannot identify credentials deliberately supplied as input text.
 
 ### Calling a parameterized shared workflow
 
@@ -186,7 +186,7 @@ imports:
       count: 5
       languages: ["go", "typescript"]
       config:
-        apiKey: my-secret-key
+        project: release-dashboard
         timeout: 60
 ---
 ```
@@ -308,6 +308,7 @@ Shared workflow files (without `on:` field) can define the fields below. Other f
 | `env` | Workflow-level environment variables |
 | `pre-agent-steps` | Steps that run after artifacts download, before engine execution |
 | `post-steps` | Steps that run after engine execution |
+| `jobs` | Additional jobs and supported built-in job customizations |
 | `github-app` | GitHub App credentials for token minting |
 | `checkout` | Checkout configuration for the agent job |
 | `engine.mcp` | MCP gateway settings (`tool-timeout`, `session-timeout`); engine identifier itself is always inherited from the importing workflow |
@@ -332,7 +333,7 @@ Imported step fields use dependency order: a file's steps are processed after th
 | `steps:` | Imported steps are prepended to main in dependency order; prerequisites precede dependents and unrelated siblings retain declaration order. |
 | `pre-agent-steps:` | Imported pre-agent steps are prepended to main in dependency order; prerequisites precede dependents and unrelated siblings retain declaration order. |
 | `post-steps:` | Imported post-steps are appended after main in dependency order; prerequisites precede dependents and unrelated siblings retain declaration order. |
-| `jobs:` | Not merged; define only in the main workflow. Use `safe-outputs.jobs` for importable jobs. |
+| `jobs:` | Imported jobs are added; main job definitions take precedence. Same-named jobs combine injected step fields and merge `outputs` by name, with main output values winning. |
 | `safe-outputs.jobs` | Names must be unique; duplicates fail. Order is determined by `needs:` dependencies. |
 | `env:` | Main env vars take precedence. Duplicate keys across imports fail compilation; move the override to the main workflow. |
 
@@ -515,6 +516,12 @@ Review the build output in /tmp/build-output and suggest improvements.
 ```
 
 In the compiled lock file, the `build` job appears alongside `activation` and `agent`, ordered by each job's `needs` declarations.
+
+When imports and the main workflow define the same job, `jobs.<job-id>.outputs` combines output names. The main workflow wins on duplicate output names; across imports, later-discovered values win. An output-only contribution (a job mapping whose sole field is `outputs`) preserves the existing job body, including its injected steps.
+
+Main workflow job fields retain precedence. Among imports, an injected-step merge uses the later job body; otherwise the earlier body is retained. Other scalar and map fields come from that selected body, not a deep merge. Regular steps from conflicting custom jobs are not concatenated.
+
+Compilation rejects final output expressions that reference regular step IDs discarded by job-body selection, using either dot or literal bracket notation. References satisfied by retained regular, setup, or pre-steps are allowed. Output precedence is applied first, so a main-workflow override can replace an unsafe imported expression. This check does not validate unrelated unknown step references.
 
 ### Importing Jobs via `safe-outputs.jobs`
 

@@ -7,6 +7,26 @@
   "type": "object",
   "required": ["on"],
   "properties": {
+    "token-broker": {
+      "description": "Experimental. Select independent Copilot capabilities to authenticate through the OIDC token broker. Using this field emits a compile-time warning. Configuration and behavior may change without deprecation.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "copilot-request": {
+          "description": "Use brokered authentication for supported Copilot inference jobs.",
+          "type": "boolean"
+        },
+        "copilot-task": {
+          "description": "Use brokered authentication for Copilot task creation and issue assignment.",
+          "type": "boolean"
+        }
+      },
+      "anyOf": [
+        { "properties": { "copilot-request": { "const": true } }, "required": ["copilot-request"] },
+        { "properties": { "copilot-task": { "const": true } }, "required": ["copilot-task"] }
+      ]
+    },
     "work-queue-policy": {
       "description": "Deprecated legacy version-3 Policy proposal. Use scheduling-only work_queue in .github/workflows/aw.json and AW-approved dispatch targets. Cannot be combined with repository work_queue settings. Installed Policy remains authoritative and historical ledgers remain readable.",
       "deprecated": true,
@@ -181,6 +201,11 @@
       "type": "string",
       "description": "Optional source reference indicating where this workflow was added from. Format: owner/repo/path@ref (e.g., githubnext/agentics/workflows/ci-doctor.md@v1.0.0). Rendered as a comment in the generated lock file.",
       "examples": ["githubnext/agentics/workflows/ci-doctor.md", "githubnext/agentics/workflows/daily-perf-improver.md@1f181b37d3fe5862ab590648f25a292e345b5de6"]
+    },
+    "source-sha": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{40}$",
+      "description": "Installed source commit, managed by gh aw add and update. Used as the immutable base for three-way merges while source retains the tracking ref."
     },
     "redirect": {
       "type": "string",
@@ -2044,12 +2069,12 @@
                       }
                     }
                   ],
-                  "description": "When true, allows workflow to run on pull requests from forked repositories with write permissions. Security consideration: use cautiously as fork PRs run with base repository permissions."
+                  "description": "Filter fork pull requests by repository pattern (string or list). Omission and an empty list both allow only same-repository PRs. Exact owner/repo entries or trusted owner/* patterns admit matching forks; '*' allows all forks. Strict mode rejects any '*' entry unless the main workflow's top-level features.dangerously-allow-pull-request-target-forks-all is true; imported features do not enable this opt-in. Non-strict mode warns. The warning remains when the flag is enabled. Strict mode rejects expressions and unsupported pattern forms. Same-repository PRs remain allowed. Actor authorization and checkout restrictions remain mandatory; acknowledge-risk neither bypasses them nor suppresses the fork warning. This does not change GitHub's base-repository permissions or secret availability for pull_request_target."
                 },
                 "acknowledge-risk": {
                   "type": "boolean",
                   "default": false,
-                  "description": "Acknowledge elevated permissions and secret access to suppress only the strict-mode pull_request_target trigger warning. Checkout validation remains enforced."
+                  "description": "Acknowledge elevated permissions and secret access to suppress only the strict-mode pull_request_target trigger warning. The unrestricted-forks warning, actor authorization, fork-pattern validation, and checkout validation remain enforced."
                 },
                 "allowed-checkouts": {
                   "type": "array",
@@ -3170,6 +3195,18 @@
                   "url": {
                     "type": "string",
                     "description": "The URL to set as the environment URL in the deployment."
+                  },
+                  "deployment": {
+                    "oneOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\$\\{\\{.*\\}\\}$"
+                      }
+                    ],
+                    "description": "Set to false to use the environment's secrets and protection rules without creating a GitHub deployment."
                   }
                 },
                 "required": ["name"]
@@ -3395,6 +3432,12 @@
           "type": "boolean",
           "default": false,
           "description": "Suppress the non-strict warning when pull_request_target is combined with on.roles containing read or all. Strict mode still rejects this configuration.",
+          "examples": [true, false]
+        },
+        "dangerously-allow-pull-request-target-forks-all": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow forks: '*' under pull_request_target in strict mode when declared in the main workflow's top-level features. Imported features do not enable this opt-in. The unrestricted fork admission warning remains visible.",
           "examples": [true, false]
         }
       },
@@ -3778,6 +3821,18 @@
             "url": {
               "type": "string",
               "description": "A deployment URL"
+            },
+            "deployment": {
+              "oneOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\$\\{\\{.*\\}\\}$"
+                }
+              ],
+              "description": "Set to false to use the environment's secrets and protection rules without creating a GitHub deployment."
             }
           },
           "required": ["name"],
@@ -4204,6 +4259,15 @@
                       "type": "string",
                       "pattern": "^[0-9a-f]{64}$",
                       "description": "Literal SHA256 digest of the AWF release's checksums.txt manifest. Requires an explicit semantic release version. Overrides the trusted setup action's built-in manifest pin; obtain the digest through an independently trusted channel."
+                    },
+                    "enclave-debug-public": {
+                      "type": "boolean",
+                      "description": "Opt in to the maintained public Docker enclave diagnostic collector for static public-only default-image fixtures. Currently supports the reviewed AWF v0.29.5 release. Capture defaults to disabled; private, dynamic, mixed and image-override scopes are rejected. Validated artifacts have fixed one-day retention."
+                    },
+                    "host-github-token": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Secret expression bound to GH_TOKEN only in the AWF execution host step for repository staging. Never persisted to GITHUB_ENV or forwarded into the agent container or MCP gateway. Requires enclaves and AWF v0.29.5 or newer."
                     },
                     "platform": {
                       "type": "string",
@@ -6218,6 +6282,17 @@
               "type": "object",
               "description": "Repo-memory configuration object",
               "properties": {
+                "github-app": {
+                  "$ref": "#/$defs/repo_memory_github_app"
+                },
+                "github-app-read": {
+                  "$ref": "#/$defs/repo_memory_github_app",
+                  "description": "GitHub App for memory restores and daily-credit ledger clones. Overrides github-app for reads only."
+                },
+                "github-app-write": {
+                  "$ref": "#/$defs/repo_memory_github_app",
+                  "description": "GitHub App for memory pushes. Overrides github-app for writes only."
+                },
                 "branch-prefix": {
                   "type": "string",
                   "minLength": 4,
@@ -6346,6 +6421,17 @@
               "items": {
                 "type": "object",
                 "properties": {
+                  "github-app": {
+                    "$ref": "#/$defs/repo_memory_github_app"
+                  },
+                  "github-app-read": {
+                    "$ref": "#/$defs/repo_memory_github_app",
+                    "description": "GitHub App for memory restores and daily-credit ledger clones. Overrides github-app for reads only."
+                  },
+                  "github-app-write": {
+                    "$ref": "#/$defs/repo_memory_github_app",
+                    "description": "GitHub App for memory pushes. Overrides github-app for writes only."
+                  },
                   "id": {
                     "type": "string",
                     "description": "Memory identifier (required for array notation, default: 'default')"
@@ -6823,6 +6909,17 @@
                     }
                   ],
                   "description": "Title-based deduplication for create-issue. Set to true for exact title matching, or provide a non-negative integer (0\u2013100) to deduplicate by Levenshtein edit distance (e.g., 1 allows one-character differences). Accepts a GitHub Actions expression that resolves to a boolean or integer at runtime. Applies within-run and against open/recently-closed repository issues."
+                },
+                "deduplicate-by-labels": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "not": {
+                      "pattern": "\\$\\{\\{"
+                    }
+                  },
+                  "description": "Deduplicate against issues with all listed labels. When deduplicate-by-title is also enabled, both the title and all labels must match (AND). Applies within-run and against open/recently-closed repository issues. Omitted or empty lists disable label filtering. Labels must be literal strings, not GitHub Actions expressions. Does not change labels applied at creation."
                 },
                 "target-repo": {
                   "type": "string",
@@ -8254,14 +8351,15 @@
                 },
                 "protected-files": {
                   "type": "object",
-                  "description": "Protected files prevent workflow run approval when modified by the associated pull request. Use exclude to remove filenames or path prefixes from the default protected set, or a leading / for an exact repository path.",
+                  "description": "Protected files prevent workflow run approval when modified by the associated pull request. Use exclude to remove filenames or path prefixes from the default protected set, or a leading / for a repository-root path glob.",
                   "properties": {
                     "exclude": {
                       "type": "array",
                       "items": {
-                        "type": "string"
+                        "type": "string",
+                        "pattern": "^[^\\s]*[A-Za-z0-9_-][^\\s]*$"
                       },
-                      "description": "Basenames (e.g. AGENTS.md) and path prefixes (e.g. .agents/) remove protection everywhere they match. A leading / excludes only the exact repository path (e.g. /pyproject.toml), leaving same-named nested files protected."
+                      "description": "Basenames (e.g. AGENTS.md) and path prefixes (e.g. .agents/) remove protection everywhere they match. A leading / matches a repository-root path glob: * does not match /, while ** does. Without wildcards, /pyproject.toml excludes only that root file. Each pattern must contain a letter, digit, underscore, or hyphen and no whitespace."
                     }
                   },
                   "additionalProperties": false
@@ -9081,9 +9179,10 @@
                         "exclude": {
                           "type": "array",
                           "items": {
-                            "type": "string"
+                            "type": "string",
+                            "pattern": "^[^\\s]*[A-Za-z0-9_-][^\\s]*$"
                           },
-                          "description": "List of filenames or path prefixes to remove from the default protected-file set. Items are matched by basename (e.g. \"AGENTS.md\") or path prefix (e.g. \".agents/\"). A leading / matches only the exact repository path (e.g. \"/pyproject.toml\"), keeping nested files with the same name protected.",
+                          "description": "List of basenames (e.g. AGENTS.md) or path prefixes (e.g. .agents/) to remove from the default protected-file set. A leading / matches a repository-root path glob: * does not match /, while ** does. Without wildcards, /pyproject.toml excludes only that root file. Each pattern must contain a letter, digit, underscore, or hyphen and no whitespace.",
                           "examples": [["AGENTS.md"], ["AGENTS.md", ".agents/"], ["/pyproject.toml"]]
                         }
                       },
@@ -9109,6 +9208,11 @@
                   "type": "boolean",
                   "description": "When true (and preserve-branch-name is true), allows the handler to force-delete an existing remote branch ref and recreate it from the agent's local HEAD. When false (default), if the agent-specified branch already exists on the remote with preserve-branch-name enabled, the handler falls back (e.g. opens an issue) rather than overwriting the remote ref. Useful for long-lived reusable branches whose previous PR was merged.",
                   "default": false
+                },
+                "exclude-lock-yml": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Exclude .lock.yml files under .github/workflows from both patch and bundle transports to avoid GitHub Actions token workflow-write restrictions. When workflow YAML changes are omitted, the pull request includes a reminder to rerun gh aw compile. Other workflow YAML files are not excluded."
                 },
                 "excluded-files": {
                   "type": "array",
@@ -11089,7 +11193,7 @@
             },
             {
               "type": "object",
-              "description": "Configuration for controlled pull request merges. The merge is blocked unless all configured gates pass.",
+              "description": "Experimental configuration for controlled pull request merges. The merge is blocked unless all configured gates pass.",
               "properties": {
                 "max": {
                   "description": "Maximum number of pull request merges to perform per run (default: 1). Supports integer or GitHub Actions expression (e.g. '${{ inputs.max }}').",
@@ -11113,6 +11217,24 @@
                     "type": "string"
                   },
                   "description": "List of labels that must ALL be present on the pull request before merge is allowed."
+                },
+                "required-checks": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 },
+                  "uniqueItems": true,
+                  "description": "Exact check-run names that must complete successfully on the evaluated PR head SHA, in addition to branch-policy checks. Empty or omitted adds no workflow-owned CI requirement."
+                },
+                "required-check-apps": {
+                  "type": "object",
+                  "propertyNames": { "minLength": 1 },
+                  "additionalProperties": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                  "description": "Expected GitHub App ID for each named check. Keys must also appear in required-checks. A missing or different producer blocks merging."
+                },
+                "required-approvers": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 },
+                  "uniqueItems": true,
+                  "description": "Human GitHub logins. At least one must have a current, non-dismissed approval for the evaluated head SHA, independent of the PR author and authenticated merge identity. Empty or omitted requires no affirmative approval."
                 },
                 "allowed-labels": {
                   "type": "array",
@@ -11394,9 +11516,10 @@
                         "exclude": {
                           "type": "array",
                           "items": {
-                            "type": "string"
+                            "type": "string",
+                            "pattern": "^[^\\s]*[A-Za-z0-9_-][^\\s]*$"
                           },
-                          "description": "List of filenames or path prefixes to remove from the default protected-file set. Items are matched by basename (e.g. \"AGENTS.md\") or path prefix (e.g. \".agents/\"). A leading / matches only the exact repository path (e.g. \"/pyproject.toml\"), keeping nested files with the same name protected.",
+                          "description": "List of basenames (e.g. AGENTS.md) or path prefixes (e.g. .agents/) to remove from the default protected-file set. A leading / matches a repository-root path glob: * does not match /, while ** does. Without wildcards, /pyproject.toml excludes only that root file. Each pattern must contain a letter, digit, underscore, or hyphen and no whitespace.",
                           "examples": [["AGENTS.md"], ["AGENTS.md", ".agents/"], ["/pyproject.toml"]]
                         }
                       },
@@ -11412,6 +11535,11 @@
                     "type": "string"
                   },
                   "description": "Exclusive allowlist of glob patterns. When set, every file in the patch must match at least one pattern \u2014 files outside the list are always refused, including normal source files. This is a restriction, not an exception: setting allowed-files: [\".github/workflows/*\"] blocks all other files. To allow multiple sets of files, list all patterns explicitly. Acts independently of the protected-files policy; both checks must pass. To modify a protected file, it must both match allowed-files and be permitted by protected-files (e.g. protected-files: allowed). Supports * (any characters except /) and ** (any characters including /)."
+                },
+                "exclude-lock-yml": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Exclude .lock.yml files under .github/workflows from both patch and bundle transports to avoid GitHub Actions token workflow-write restrictions. When workflow YAML changes are omitted, the push summary and pull request comment include a reminder to rerun gh aw compile. Other workflow YAML files are not excluded."
                 },
                 "excluded-files": {
                   "type": "array",
@@ -12487,7 +12615,7 @@
           "oneOf": [
             {
               "type": "object",
-              "description": "⚠️ Experimental. Configuration for uploading a code coverage report via actions/upload-code-coverage",
+              "description": "Configuration for uploading a code coverage report via actions/upload-code-coverage",
               "properties": {
                 "target-ref": {
                   "type": "string",
@@ -12557,7 +12685,7 @@
               "description": "Enable code coverage report uploads with default configuration"
             }
           ],
-          "description": "⚠️ Experimental. Enable AI agents to upload a code coverage report (e.g. a Cobertura XML file) to GitHub's code coverage API via actions/upload-code-coverage. Using this field emits a compile-time warning. The agent stages the report file and calls the tool with file/language/label; a separate job performs the actual upload with dedicated code-quality: write permissions."
+          "description": "Enable AI agents to upload a code coverage report (e.g. a Cobertura XML file) to GitHub's code coverage API via actions/upload-code-coverage. The agent stages the report file and calls the tool with file/language/label; a separate job performs the actual upload with dedicated code-quality: write permissions."
         },
         "update-release": {
           "oneOf": [
@@ -12930,8 +13058,31 @@
                           "items": {
                             "type": "string"
                           }
+                        },
+                        "max-length": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 1000000,
+                          "description": "Maximum allowed string length in characters"
                         }
                       },
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "type": {
+                                "enum": ["boolean", "choice", "number", "environment"]
+                              }
+                            },
+                            "required": ["type"]
+                          },
+                          "then": {
+                            "not": {
+                              "required": ["max-length"]
+                            }
+                          }
+                        }
+                      ],
                       "additionalProperties": false
                     }
                   },
@@ -13163,8 +13314,31 @@
                           "enum": ["string", "boolean", "number"],
                           "description": "Input parameter type",
                           "default": "string"
+                        },
+                        "max-length": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 1000000,
+                          "description": "Maximum allowed string length in characters"
                         }
                       },
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "type": {
+                                "enum": ["boolean", "number"]
+                              }
+                            },
+                            "required": ["type"]
+                          },
+                          "then": {
+                            "not": {
+                              "required": ["max-length"]
+                            }
+                          }
+                        }
+                      ],
                       "additionalProperties": false
                     }
                   },
@@ -13389,10 +13563,10 @@
             },
             {
               "type": "array",
-              "description": "List of failure categories that should trigger issue creation. Categories can be prefixed with '!' to exclude them (e.g., '!inference_access_error'). If only non-prefixed categories are specified, only those categories trigger issues. If only prefixed (excluded) categories are specified, all categories except those trigger issues. If both are specified, categories must match included AND not match excluded. Common categories: agent_failure, timed_out, transport_wedge, missing_safe_outputs, report_incomplete, missing_tool, missing_data, inference_access_error, model_endpoint_mismatch, mcp_policy_error, ai_credits_rate_limit_error, max_ai_credits_exceeded, daily_ai_credits_unknown.",
+              "description": "List of failure categories that should trigger issue creation. Categories can be prefixed with '!' to exclude them (e.g., '!inference_access_error'). If only non-prefixed categories are specified, only those categories trigger issues. If only prefixed (excluded) categories are specified, all categories except those trigger issues. If both are specified, categories must match included AND not match excluded. Common categories: agent_failure, activation_failed, timed_out, transport_wedge, missing_safe_outputs, report_incomplete, missing_tool, missing_data, inference_access_error, model_endpoint_mismatch, mcp_policy_error, ai_credits_rate_limit_error, max_ai_credits_exceeded, daily_ai_credits_unknown.",
               "items": {
                 "type": "string",
-                "pattern": "^!?(agent_failure|timed_out|transport_wedge|missing_safe_outputs|report_incomplete|agent_startup_failure|engine_driver_failure|secret_redaction_failure|safeoutputs_cli_error|invalid_safe_outputs|missing_terminal_safe_output|missing_tool|missing_data|tool_denials_exceeded|cache_miss_misconfiguration|secret_verification_failed|inference_access_error|copilot_org_billing_error|mcp_policy_error|model_not_supported_error|model_endpoint_mismatch|ai_credits_rate_limit_error|unknown_model_ai_credits|max_ai_credits_exceeded|app_token_minting_failed|lockdown_check_failed|stale_lock_file_failed|daily_ai_credits_exceeded|daily_ai_credits_unknown|assignment_errors|assign_copilot_failures|skill_install_failures|create_discussion_errors|code_push_failures|repo_memory_validation_errors|push_repo_memory_failure)$"
+                "pattern": "^!?(agent_failure|activation_failed|timed_out|transport_wedge|missing_safe_outputs|report_incomplete|agent_startup_failure|engine_driver_failure|secret_redaction_failure|safeoutputs_cli_error|invalid_safe_outputs|missing_terminal_safe_output|missing_tool|missing_data|tool_denials_exceeded|cache_miss_misconfiguration|secret_verification_failed|inference_access_error|copilot_org_billing_error|mcp_policy_error|model_not_supported_error|model_endpoint_mismatch|ai_credits_rate_limit_error|unknown_model_ai_credits|max_ai_credits_exceeded|app_token_minting_failed|lockdown_check_failed|stale_lock_file_failed|daily_ai_credits_exceeded|daily_ai_credits_unknown|assignment_errors|assign_copilot_failures|skill_install_failures|create_discussion_errors|code_push_failures|repo_memory_validation_errors|push_repo_memory_failure)$"
               },
               "minItems": 1,
               "uniqueItems": true
@@ -13484,6 +13658,18 @@
                 "url": {
                   "type": "string",
                   "description": "A deployment URL"
+                },
+                "deployment": {
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^\\$\\{\\{.*\\}\\}$"
+                    }
+                  ],
+                  "description": "Set to false to use the environment's secrets and protection rules without creating a GitHub deployment."
                 }
               },
               "required": ["name"],
@@ -14571,11 +14757,13 @@
       }
     },
     "evals": {
-      "description": "\u26a0\ufe0f Experimental. BinEval binary evaluation questions to run after safe-outputs and before the conclusion job. Can be a plain list of questions (shorthand) or an object with questions, model, and runs-on fields.",
+      "description": "\u26a0\ufe0f Experimental. BinEval binary questions evaluated after the agent by one OpenAI-compatible Decisions request, independently of the agentic engine. Choice answers are YES, NO, or UNKNOWN. Supports 1-400 questions, as a plain list or an object with questions, model, and runs-on fields.",
       "oneOf": [
         {
           "type": "array",
           "description": "Shorthand form: plain list of evaluation question objects.",
+          "minItems": 1,
+          "maxItems": 400,
           "items": {
             "type": "object",
             "required": ["id", "question"],
@@ -14588,10 +14776,6 @@
               "question": {
                 "type": "string",
                 "description": "The binary (YES/NO) question to evaluate."
-              },
-              "model": {
-                "type": "string",
-                "description": "Optional model override for this specific question. Overrides the top-level model setting. Use a model alias such as \"small\" or a full model ID."
               }
             }
           }
@@ -14604,6 +14788,8 @@
             "questions": {
               "type": "array",
               "description": "List of binary evaluation question objects.",
+              "minItems": 1,
+              "maxItems": 400,
               "items": {
                 "type": "object",
                 "required": ["id", "question"],
@@ -14616,17 +14802,13 @@
                   "question": {
                     "type": "string",
                     "description": "The binary (YES/NO) question to evaluate."
-                  },
-                  "model": {
-                    "type": "string",
-                    "description": "Optional model override for this specific question. Overrides the top-level model setting. Use a model alias such as \"small\" or a full model ID."
                   }
                 }
               }
             },
             "model": {
               "type": "string",
-              "description": "Default model to use for all evaluation questions. Use a model alias such as \"small\" or a full model ID. Per-question model fields override this setting."
+              "description": "Decisions-compatible model ID for the entire question batch, sent without provider-specific name mapping. Defaults to copilot/gpt-6-luna-decisions, subject to GH_AW_DEFAULT_EVALS_MODEL, independently of the agent model. Use openai/gpt-6-luna for OpenAI credentials; unqualified models use Copilot. Per-question model overrides are not supported."
             },
             "runs-on": {
               "$ref": "#/$defs/github_actions_runs_on"
@@ -15539,6 +15721,42 @@
       },
       "additionalProperties": false
     },
+    "durable_config": {
+      "type": "object",
+      "description": "Experimental. Persist engine-declared session files in GitHub Actions artifacts. Using this field emits a compile-time warning. Configuration and behavior may change without deprecation. Copilot, Claude, and Codex resume the exact native session; other session-based engines receive a continuation prompt. Pi uses its native durable task runtime. Starts fresh when no prior history exists. No memory tool is required.",
+      "properties": {
+        "retention-days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 90,
+          "default": 7,
+          "description": "Number of days to retain durable checkpoint artifacts, subject to repository and organization artifact retention policy."
+        }
+      },
+      "additionalProperties": false
+    },
+    "pi_engine_config": {
+      "type": "object",
+      "properties": {
+        "durable": { "$ref": "#/$defs/durable_config" },
+        "model": { "$ref": "#/$defs/engine_config/oneOf/1/properties/model" },
+        "version": { "$ref": "#/$defs/engine_config/oneOf/1/properties/version" },
+        "config": { "$ref": "#/$defs/engine_config/oneOf/1/properties/config" },
+        "env": { "$ref": "#/$defs/engine_config/oneOf/1/properties/env" },
+        "args": { "$ref": "#/$defs/engine_config/oneOf/1/properties/args" },
+        "mcp": { "$ref": "#/$defs/engine_config/oneOf/1/properties/mcp" },
+        "driver": { "$ref": "#/$defs/engine_config/oneOf/1/properties/driver" },
+        "extensions": { "$ref": "#/$defs/engine_config/oneOf/1/properties/extensions" },
+        "command": { "$ref": "#/$defs/engine_config/oneOf/1/properties/command" },
+        "bare": { "$ref": "#/$defs/engine_config/oneOf/1/properties/bare" },
+        "cooldown": { "$ref": "#/$defs/engine_config/oneOf/1/properties/cooldown" },
+        "cwd": { "$ref": "#/$defs/engine_config/oneOf/1/properties/cwd" },
+        "model-routing": { "$ref": "#/$defs/engine_config/oneOf/1/properties/model-routing" },
+        "model-provider": { "$ref": "#/$defs/engine_config/oneOf/1/properties/model-provider" },
+        "max-turns": { "$ref": "#/$defs/engine_config/oneOf/1/properties/max-turns" }
+      },
+      "additionalProperties": false
+    },
     "engine_config": {
       "examples": [
         "claude",
@@ -15636,6 +15854,12 @@
               "pattern": "^[0-9a-f]{64}$",
               "description": "Copilot CLI only: literal SHA256 digest of the release's SHA256SUMS.txt manifest. Requires an explicit semantic release version and bypasses the runner toolcache so the downloaded archives are verified. Overrides the trusted setup action's built-in manifest pin."
             },
+            "cooldown": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 3,
+              "description": "Minimum release age in days for compiler-managed engine installs. Zero disables the cooldown only outside strict mode."
+            },
             "model": {
               "type": "string",
               "description": "Model for this engine, overriding the top-level model. Has sensible defaults and can typically be omitted. Supports full model IDs (e.g., 'claude-3-5-sonnet-20241022', 'gpt-4'), which is useful when a nested engine (e.g. safe-outputs.threat-detection.engine) needs a different model than the main agent engine."
@@ -15654,7 +15878,7 @@
             },
             "model-routing": {
               "type": "object",
-              "description": "Experimental per-run GitHub Copilot model and reasoning-effort selection from the task text for Copilot, Claude, Codex, and pi engines; requires the AWF firewall and ignores fixed model and effort settings. See https://github.github.com/gh-aw/reference/model-routing/.",
+              "description": "Experimental per-run model and reasoning-effort selection from the task text for Copilot, Claude, Codex, and pi engines, on GitHub Copilot or, for Claude and Codex, natively on Anthropic or OpenAI; requires the AWF firewall and ignores fixed model and effort settings. See https://github.github.com/gh-aw/reference/model-routing/.",
               "required": ["goal", "mode"],
               "additionalProperties": false,
               "properties": {
@@ -15685,7 +15909,7 @@
                       }
                     ]
                   },
-                  "description": "Optional exact Copilot model names or gh-aw model aliases (such as small or sonnet) that narrow the router's choice for the main agent only. Aliases expand to their GitHub Copilot model patterns, limited to the engine's model family for Claude and Codex. This is not a request policy; put patterns such as gpt-* in models.allowed or models.blocked. When omitted, the router chooses from the models that policy allows (Claude and Codex only from their own model family). Among workflows that enable routing for the same engine, if any omits allowed-models, the router has no shortlist; otherwise, their lists are combined. GitHub Actions expressions are allowed only when neither models.allowed nor models.blocked is set."
+                  "description": "Optional exact model names of the routing provider or gh-aw model aliases (such as small or sonnet) that narrow the router's choice for the main agent only. Aliases expand to their model patterns for the routing provider (GitHub Copilot, or Anthropic or OpenAI for native Claude and Codex routing), limited to the engine's model family for Claude and Codex. This is not a request policy; put patterns such as gpt-* in models.allowed or models.blocked. When omitted, the router chooses from the models that policy allows (Claude and Codex only from their own model family). Among workflows that enable routing for the same engine, if any omits allowed-models, the router has no shortlist; otherwise, their lists are combined. GitHub Actions expressions are allowed only when neither models.allowed nor models.blocked is set."
                 }
               }
             },
@@ -15998,6 +16222,9 @@
                 }
               ]
             },
+            "durable": {
+              "$ref": "#/$defs/durable_config"
+            },
             "extensions": {
               "type": "array",
               "items": {
@@ -16017,6 +16244,12 @@
           "type": "object",
           "description": "Inline engine definition: specifies a runtime adapter and optional provider settings directly in the workflow frontmatter, without requiring a named catalog entry",
           "properties": {
+            "cooldown": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 3,
+              "description": "Minimum release age in days for compiler-managed engine installs. Zero disables the cooldown only outside strict mode."
+            },
             "runtime": {
               "type": "object",
               "description": "Runtime adapter reference for the inline engine definition",
@@ -16173,6 +16406,9 @@
               "description": "Whether the engine supports MCP. When false, the compiler automatically enables gh-proxy and cli-proxy and rejects attempts to disable either proxy.",
               "default": true
             },
+            "durable": {
+              "$ref": "#/$defs/durable_config"
+            },
             "runtime-id": {
               "type": "string",
               "description": "Runtime adapter identifier. Maps to the CodingAgentEngine registered in the engine registry. Defaults to id when omitted."
@@ -16300,6 +16536,28 @@
               "type": "object",
               "description": "Declarative custom-engine runtime behavior used to materialize a shared CLI engine from frontmatter.",
               "properties": {
+                "durable": {
+                  "type": "object",
+                  "description": "Experimental native durability or session-file continuation. Declares persisted files and the continuation invocation; pinned dependency installation is optional. Enabling engine.durable emits a compile-time warning. The harness receives GH_AW_DURABLE_RESUMED and GH_AW_DURABLE_PARENT_RUN_ID.",
+                  "properties": {
+                    "files": {
+                      "type": "array",
+                      "minItems": 1,
+                      "uniqueItems": true,
+                      "items": { "type": "string", "minLength": 1 },
+                      "description": "Explicit files or directories under /tmp/gh-aw/agent/ to persist. $GH_AW_DURABLE_CHECKPOINT refers to the compiler-managed native checkpoint file. Globs and overlapping paths are unsupported."
+                    },
+                    "installation": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": { "$ref": "#/$defs/engine_config/oneOf/3/properties/behaviors/properties/installation" }
+                    },
+                    "execution": { "$ref": "#/$defs/engine_config/oneOf/3/properties/behaviors/properties/execution" },
+                    "harness-script": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["files", "execution"],
+                  "additionalProperties": false
+                },
                 "secret-strategy": {
                   "type": "string",
                   "description": "Secret resolution mode for the engine (for example 'universal-llm-consumer')."
@@ -16573,6 +16831,15 @@
             }
           },
           "required": ["model"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "Pi engine options, including optional durable execution.",
+          "properties": {
+            "pi": { "$ref": "#/$defs/pi_engine_config" }
+          },
+          "required": ["pi"],
           "additionalProperties": false
         }
       ]
@@ -16864,6 +17131,27 @@
       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Z][A-Z0-9]{0,15}-[1-9][0-9]*)$",
       "description": "Linear issue model UUID or uppercase shorthand identifier."
     },
+    "repo_memory_github_app": {
+      "type": "object",
+      "description": "GitHub App credentials for repo-memory. Push tokens request only contents: write; cross-repository clone tokens request only contents: read.",
+      "properties": {
+        "client-id": { "$ref": "#/$defs/github_app/properties/client-id" },
+        "app-id": { "$ref": "#/$defs/github_app/properties/app-id" },
+        "private-key": { "$ref": "#/$defs/github_app/properties/private-key" },
+        "owner": { "$ref": "#/$defs/github_app/properties/owner" },
+        "repositories": { "$ref": "#/$defs/github_app/properties/repositories" },
+        "ignore-if-missing": { "$ref": "#/$defs/github_app/properties/ignore-if-missing" }
+      },
+      "anyOf": [
+        { "required": ["client-id", "private-key"] },
+        { "required": ["app-id", "private-key"] },
+        {
+          "required": ["ignore-if-missing"],
+          "properties": { "ignore-if-missing": { "const": true } }
+        }
+      ],
+      "additionalProperties": false
+    },
     "github_app": {
       "type": "object",
       "description": "GitHub App credentials for minting installation access tokens.",
@@ -17043,6 +17331,11 @@
         "pull-request": {
           "type": "boolean",
           "description": "Set to false to disable the compiler-generated PR branch checkout and its associated base-config snapshot/restore steps. The normal repository checkout remains enabled."
+        },
+        "pull-request-floating-head": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicitly allow the compiler-generated PR checkout to select the current API head instead of the triggering event or review revision. Applies workflow-wide if enabled in any checkout entry. The selected SHA is still fetched, rechecked, and verified; this is current-head execution, not revision approval. Does not enable a disabled PR checkout. Requires a literal boolean."
         },
         "repository": {
           "type": "string",

@@ -6,6 +6,35 @@ import fs from "fs";
 const { resolveItemContext, resolveParentHopId, buildAwContext } = await import("./aw_context.cjs");
 const { EXPERIMENT_ASSIGNMENTS_PATH } = await import("./experiment_helpers.cjs");
 
+describe("buildAwContext PR revision evidence", () => {
+  afterEach(() => {
+    delete global.context;
+  });
+
+  it.each([
+    ["pull_request", { pull_request: { head: { sha: "event-head" } } }, "event-head"],
+    ["pull_request_target", { pull_request: { head: { sha: "label-event-head" } } }, "label-event-head"],
+    ["pull_request_review", { pull_request: { head: { sha: "newer-head" } }, review: { commit_id: "reviewed-commit" } }, "reviewed-commit"],
+    ["pull_request_review_comment", { pull_request: { head: { sha: "newer-head" } }, comment: { commit_id: "commented-commit" } }, "commented-commit"],
+    ["pull_request_review", { pull_request: { head: { sha: "newer-head" } }, review: {} }, ""],
+    ["pull_request_review_comment", { pull_request: { head: { sha: "newer-head" } }, comment: {} }, ""],
+    ["issue_comment", { issue: { number: 123, pull_request: {} } }, ""],
+  ])("propagates only event-recorded revision evidence for %s", (eventName, payload, expectedSha) => {
+    global.context = { repo: { owner: "owner", repo: "repo" }, eventName, payload };
+    expect(buildAwContext().pr_head_sha).toBe(expectedSha);
+  });
+
+  it("propagates the triggering edit time rather than dispatch time", () => {
+    global.context = {
+      repo: { owner: "owner", repo: "repo" },
+      eventName: "issue_comment",
+      payload: { comment: { created_at: "2026-10-26T10:00:00Z", updated_at: "2026-10-27T12:00:00Z" } },
+    };
+    expect(buildAwContext().comment_updated_at).toBe("2026-10-27T12:00:00Z");
+    expect(buildAwContext().pr_head_sha).toBe("");
+  });
+});
+
 describe("resolveItemContext", () => {
   it("returns issue type and number for issues events", () => {
     const payload = { issue: { number: 42 } };
@@ -143,8 +172,11 @@ describe("buildAwContext episode lineage", () => {
     const child = buildHop(200, "child", root);
     const grandchild = buildHop(300, "grandchild", child);
     expect(root.parent_hop_id).toBe("");
+    expect(root.parent_run_id).toBe("");
     expect(child.parent_hop_id).toBe(root.hop_id);
+    expect(child.parent_run_id).toBe("100");
     expect(grandchild.parent_hop_id).toBe(child.hop_id);
+    expect(grandchild.parent_run_id).toBe("200");
     for (const hop of [child, grandchild]) {
       expect(hop.episode_id).toBe(root.episode_id);
       expect(hop.root_run_id).toBe("100");

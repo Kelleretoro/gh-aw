@@ -1,7 +1,10 @@
 // @ts-check
 /// <reference types="@actions/github-script" />
 
-const { createReportIssue } = require("./issue_report.cjs");
+const { createReportIssue, buildIssueReport } = require("./issue_report.cjs");
+const { extractExpirationDate } = require("./ephemerals.cjs");
+const { appendReportExecutionProvenance } = require("./execution_provenance.cjs");
+const { getWorkflowCompilationNotice, isWorkflowYamlFile } = require("./workflow_file_exclusions.cjs");
 const { getStalePullRequestReason, StalePullRequestError } = require("./pr_lifecycle.cjs");
 
 /** @type {typeof import("fs")} */
@@ -22,7 +25,7 @@ const { createAuthenticatedGitHubClient } = require("./handler_auth.cjs");
 const { checkFileProtection, checkFileProtectionPostApply } = require("./manifest_file_helpers.cjs");
 const { ERR_SYSTEM, POLICY_FILE_PROTECTION_DENIED_REASON_CODE } = require("./error_codes.cjs");
 const { buildWorkflowRunUrl } = require("./workflow_metadata_helpers.cjs");
-const { renderTemplateFromFile, buildProtectedFileList, getPromptPath } = require("./messages_core.cjs");
+const { buildProtectedFileBlocks, getPromptPath } = require("./messages_core.cjs");
 const { withGitHubHostToken } = require("./git_auth_helpers.cjs");
 const gitHelpers = require("./git_helpers.cjs");
 const { ensureFullHistoryForBundle, importLocalBundle, offlineGitOptions, linearizeRangeAsCommit, ensureSafeDirectoryTrust } = gitHelpers;
@@ -31,7 +34,8 @@ const { findRepoCheckout } = require("./find_repo_checkout.cjs");
 const { getThreatWarningPresentation, getEffectiveDetectionConclusion } = require("./threat_detection_warning.cjs");
 const { attachExecutionState } = require("./safe_output_execution_metadata.cjs");
 const { resolveTransportPaths } = require("./resolve_transport_paths.cjs");
-const { buildManualBranchApplyCommands, withTransientPushRetry } = require("./create_pull_request_helpers.cjs");
+const { recoverObjectPack, isObjectPack, recoveryToken, traceObjectPack } = require("./object_pack_transport.cjs");
+const { buildManualBranchApplyCommands, buildFallbackIssueBlocks, withTransientPushRetry } = require("./create_pull_request_helpers.cjs");
 
 /**
  * @typedef {import('./types/handler-factory').HandlerFactoryFunction} HandlerFactoryFunction
@@ -382,7 +386,7 @@ async function detectWorkflowFileChanges(exec, gitOptions, baseBranch, coreLogge
           result.stdout
             .split("\n")
             .map(f => f.trim())
-            .filter(Boolean)
+            .filter(isWorkflowYamlFile)
         ),
       ];
       if (baseline !== primary) {
@@ -424,7 +428,7 @@ async function runWorkflowScopePreflightCheck(exec, gitOptions, allowWorkflows, 
   if (workflowFiles.length > 0) {
     coreLogger.info(`Pre-flight check: branch history contains workflow file changes (${workflowFiles.join(", ")}). Failing before push attempt.`);
     if (agentChangedFiles !== undefined) {
-      const agentWorkflowFiles = agentChangedFiles.filter(f => f.startsWith(".github/workflows/"));
+      const agentWorkflowFiles = agentChangedFiles.filter(isWorkflowYamlFile);
       if (agentWorkflowFiles.length === 0) {
         return buildWorkflowsScopeSkip(context, coreLogger);
       }
@@ -563,6 +567,8 @@ async function main(config = {}) {
    */
   return withTransportIntegrity(async function handlePushToPullRequestBranch(message, resolvedTemporaryIds, transport) {
     const exec = transport.guardExec(globalThis.exec);
+    let compilationNotice = getWorkflowCompilationNotice(message, config);
+    if (compilationNotice) core.warning(compilationNotice);
     // Check max count
     if (maxCount > 0 && processedCount >= maxCount) {
       core.info(`Skipping message - max count (${maxCount}) reached`);
@@ -584,6 +590,44 @@ async function main(config = {}) {
     const transportPaths = resolveTransportPaths(message, itemRepo);
     transport.captureOptional(transportPaths.patchPath);
     transport.captureOptional(transportPaths.bundlePath);
+    const objectPackRecovery = {};
+    if (transportPaths.bundlePath && isObjectPack(transport.read(transportPaths.bundlePath))) {
+      const triggeringPR = context.payload?.pull_request;
+      const aw = parseAwContext(context.payload?.inputs?.aw_context);
+      const explicitPull = message.pull_request_number ?? message.pullRequestNumber ?? message.target ?? message.pr_number ?? message.pull_number ?? message.item_number ?? message.pr;
+      const recoveryPull =
+        target === "triggering" ? parsePositiveInteger(triggeringPR?.number || context.payload?.issue?.number || (aw?.item_type === "pull_request" ? aw.item_number : null)) : parsePositiveInteger(target === "*" ? explicitPull : target);
+      const boundTarget = !!recoveryPull && triggeringPR?.number === recoveryPull && triggeringPR?.base?.repo?.full_name?.toLowerCase() === itemRepo.toLowerCase();
+      traceObjectPack("target-resolution", { eligible: boundTarget, incremental: true });
+      if (!boundTarget) {
+        throw new Error("Object-pack recovery requires a trusted triggering-PR baseline. Provision checkout data for dynamic PR updates.");
+      }
+      const { data: recoveryPR } = await githubClient.rest.pulls.get({ owner: repoParts.owner, repo: repoParts.repo, pull_number: recoveryPull });
+      const expectedHeadRepo = configuredHeadRepo || itemRepo;
+      const authorizedHead = recoveryPR.state === "open" && recoveryPR.head?.repo?.full_name?.toLowerCase() === expectedHeadRepo.toLowerCase() && triggeringPR.head?.repo?.full_name?.toLowerCase() === expectedHeadRepo.toLowerCase();
+      traceObjectPack("head-authorization", { eligible: authorizedHead });
+      if (!authorizedHead) {
+        throw new Error("Object-pack recovery is not authorized for this PR head repository");
+      }
+      const recovered = await recoverObjectPack(transport, transportPaths, {
+        repo: expectedHeadRepo,
+        branch: recoveryPR.head.ref,
+        mode: "incremental",
+        baseline: triggeringPR.head.sha,
+        config,
+        message,
+        token: configuredHeadRepo
+          ? headGitHubToken || (expectedHeadRepo.toLowerCase() === itemRepo.toLowerCase() ? await recoveryToken(githubClient, config["github-token"]) : undefined)
+          : await recoveryToken(githubClient, config["github-token"]),
+        staged: isStaged,
+        manualRecovery: objectPackRecovery,
+      });
+      if (recovered && config.patch_format === "am") transportPaths.bundlePath = undefined;
+      if (!compilationNotice) {
+        compilationNotice = getWorkflowCompilationNotice(message, config);
+        if (compilationNotice) core.warning(compilationNotice);
+      }
+    }
     const patchFilePath = transportPaths.patchPath;
     core.info(`Patch file path: ${patchFilePath || "(not set)"}`);
 
@@ -1008,6 +1052,7 @@ async function main(config = {}) {
       const runId = context.runId;
       const artifactFileName = hasBundleFile ? bundleFilePath.replace("/tmp/gh-aw/", "") : patchFilePath ? patchFilePath.replace("/tmp/gh-aw/", "") : "aw-unknown.patch";
       const applyInstructions = buildManualBranchApplyCommands({
+        objectPackRecovery,
         hasBundleFile,
         runId,
         artifactFileName,
@@ -1017,9 +1062,9 @@ async function main(config = {}) {
       const githubServer = process.env.GITHUB_SERVER_URL || "https://github.com";
       const prUrl = `${githubServer}/${repoParts.owner}/${repoParts.repo}/pull/${pullNumber}`;
       const issueTitle = `[gh-aw] Protected Files: ${prTitle || `PR #${pullNumber}`}`;
-      const fileList = buildProtectedFileList(files, githubServer, repoParts.owner, repoParts.repo, branchName);
+      const fileList = buildProtectedFileBlocks(files, githubServer, repoParts.owner, repoParts.repo, branchName);
       const templatePath = getPromptPath("manifest_protection_push_to_pr_fallback.md");
-      const issueBody = renderTemplateFromFile(templatePath, {
+      const issueBody = buildFallbackIssueBlocks(templatePath, {
         files: fileList,
         pull_number: pullNumber,
         pr_url: prUrl,
@@ -1028,18 +1073,28 @@ async function main(config = {}) {
         branch_name: branchName,
         apply_instructions: applyInstructions,
       });
+      const expirationDate = extractExpirationDate(pullRequest.body || "") || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      issueBody.push({
+        type: "quote",
+        agentTainted: false,
+        children: [{ type: "expiration", expiresAt: expirationDate.toISOString(), agentTainted: false }],
+      });
+      const issueReport = appendReportExecutionProvenance(buildIssueReport(issueTitle, issueBody), process.env.GH_AW_WORKFLOW_NAME || "Workflow", runUrl);
 
       try {
         const { data: issue } = await withRetry(
           () => {
             transport.assertUnchanged();
-            return createReportIssue(githubClient, {
-              owner: repoParts.owner,
-              repo: repoParts.repo,
-              title: issueTitle,
-              body: issueBody,
-              labels: ["agentic-workflows"],
-            });
+            return createReportIssue(
+              githubClient,
+              {
+                owner: repoParts.owner,
+                repo: repoParts.repo,
+                title: issueTitle,
+                labels: ["agentic-workflows", "pull-request-fallback"],
+              },
+              issueReport
+            );
           },
           RATE_LIMIT_RETRY_CONFIG,
           `create manifest-protection review issue in ${repoParts.owner}/${repoParts.repo}`
@@ -1528,7 +1583,7 @@ async function main(config = {}) {
             // when the token lacks the 'workflows' scope.  Distinguish between the
             // agent's own workflow files (hard error) and pre-existing commits (skip).
             if (isWorkflowsScopeRejection(reviewPushStderr)) {
-              const agentWorkflowFiles = agentChangedFiles.filter(f => f.startsWith(".github/workflows/"));
+              const agentWorkflowFiles = agentChangedFiles.filter(isWorkflowYamlFile);
               if (agentWorkflowFiles.length === 0) {
                 return buildWorkflowsScopeSkip("Review branch", core);
               }
@@ -1555,6 +1610,7 @@ async function main(config = {}) {
             "",
             `This PR contains changes that were originally intended for PR #${pullNumber} (\`${branchName}\`).`,
             "Please review the changes carefully before merging.",
+            ...(compilationNotice ? ["", compilationNotice] : []),
           ].join("\n");
 
           transport.assertUnchanged();
@@ -1632,7 +1688,7 @@ async function main(config = {}) {
         }
       }
 
-      const agentWorkflowFiles = agentChangedFiles.filter(f => f.startsWith(".github/workflows/"));
+      const agentWorkflowFiles = agentChangedFiles.filter(isWorkflowYamlFile);
       if (!allowWorkflows && agentWorkflowFiles.length > 0) {
         return buildWorkflowsScopeError("Branch", core);
       }
@@ -1752,7 +1808,7 @@ async function main(config = {}) {
             if (fallbackPushOutput.exitCode !== 0) {
               const fallbackPushStderr = (fallbackPushOutput.stderr || "").trim();
               if (isWorkflowsScopeRejection(fallbackPushStderr)) {
-                const agentWorkflowFiles = agentChangedFiles.filter(f => f.startsWith(".github/workflows/"));
+                const agentWorkflowFiles = agentChangedFiles.filter(isWorkflowYamlFile);
                 if (agentWorkflowFiles.length === 0) {
                   return buildWorkflowsScopeSkip("Fallback branch", core);
                 }
@@ -1765,6 +1821,7 @@ async function main(config = {}) {
             const fallbackHeadRef = pushRemoteUrl ? `${pushRepoParts.owner}:${fallbackBranchName}` : fallbackBranchName;
 
             const fallbackBody = [
+              ...(compilationNotice ? [compilationNotice, ""] : []),
               "> [!NOTE]",
               isNonFastForward
                 ? "> Direct push to the original pull request branch failed because the branch diverged (non-fast-forward)."
@@ -1893,6 +1950,7 @@ async function main(config = {}) {
           targetIssueNumber: pullNumber,
           targetRepo: `${repoParts.owner}/${repoParts.repo}`,
           targetGithubClient: githubClient,
+          ...(compilationNotice ? { additionalMessage: compilationNotice } : {}),
         });
       }
     }
@@ -1913,7 +1971,7 @@ async function main(config = {}) {
 - **URL**: [${pushUrl}](${pushUrl})
 `;
 
-    await core.summary.addRaw(summaryContent).write();
+    await core.summary.addRaw(compilationNotice ? `${summaryContent}\n${compilationNotice}` : summaryContent).write();
 
     // Push an extra empty commit if a token is configured and exactly 1 new commit was pushed.
     // This works around the GITHUB_TOKEN limitation where pushes don't trigger CI events.

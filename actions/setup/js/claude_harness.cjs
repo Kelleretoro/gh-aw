@@ -38,6 +38,7 @@
 
 const { getErrorMessage } = require("./error_helpers.cjs");
 const fs = require("fs");
+const { openDurableSession, observeDurableSession } = require("./durable_native_session.cjs");
 const { runProcess, formatDuration, resolvePostResultWatchdogIdleTimeoutMs } = require("./process_runner.cjs");
 const { applyClaudeRuntimeTimeouts } = require("./tool_timeouts.cjs");
 const {
@@ -51,7 +52,15 @@ const {
   claudeSafeOutputsOffset,
   removeClaudePlugin,
 } = require("./claude_runtime.cjs");
-const { captureExecutionEvidenceConfiguration, resolveHarnessRetryTelemetryPath, runHarnessRetryLoop, shouldSkipForNoopSafeOutputs, shouldStopForNoopSafeOutputs, stripExecutionEvidenceEnv } = require("./harness_retry_runner.cjs");
+const {
+  captureExecutionEvidenceConfiguration,
+  resolveHarnessRetryTelemetryPath,
+  runHarnessRetryLoop,
+  selectedHarnessStrategy,
+  shouldSkipForNoopSafeOutputs,
+  shouldStopForNoopSafeOutputs,
+  stripExecutionEvidenceEnv,
+} = require("./harness_retry_runner.cjs");
 const { resolveRetryConfig: resolveSharedRetryConfig } = require("./harness_retry_config.cjs");
 const {
   AWF_API_PROXY_REFLECT_URL,
@@ -75,7 +84,7 @@ const { applyModelFallback, normalizeClaudeModel } = require("./model_fallback.c
 const { resolveEngineModel } = require("./resolve_model_alias.cjs");
 const { applyClaudeSubagentModels, isDetectionPhase } = require("./engine_subagent_models.cjs");
 const { parseMaxAICreditsExceededFromAuditLog } = require("./ai_credits_context.cjs");
-const { resolveAWFModelRoutingSelection, mapAWFRoutingEffort, recordAWFModelRoutingOutcome, getAWFModelRoutingPolicy, getAWFModelRoutingFailureCode } = require("./awf_model_routing.cjs");
+const { resolveAWFModelRoutingSelection, mapAWFRoutingEffort, recordAWFModelRoutingOutcome, getAWFModelRoutingPolicy, getAWFModelRoutingFailureCode, resolveAWFRoutingProvider } = require("./awf_model_routing.cjs");
 const CLAUDE_ROUTING_POLICY = getAWFModelRoutingPolicy("claude");
 
 // Pattern to detect Anthropic API overload errors (HTTP 529).
@@ -368,13 +377,20 @@ function stripContinueArgs(args) {
 }
 
 /**
- * Resolve, validate, and record the routing decision for Claude.
+ * Resolve, validate, and record the routing decision for Claude. Claude routes on
+ * GitHub Copilot (model-provider: github) or natively on Anthropic, matching the
+ * engine's resolved GH_AW_LLM_PROVIDER.
  * @param {any} reflectData
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {{selection: any, effort: string|null, error: string|null}}
  */
 function resolveClaudeModelRouting(reflectData, env = process.env) {
-  const result = resolveAWFModelRoutingSelection(reflectData, true, CLAUDE_ROUTING_POLICY.endpoints, CLAUDE_ROUTING_POLICY.allowEndpointOverride);
+  const routingProvider = resolveAWFRoutingProvider("claude", env.GH_AW_LLM_PROVIDER);
+  const result = routingProvider
+    ? routingProvider === "github"
+      ? resolveAWFModelRoutingSelection(reflectData, true, CLAUDE_ROUTING_POLICY.endpoints, CLAUDE_ROUTING_POLICY.allowEndpointOverride)
+      : resolveAWFModelRoutingSelection(reflectData, true, CLAUDE_ROUTING_POLICY.endpoints, CLAUDE_ROUTING_POLICY.allowEndpointOverride, routingProvider)
+    : { selection: null, error: `AWF model routing is not supported for Claude on provider ${env.GH_AW_LLM_PROVIDER}` };
   if (result.error || !result.selection) {
     const error = result.error || "AWF model routing selection is missing";
     recordAWFModelRoutingOutcome(
@@ -456,6 +472,9 @@ async function buildClaudeChildEnv(reflectData, env = process.env, logger = log,
   const resolved = reflectData ? resolveProviderEndpointFromReflect({ provider: copilotProvider ? "github" : provider, reflectData, logger }) : null;
   if (copilotProvider && (!resolved || !REFLECT_PROVIDER_ALIASES.github.has(normalizeReflectProviderName(resolved.endpointProvider)))) {
     throw new Error("Claude GitHub Copilot inference requires a configured Copilot endpoint from AWF /reflect; keep the agent sandbox enabled and configure permissions.copilot-requests: write or COPILOT_GITHUB_TOKEN");
+  }
+  if (env.GH_AW_MODEL_ROUTING === "1" && !copilotProvider && (!resolved?.baseUrl || !REFLECT_PROVIDER_ALIASES.anthropic.has(normalizeReflectProviderName(resolved.endpointProvider)))) {
+    throw new Error("Claude native Anthropic model routing requires the configured Anthropic endpoint from AWF /reflect; refusing to start Claude");
   }
   if (resolved?.baseUrl) {
     childEnv.ANTHROPIC_BASE_URL = resolved.baseUrl;
@@ -615,7 +634,8 @@ async function main() {
   // emits anything) even though earlier attempts in the same session already made progress.
   // Reset only when a genuinely fresh run begins (see below), never on a --continue attempt.
   let sessionHasProgress = false;
-  let sessionId;
+  const durableSession = openDurableSession("claude");
+  let sessionId = durableSession?.id || undefined;
   const driverStartTime = Date.now();
   // The same deadline guards both the retry loop and each active child process.
   const softTimeoutGuard = buildSoftTimeoutGuard(driverStartTime);
@@ -631,14 +651,15 @@ async function main() {
     log,
     softTimeoutGuard,
     getRetryMode: () => (useContinueOnRetry ? `--resume ${sessionId}` : "fresh run"),
-    runAttempt: async attempt => {
+    runAttempt: async (attempt, observeStrategy) => {
       // Resume only the captured session; never select the latest unrelated conversation.
       // Claude Code resumes the session from on-disk state; re-sending the original
       // instructions would re-execute the full task from scratch.
       let currentArgs;
-      if (attempt > 0 && useContinueOnRetry) {
+      if ((attempt === 0 && durableSession?.id) || (attempt > 0 && useContinueOnRetry)) {
         currentArgs = [...continueBaseArgs, "--resume", sessionId];
       } else {
+        if (durableSession?.id && attempt > 0) throw new Error("Durable Claude continuation cannot restart a recorded session as a fresh conversation");
         currentArgs = attempt === 0 ? initialArgs : freshRetryArgs;
         // This attempt starts a brand-new session (either attempt 0, or a fresh
         // retry that discards prior on-disk state) — no assistant progress can carry
@@ -648,6 +669,8 @@ async function main() {
       }
 
       // Use redacted args for logging when the run carries the prompt text.
+      const strategy = selectedHarnessStrategy(currentArgs, "claude");
+      observeStrategy(strategy);
       const logArgs = attempt === 0 ? safeInitialArgs : useContinueOnRetry ? currentArgs : safeFreshRetryArgs;
       const safeOutputsByteOffset = claudeSafeOutputsOffset(safeOutputsPath);
       const result = await runProcess({
@@ -657,6 +680,7 @@ async function main() {
         log,
         logArgs,
         env: childEnv,
+        onStdoutLine: line => observeDurableSession(durableSession, "claude", line),
         stdin: attempt > 0 && useContinueOnRetry ? CLAUDE_RESUME_PROMPT : (prompt ?? undefined),
         postResultWatchdog: safeOutputsPath
           ? {
@@ -671,7 +695,7 @@ async function main() {
           : undefined,
       });
       sessionId = claudeSessionId(result.output) || sessionId;
-      return { ...result, exitCode: result.runtimeGuardFired && result.exitCode === 0 ? 1 : result.exitCode, safeOutputsByteOffset };
+      return { ...result, exitCode: result.runtimeGuardFired && result.exitCode === 0 ? 1 : result.exitCode, safeOutputsByteOffset, strategy };
     },
     handleFailure: ({ attempt, result }) => {
       if (result.runtimeGuardFired && softTimeoutGuard) {

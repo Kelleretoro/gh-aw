@@ -44,8 +44,9 @@ sandboxed agent principal, even when GitHub Actions runs both in the same job.
 | Runtime repository-list checkout | [`RuntimeRepositoryCheckout.tla`](RuntimeRepositoryCheckout.tla) | Trusted policy, bounded whole-batch validation, visibility, entry authentication, agent/privileged finalization, job-local manifests, staged isolation, and failure reporting. |
 | Pull-request fork admission | [`PullRequestForkAdmission.tla`](PullRequestForkAdmission.tla) | Same-repository default, repository-pattern or explicit author-association admission, non-PR trigger preservation, and permission independence. |
 | `pull_request_target` checkout policy | [`PullRequestTargetCheckout.tla`](PullRequestTargetCheckout.tla) | Strict warning acknowledgment, explicit checkout disablement, trusted base checkout, exact allowlisted external checkout, and fail-closed `fetch` handling. |
-| PR checkout authorization | [`CommentTriggeredPRCheckout.tla`](CommentTriggeredPRCheckout.tla) | Same-repository Bot branch-event authorization for supported PR actions; `labeled` and other unlisted actions retain the collaborator permission floor, as does the stricter allow-listed comment/review exception. |
+| PR checkout authorization | [`CommentTriggeredPRCheckout.tla`](CommentTriggeredPRCheckout.tla) | Same-repository Bot branch-event authorization for supported PR actions, including allow-listed `edited` events only when `changes` contains a non-null object-valued `body` field and no other fields; other edits and actions retain the collaborator permission floor, as does the stricter allow-listed comment/review exception. |
 | Patch/bundle application | [`SafeOutputTransport.tla`](SafeOutputTransport.tla) | Captured bytes, trusted transformations, private snapshots, publication retries, sticky failures, bounded local checking cost, and finally cleanup. |
+| Issue relationships | [`IssueRelationshipAuthorization.tla`](IssueRelationshipAuthorization.tla) | Resolved repository authorization before reads, writes, or per-item mention lookups; fixed/triggering parents, staged isolation, and deferred revalidation. |
 | Bundle Git operations | [`SafeOutputGit.tla`](SafeOutputGit.tla) | Explicit prerequisite recovery, offline optional discovery, bounded comparison/history work, credential roles, and separate size/protection provenance. |
 | Host-side MCP compilation | [`MCPCompile.tla`](MCPCompile.tla) | Startup write capability, actor authorization, early option rejection, filesystem isolation, cached-only imports, repository-root cache selection, validation, and write-enabled emission. |
 | Cooperative activation admission | [`ActivationAdmission.tla`](ActivationAdmission.tla) | Optional endpoint, isolated admission/conclusion OIDC capabilities, verified identity, retry/outage classification, independently resolved runtime allowances, privacy, and caller-owned trace correlation. |
@@ -63,6 +64,61 @@ must succeed. Failure before request publication causes origin validation to
 fail. Agent failures revoke the modeled engine credential. A minted installation
 token remains live until the `actions/create-github-app-token` post step, which
 revokes it after either safe-output success or failure.
+
+## Issue relationship authorization
+
+`IssueRelationshipAuthorization.tla` models the runtime boundary in
+`actions/setup/js/create_issue.cjs` (`handleCreateIssue`, `resolveBlockedByReferences`)
+and `actions/setup/js/link_sub_issue.cjs` (`handleLinkSubIssue`), using
+`repo_helpers.cjs` (`resolveAndValidateRepo`) policy. It checks that token
+access cannot widen the authorized default-target/allowlist union and that
+temporary IDs cannot replace a validated repository with an unauthorized one.
+Fixed and triggering parents ignore model-selected parent repositories.
+
+The finite model explores two handlers, six policy classes (default, fixed
+repository, exact allowlist, organization glob, global allowlist wildcard,
+and target-repository wildcard), four symbolic repositories including a
+case-mismatched allowed name, staged/live execution, parent target modes,
+numeric/temporary references for links, and numeric/qualified/URL/temporary
+blockers. A temporary reference may defer once before resolution. Issue numbers,
+parsers, actual glob evaluation, credential minting, mixed blocker arrays,
+API failures, and GitHub services are not modeled; runtime tests cover these
+concrete handler surfaces. Staged unresolved blockers are display-only.
+No fairness or liveness claim is made.
+
+The secure profile checks repository containment, whole-item preflight before
+API calls, zero calls on rejection, same-repository links, trusted parent
+selection, staged write isolation, and deferred isolation. Four synthetic
+faults remove resolved-policy enforcement, move mentions before preflight,
+override a trusted parent, or execute staged writes. Three reachability
+witnesses demonstrate authorized writes, denied references, and deferred retries.
+These are bounded checks, not a proof of implementation refinement.
+
+```bash
+TLA2TOOLS_JAR=/path/to/tla2tools.jar JAVA_BIN=/path/to/java \
+  python3 specs/workflow-security/check.py --model issue-relationships \
+  --results /tmp/issue-relationship-results
+```
+
+The checksum-pinned wrapper retains model/config hashes, state counts, logs,
+and counterexample traces, and rejects tooling failures as evidence.
+
+## Cache lifecycle and read-only boundaries
+
+The compiler's [CTR-019 cache contract](../compiler-threat-detection-spec.md#513-cache-access-and-publication-ctr-019)
+separates cache restoration and local edits from artifact handoff and
+detection-gated cache publication. Unlike the safe-output lifecycle above,
+the cache-memory publisher requires the agent job to succeed as well as
+explicit detector acceptance and an eligible runtime event. Artifact existence
+does not authorize publication.
+
+These models do not represent cache-service entries, restore-prefix matching,
+eviction, event-scoped cache tokens, or the cache-memory publisher principal.
+The host-side `MCPCompile.tla` model's read-only filesystem/import-cache
+invariants are independent of runtime job `cache-mode: read`. Entry
+`restore-only: true` also does not make the local workspace immutable.
+Generated-YAML, namespace, lifecycle, and lint tests mapped under CTR-019 are
+the current evidence; the models are not a cache-poisoning proof.
 
 ## Pull-request fork admission
 
@@ -449,6 +505,56 @@ termination, abort signals, and shallow/partial-clone preservation remains in
 `push_to_pull_request_branch.integration.test.cjs`, and
 `bundle_transport.integration.test.cjs` under `actions/setup/js/`.
 
+## Deferred safe-output object recovery
+
+[`SafeOutputObjectRecovery.tla`](SafeOutputObjectRecovery.tla) models the AGG-005
+fallback independently of offline generation and ordinary bundle application.
+Local artifacts retain their fast path. Missing local data may queue bounded
+offline packaging, followed by preview verification, an isolated authorized
+filtered fetch, trusted-blob hydration, complete-object import, and the same publication policy gates.
+Incremental fetches require a trusted exact pre-agent baseline.
+The abstraction configures one or three pinned adaptive fetch attempts before
+import and rejects invalid trusted limit settings. Publisher boundedness is
+independent of uploaded limit claims. `ConfigurationValid`, `PublisherLimits`,
+and `BoundedFilteredFetch` retain those boundaries alongside filtering, trusted
+hydration, and hydration-before-import invariants. Actual depth steps, tree
+comparisons, and byte/time limits remain
+implementation properties covered by real-Git regressions, not TLA+ proofs.
+
+The runner checks four full/incremental/attempt-budget profiles, eleven negative controls (agent fetch,
+copied configuration, unauthorized remote, substituted baseline, hidden preview
+bytes, bypassed publication policy, unfiltered requests, untrusted blob hydration,
+unbounded fetching, invalid configuration, and uploaded limit overrides), and three reachability witnesses:
+
+```bash
+TLA2TOOLS_JAR=/path/to/tla2tools.jar JAVA_BIN=/path/to/java \
+  python3 specs/workflow-security/check_transport.py --model recovery
+```
+
+The model abstracts object completeness, boundedness, byte/preview matching,
+authorization, and policy results as finite predicates. It does not prove Git
+parser safety, detector completeness, native resource limits, credential grants,
+or implementation refinement. JavaScript regressions exercise actual object
+bytes, binary bundles, exact baselines, Claim-scoped paths, exclusions, redaction
+rejection, and publisher policy enforcement.
+
+Before the repository-limit extension, on 2026-11-02 UTC, a real TLC 1.8.0 run with the pinned jar digest and Java 21
+passed all 114 cases: 34 transport, 24 Git operations, 42 offline generation,
+and 14 deferred recovery. Secure profiles exhausted their reachable state graphs;
+negative controls and witnesses produced their exact expected invariants.
+This does not cover descriptor-relative staging races or the post-redaction
+artifact-upload guard, which require implementation regressions. That historical
+114-case result does not establish verification of the extended recovery model.
+The extended recovery model was separately checked with the same pinned TLC 1.8.0
+jar and Java 21: all 18 cases passed, including the four finite-budget profiles,
+eleven exact-invariant negative controls, and three reachability witnesses.
+The current complete runner contains 118 cases.
+
+```bash
+TLA2TOOLS_JAR=/path/to/tla2tools.jar JAVA_BIN=/path/to/java \
+  python3 specs/workflow-security/check_transport.py --model all
+```
+
 ## Runtime repository-list checkout
 
 [`RuntimeRepositoryCheckout.tla`](RuntimeRepositoryCheckout.tla) refines the
@@ -509,11 +615,15 @@ checks; the real-Git `.gitmodules` regression is not replaced by this abstractio
 
 [`CommentTriggeredPRCheckout.tla`](CommentTriggeredPRCheckout.tla) exhaustively
 models `pull_request` and `pull_request_target` actions `opened`, `synchronize`,
-`ready_for_review`, `reopened`, `labeled`, and other unlisted actions, as well as `issue_comment`,
+`ready_for_review`, `reopened`, `edited`, `labeled`, and other unlisted actions, as well as `issue_comment`,
 `pull_request_review_comment`, and `pull_request_review`. The branch-event
 exception requires a Bot sender whose login exactly matches the runtime actor
 and matching positive runtime, PR-head, and PR-base repository identities. The
-comment/review exception separately requires an allow-listed Bot sender, exact
+`edited` branch exception additionally requires an allow-listed actor and a
+`changes` object containing only a non-null object-valued `body` field; missing
+or malformed changes, title/base edits, and mixed body/title or body/base changes
+retain the collaborator permission floor.
+The comment/review exception separately requires an allow-listed Bot sender, exact
 equality between the webhook sender and matching comment or review author,
 canonical equality between the runtime actor and sender, and matching
 repository identities. Every other case retains the write-or-higher
@@ -535,8 +645,9 @@ For each negative control, copy the `.cfg` to a temporary file, set `Fault` to
 one of `"event-bypass"`, `"sender-type-bypass"`, `"author-bypass"` (which covers
 comment and review author mismatches), `"actor-bypass"`, `"allowlist-bypass"`,
 `"repository-bypass"`, `"branch-event-bypass"`, `"branch-action-bypass"`,
-`"branch-sender-type-bypass"`, `"branch-sender-bypass"`, or
-`"branch-repository-bypass"`, and confirm TLC reports
+`"branch-sender-type-bypass"`, `"branch-sender-bypass"`,
+`"branch-repository-bypass"`, `"branch-edited-body-bypass"`, or
+`"branch-edited-allowlist-bypass"`, and confirm TLC reports
 `NoUnauthorizedBotBypass`.
 
 | Predicate | Required safety condition | Architecture / threat rule | Compiler/runtime evidence |
@@ -653,7 +764,7 @@ asset SHA-256 published by GitHub for asset `670958559`, updated on
 2026-10-24; the release notes publish SHA-1):
 
 ```text
-d15655eeaff4b3f7b3d65c46b838bc0f35d131b2ef4b1e473689b62c98d4726f
+011267fca25d0752cf18894dd585cd28b96960c112ea8a20b823ea770e7e10cd
 ```
 
 Upstream rebuilds this release asset and moves the `v1.8.0` tag; its versioned

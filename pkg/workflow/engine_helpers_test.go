@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/github/gh-aw/pkg/constants"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -94,25 +93,6 @@ func TestApplyEngineHarnessRetryEnv(t *testing.T) {
 
 		assert.Equal(t, "90000", env["GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS"])
 	})
-}
-
-func TestBuildStandardNpmEngineInstallStepsNoCooldown(t *testing.T) {
-	steps := BuildStandardNpmEngineInstallStepsNoCooldown(
-		"@github/copilot",
-		string(constants.DefaultCopilotVersion),
-		"Install GitHub Copilot CLI",
-		"copilot",
-		&WorkflowData{},
-	)
-
-	var content strings.Builder
-	for _, step := range steps {
-		content.WriteString(strings.Join(step, "\n"))
-		content.WriteString("\n")
-	}
-	if strings.Contains(content.String(), "NPM_CONFIG_MIN_RELEASE_AGE") {
-		t.Fatalf("expected npm cooldown env to be omitted when no-cooldown helper is used")
-	}
 }
 
 func TestShellEscapeArgWithFullyQuotedAgentPath(t *testing.T) {
@@ -256,8 +236,8 @@ func TestGetNpmBinPathSetup_PreservesSelectedRuby(t *testing.T) {
 }
 
 func TestDockerSudoIptablesPreservesSelectedRubyPath(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Skipping shell-based test on non-Linux platform")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("Skipping shell-based test outside Linux and macOS")
 	}
 
 	root := t.TempDir()
@@ -279,9 +259,9 @@ func TestDockerSudoIptablesPreservesSelectedRubyPath(t *testing.T) {
 	awfScript := fmt.Sprintf("#!/bin/bash\nset -e\nunset GOROOT ERLANG_HOME\n%s\nruby --version\nnpm-agent\n", GetNpmBinPathSetup())
 	require.NoError(t, os.WriteFile(fakeAWF, []byte(awfScript), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(commandBin, "sudo"), []byte(`#!/bin/sh
-if [ "$1" = "-E" ]; then
-  shift
-fi
+case "$1" in
+  -E|--preserve-env=*) shift ;;
+esac
 export PATH="$GH_AW_TEST_SECURE_PATH"
 exec "$@"
 `), 0o755))

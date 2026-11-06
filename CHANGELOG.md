@@ -4,7 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Security
+
+Allow explicitly `on.bots`-listed Apps to check out same-repository PRs on
+`edited` events only when the webhook reports a non-null object-valued `body`
+change and no other changed fields. Missing change metadata, title/base changes,
+and mixed edits continue to require write-or-higher repository permission.
+
 ### Breaking changes
+
+`pull_request_target` workflows now default to same-repository PRs only in both
+strict and non-strict mode. Omitting `forks` is equivalent to `forks: []`; no
+explicit empty list is required. To admit forks, configure exact `owner/repo`
+entries or deliberately trusted `owner/*` patterns, then recompile. Explicit
+`"*"` permits unrestricted admission in both modes, but strict mode rejects it
+unless the main workflow's top-level `features.dangerously-allow-pull-request-target-forks-all: true`
+is set; imported features do not enable this opt-in. Strict mode still rejects
+expressions and unsupported pattern forms. The compiler warns whenever unrestricted
+admission is allowed. Actor authorization and trusted-checkout restrictions remain
+mandatory in strict mode; `acknowledge-risk`, disabled checkout, and trusted checkout
+policies do not bypass fork-pattern validation or suppress the unrestricted-forks warning.
 
 The `gh aw outcomes` command has been removed. Use `gh aw logs --outcomes`
 to evaluate selected runs, or pipe a run ID to

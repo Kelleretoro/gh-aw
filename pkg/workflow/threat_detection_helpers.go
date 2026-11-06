@@ -226,7 +226,12 @@ func resolveExternalDetectorEngineConfig(data *WorkflowData, engineID string) *E
 		return config
 	}
 
-	return &EngineConfig{ID: engineID}
+	config := &EngineConfig{ID: engineID}
+	if data.EngineConfig != nil && data.EngineConfig.Cooldown != nil {
+		cooldown := *data.EngineConfig.Cooldown
+		config.Cooldown = &cooldown
+	}
+	return config
 }
 
 func resetDetectionEngineTaskSettings(config *EngineConfig) {
@@ -254,6 +259,8 @@ func cloneThreatDetectionEngineConfig(engineID string, source *EngineConfig) *En
 	cloned := *source
 	cloned.ID = engineID
 	cloned.ModelRouting = nil
+	cloned.Durable = nil
+	cloned.durableError = nil
 	if source.ID != "" && source.ID != engineID {
 		threatLog.Printf("Resetting runtime settings when normalizing %q to detection engine %q", source.ID, engineID)
 		cloned.Version = ""

@@ -2,6 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { expectExecutionProvenance, useExecutionProvenanceFixture } from "./test_execution_provenance.js";
+
+useExecutionProvenanceFixture();
 
 const { getPatchPathForBranch, getPatchPathForBranchInRepo } = require("./git_patch_utils.cjs");
 const { getBundlePathForBranch, getBundlePathForBranchInRepo } = require("./generate_git_bundle.cjs");
@@ -204,7 +207,7 @@ describe("push_to_pull_request_branch.cjs", () => {
           get: vi.fn().mockResolvedValue({
             data: { default_branch: "main" },
           }),
-          getBranchProtection: vi.fn().mockRejectedValue(Object.assign(new Error("Branch not protected"), { status: 404 })),
+          getBranch: vi.fn().mockResolvedValue({ data: { protected: false } }),
         },
         issues: {
           create: vi.fn().mockResolvedValue({
@@ -973,8 +976,8 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
     });
 
     it("should block push to a branch with protection rules", async () => {
-      // Branch has protection rules - getBranchProtection resolves successfully
-      mockGithub.rest.repos.getBranchProtection.mockResolvedValue({ data: {} });
+      // Branch has protection rules
+      mockGithub.rest.repos.getBranch.mockResolvedValue({ data: { protected: true } });
 
       const patchPath = createPatchFile("should-block-push-to-a-branch-with-protection-rules");
       const module = await loadModule();
@@ -989,7 +992,7 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
     });
 
     it("should allow push when branch is not default and has no protection rules", async () => {
-      // Default mock: repos.get returns "main", getBranchProtection returns 404
+      // Default mock: repos.get returns "main", getBranch returns protected: false
       // PR head is "feature-branch" (not the default)
       const patchPath = createPatchFile("should-allow-push-when-branch-is-not-default-and-has-no-prot");
       mockExec.getExecOutput.mockResolvedValue({ exitCode: 0, stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", stderr: "" });
@@ -1017,10 +1020,10 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
       expect(result.success).toBe(true);
     });
 
-    it("should warn and continue when getBranchProtection returns 403 (permission denied)", async () => {
-      // getBranchProtection returns 403 (no permission to read protection)
+    it("should warn and continue when getBranch returns 403 (permission denied)", async () => {
+      // getBranch returns 403 (no permission to read the branch)
       // Platform will still enforce protection at push time, so we warn and allow
-      mockGithub.rest.repos.getBranchProtection.mockRejectedValue(Object.assign(new Error("Forbidden"), { status: 403 }));
+      mockGithub.rest.repos.getBranch.mockRejectedValue(Object.assign(new Error("Forbidden"), { status: 403 }));
       const patchPath = createPatchFile("should-warn-and-continue-when-getbranchprotection-returns-40");
       mockExec.getExecOutput.mockResolvedValue({ exitCode: 0, stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", stderr: "" });
 
@@ -1033,9 +1036,9 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
       expect(result.success).toBe(true);
     });
 
-    it("should block push when getBranchProtection returns an unexpected error (fail closed)", async () => {
-      // getBranchProtection returns 500 - unexpected error, fail closed for security
-      mockGithub.rest.repos.getBranchProtection.mockRejectedValue(Object.assign(new Error("Internal Server Error"), { status: 500 }));
+    it("should block push when getBranch returns an unexpected error (fail closed)", async () => {
+      // getBranch returns 500 - unexpected error, fail closed for security
+      mockGithub.rest.repos.getBranch.mockRejectedValue(Object.assign(new Error("Internal Server Error"), { status: 500 }));
       const patchPath = createPatchFile("should-block-push-when-getbranchprotection-returns-an-unexpe");
 
       const module = await loadModule();
@@ -1606,7 +1609,7 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
 
       try {
         createPatchFile("should-fallback-after-timeout-with-workflows-permission");
-        mockGitForPrimaryPush(".github/workflows/ci.yml\n");
+        mockGitForPrimaryPush(".github/workflows/ci.yml\0");
 
         const module = await loadModule();
         const handler = await module.main({ allow_workflows: true });
@@ -1663,7 +1666,7 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
 
       try {
         createPatchFile("should-fail-before-push-without-workflows-permission");
-        mockGitForPrimaryPush(".github/workflows/ci.yml\n");
+        mockGitForPrimaryPush(".github/workflows/ci.yml\0");
 
         const module = await loadModule();
         const handler = await module.main({});
@@ -1675,6 +1678,27 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
         expect(mockGithub.rest.pulls.create).not.toHaveBeenCalled();
       } finally {
         pushSignedSpy.mockRestore();
+      }
+    });
+
+    it("pushes retained workflow Markdown and includes the compiler callout", async () => {
+      const notice = require("./workflow_file_exclusions.cjs").WORKFLOW_COMPILATION_NOTICE;
+      const pushSpy = vi.spyOn(require("./push_signed_commits.cjs"), "pushSignedCommits").mockResolvedValue("remote-head-after");
+      const commentSpy = vi.spyOn(require("./update_activation_comment.cjs"), "updateActivationCommentWithCommit").mockResolvedValue(undefined);
+      try {
+        const branch = "retained-workflow-markdown";
+        createPatchFile(branch);
+        mockGitForPrimaryPush(".github/workflows/source.md\0");
+        const module = await loadModule();
+        const handler = await module.main({ exclude_lock_yml: true });
+        const result = await handler({ branch, message: notice }, {});
+        expect(result.success).toBe(true);
+        expect(pushSpy).toHaveBeenCalled();
+        expect(commentSpy).toHaveBeenCalledWith(mockGithub, mockContext, mockCore, expect.any(String), expect.any(String), expect.objectContaining({ additionalMessage: notice }));
+        expect(mockCore.summary.addRaw).toHaveBeenCalledWith(expect.stringContaining(notice));
+      } finally {
+        pushSpy.mockRestore();
+        commentSpy.mockRestore();
       }
     });
 
@@ -1918,11 +1942,11 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
     });
 
     it.each([
-      ["warning", "agent_failure", "> [!WARNING]", "> threat detection engine error", "<!-- gh-aw-threat-engine-error -->", "<!-- gh-aw-threat-detected -->"],
+      ["warning", "agent_failure", "> [!WARNING]", "> Threat detection engine error", "<!-- gh-aw-threat-engine-error -->", "<!-- gh-aw-threat-detected -->"],
       ["warning", "threat_detected", "> [!CAUTION]", "> agentic threat detected", "<!-- gh-aw-threat-detected -->", "<!-- gh-aw-threat-engine-error -->"],
       // Warn-mode detection engine failure as concluded by threat-detect v0.5.2 (run 39191157830).
-      ["failure", "agent_failure", "> [!WARNING]", "> threat detection engine error", "<!-- gh-aw-threat-engine-error -->", "<!-- gh-aw-threat-detected -->"],
-      ["failure", "parse_error", "> [!WARNING]", "> threat detection engine error", "<!-- gh-aw-threat-engine-error -->", "<!-- gh-aw-threat-detected -->"],
+      ["failure", "agent_failure", "> [!WARNING]", "> Threat detection engine error", "<!-- gh-aw-threat-engine-error -->", "<!-- gh-aw-threat-detected -->"],
+      ["failure", "parse_error", "> [!WARNING]", "> Threat detection engine error", "<!-- gh-aw-threat-engine-error -->", "<!-- gh-aw-threat-detected -->"],
     ])("should create a review PR body for %s/%s with the correct admonition and marker", async (conclusion, reason, admonition, title, expectedMarker, unexpectedMarker) => {
       process.env.GH_AW_DETECTION_CONCLUSION = conclusion;
       process.env.GH_AW_DETECTION_REASON = reason;
@@ -1939,6 +1963,19 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
       expect(params.body).toContain(title);
       expect(params.body).toContain(expectedMarker);
       expect(params.body).not.toContain(unexpectedMarker);
+    });
+
+    it("preserves the compiler callout when changes require a separate review PR", async () => {
+      process.env.GH_AW_DETECTION_CONCLUSION = "warning";
+      const notice = require("./workflow_file_exclusions.cjs").WORKFLOW_COMPILATION_NOTICE;
+      const branch = "review-branch-compiler-callout";
+      createPatchFile(branch);
+      const module = await loadModule();
+      const handler = await module.main({ exclude_lock_yml: true });
+      const result = await handler({ branch, message: notice }, {});
+      expect(result.success).toBe(true);
+      expect(result.review_pr).toBe(true);
+      expect(mockGithub.rest.pulls.create.mock.calls.at(-1)[0].body).toContain(notice);
     });
 
     it("should include head_repo for a review PR from a same-organization fork", async () => {
@@ -2131,7 +2168,7 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
         }
         // Agent's post-apply diff includes a workflow file
         if (cmd === "git" && argList[0] === "diff" && argList[1] === "--name-only" && argList[2] === "--no-renames") {
-          return { exitCode: 0, stdout: ".github/workflows/ci.yml\n", stderr: "" };
+          return { exitCode: 0, stdout: ".github/workflows/ci.yml\0", stderr: "" };
         }
         if (cmd === "git" && argList[0] === "push" && argList[1] === "origin") {
           throw new Error("git push should not be called when pre-flight fires a hard error");
@@ -2166,7 +2203,7 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
         }
         // Agent's post-apply diff includes a workflow file
         if (cmd === "git" && argList[0] === "diff" && argList[1] === "--name-only" && argList[2] === "--no-renames") {
-          return { exitCode: 0, stdout: ".github/workflows/ci.yml\n", stderr: "" };
+          return { exitCode: 0, stdout: ".github/workflows/ci.yml\0", stderr: "" };
         }
         // Push is rejected for workflows scope
         if (cmd === "git" && argList[0] === "push" && argList[1] === "origin") {
@@ -2223,7 +2260,7 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
         }
         // Agent's post-apply diff includes a workflow file
         if (argList[0] === "diff" && argList[1] === "--name-only" && argList[2] === "--no-renames") {
-          return { exitCode: 0, stdout: ".github/workflows/ci.yml\n", stderr: "" };
+          return { exitCode: 0, stdout: ".github/workflows/ci.yml\0", stderr: "" };
         }
         if (argList[0] === "diff-tree") {
           return { exitCode: 0, stdout: "", stderr: "" };
@@ -2277,7 +2314,7 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
         }
         // Agent's post-apply diff includes a workflow file
         if (argList[0] === "diff" && argList[1] === "--name-only" && argList[2] === "--no-renames") {
-          return { exitCode: 0, stdout: ".github/workflows/ci.yml\n", stderr: "" };
+          return { exitCode: 0, stdout: ".github/workflows/ci.yml\0", stderr: "" };
         }
         if (argList[0] === "diff-tree") {
           return { exitCode: 0, stdout: "", stderr: "" };
@@ -2368,7 +2405,7 @@ index 0000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4
         }
         // Agent's post-apply diff includes a workflow file
         if (cmd === "git" && argList[0] === "diff" && argList[1] === "--name-only" && argList[2] === "--no-renames") {
-          return { exitCode: 0, stdout: ".github/workflows/ci.yml\n", stderr: "" };
+          return { exitCode: 0, stdout: ".github/workflows/ci.yml\0", stderr: "" };
         }
         if (cmd === "git" && argList[0] === "push" && argList[1] === "origin") {
           throw new Error("git push should not be called when pre-flight fires a hard error");
@@ -3969,7 +4006,7 @@ ${diffs}
       const pushSignedSpy = vi.spyOn(pushSignedCommitsModule, "pushSignedCommits").mockResolvedValue("remote-head-after");
       const promptsDir = path.join(tempDir, "prompts");
       fs.mkdirSync(promptsDir, { recursive: true });
-      fs.writeFileSync(path.join(promptsDir, "manifest_protection_push_to_pr_fallback.md"), "Protected files: {{files}}", "utf8");
+      fs.writeFileSync(path.join(promptsDir, "manifest_protection_push_to_pr_fallback.md"), "Protected files:\n\n{files}", "utf8");
       process.env.GH_AW_PROMPTS_DIR = promptsDir;
       mockExec.getExecOutput.mockImplementation(async (cmd, args) => {
         if (cmd === "git" && Array.isArray(args) && args[0] === "ls-remote") {
@@ -4017,10 +4054,69 @@ ${diffs}
       expect(result.fallback_used).toBe(true);
 
       const issueBody = mockGithub.rest.issues.create.mock.calls[0][0].body;
+      const { extractExpirationDate } = require("./ephemerals.cjs");
+      const expiration = extractExpirationDate(issueBody);
+      expect(expiration).not.toBeNull();
+      expect(expiration.getTime()).toBeGreaterThan(Date.now() + 7 * 24 * 60 * 60 * 1000 - 10000);
+      expect(expiration.getTime()).toBeLessThanOrEqual(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      expect(issueBody).toContain("[#123](https://github.com/test-owner/test-repo/pull/123)");
+      expect(issueBody).toContain("gh-aw-agentic-workflow:");
+      expectExecutionProvenance(issueBody);
+      expect(mockGithub.rest.issues.create.mock.calls[0][0].labels).toEqual(["agentic-workflows", "pull-request-fallback"]);
       expect(issueBody).toContain("gh run download");
       expect(issueBody).toContain("git am --3way");
       expect(issueBody).not.toContain("refs/bundles/");
     });
+
+    it.each([
+      ["> - [x] expires <!-- gh-aw-expires: 2030-01-20T09:20:00.000Z --> on Jan 20, 2030, 9:20 AM UTC", "2030-01-20T09:20:00.000Z"],
+      ["> - [x] expires <!-- gh-aw-expires: 2020-01-20T09:20:00.000Z --> on Jan 20, 2020, 9:20 AM UTC", "2020-01-20T09:20:00.000Z"],
+      ["> - [x] expires on Jan 20, 2030, 9:20 AM UTC", "2030-01-20T09:20:00.000Z"],
+    ])("should inherit the target PR expiration from %s", async (body, expectedExpiration) => {
+      const branch = "protected-fallback-expiration";
+      createPatchFile(branch, createPatchWithFiles("package.json"));
+      const { data: pullRequest } = await mockGithub.rest.pulls.get();
+      mockGithub.rest.pulls.get.mockResolvedValue({ data: { ...pullRequest, body } });
+      process.env.GITHUB_SERVER_URL = "https://github.example.com";
+
+      const module = await loadModule();
+      const handler = await module.main({
+        protected_files: ["package.json"],
+        protected_files_policy: "fallback-to-issue",
+      });
+      const result = await handler({ branch }, {});
+
+      expect(result.success).toBe(true);
+      const issue = mockGithub.rest.issues.create.mock.calls[0][0];
+      const { extractExpirationDate } = require("./ephemerals.cjs");
+      expect(extractExpirationDate(issue.body).toISOString()).toBe(expectedExpiration);
+      expect(issue.body).toContain("[#123](https://github.example.com/test-owner/test-repo/pull/123)");
+      expect(issue.labels).toContain("pull-request-fallback");
+    });
+
+    it.each([null, "> - [x] expires <!-- gh-aw-expires: invalid --> on invalid UTC", "> - [ ] expires <!-- gh-aw-expires: 2030-01-20T09:20:00.000Z --> on Jan 20, 2030, 9:20 AM UTC"])(
+      "should default to seven days when the PR has no active valid expiration: %s",
+      async body => {
+        const branch = "protected-fallback-default-expiration";
+        createPatchFile(branch, createPatchWithFiles("package.json"));
+        const { data: pullRequest } = await mockGithub.rest.pulls.get();
+        mockGithub.rest.pulls.get.mockResolvedValue({ data: { ...pullRequest, body } });
+        const before = Date.now();
+
+        const module = await loadModule();
+        const handler = await module.main({
+          protected_files: ["package.json"],
+          protected_files_policy: "fallback-to-issue",
+        });
+        const result = await handler({ branch }, {});
+
+        expect(result.success).toBe(true);
+        const { extractExpirationDate } = require("./ephemerals.cjs");
+        const expiration = extractExpirationDate(mockGithub.rest.issues.create.mock.calls[0][0].body);
+        expect(expiration.getTime()).toBeGreaterThanOrEqual(before + 7 * 24 * 60 * 60 * 1000);
+        expect(expiration.getTime()).toBeLessThanOrEqual(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      }
+    );
 
     it("should give bundle-based manual apply instructions for protected-files fallback (bundle transport)", async () => {
       createPatchFile("should-give-bundle-based-manual-apply-instructions", createPatchWithFiles("package.json"));
@@ -4287,7 +4383,7 @@ ${diffs}
         },
       });
       mockGithub.rest.repos.get = vi.fn().mockResolvedValue({ data: { default_branch: "main" } });
-      mockGithub.rest.repos.getBranchProtection = vi.fn().mockRejectedValue(Object.assign(new Error("not protected"), { status: 404 }));
+      mockGithub.rest.repos.getBranch = vi.fn().mockResolvedValue({ data: { protected: false } });
 
       mockExec.getExecOutput.mockResolvedValue({ exitCode: 0, stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", stderr: "" });
 

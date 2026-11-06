@@ -114,7 +114,13 @@ func (c *Compiler) setupWorkflowBuildContext(ctx *workflowBuildContext) error {
 		return c.formatToolsProcessingError(ctx.cleanPath, err)
 	}
 	ctx.workflowData.WorkflowID = GetWorkflowIDFromPath(ctx.cleanPath)
+	ctx.workflowData.engineDefinition = c.engineCatalog.Get(engineSetup.engineSetting)
 	ctx.workflowData.SourceDocument = ctx.document
+	if config := ctx.workflowData.ParsedFrontmatter; config != nil && config.TokenBroker != nil {
+		ctx.workflowData.TokenBrokerCopilotRequest = config.TokenBroker.CopilotRequest
+		ctx.workflowData.TokenBrokerCopilotTask = config.TokenBroker.CopilotTask
+		ctx.workflowData.TokenBrokerEnabled = config.TokenBroker.CopilotRequest || config.TokenBroker.CopilotTask
+	}
 	resolveMaxDailyAICBackendIntoWorkflowData(ctx.workflowData, ctx.frontmatter.Frontmatter, engineSetup.importsResult.MergedMaxDailyAICredits)
 	return nil
 }
@@ -199,6 +205,7 @@ func (c *Compiler) validateWorkflowEngineSettings(cleanPath string, workflowData
 	checks := []func(*WorkflowData) error{
 		c.validateRunInstallScripts,
 		c.validateEngineVersion,
+		c.validateEngineDurable,
 		c.validatePlaywrightMode,
 		c.validateLSPSupport,
 		c.validateEngineHarnessScript,
@@ -562,7 +569,11 @@ func (c *Compiler) extractAdditionalConfigurations( //nolint:largefunc // Existi
 
 	// Merge jobs from imported YAML workflows
 	if importsResult.MergedJobs != "" && importsResult.MergedJobs != "{}" {
-		workflowData.Jobs = c.mergeJobsFromYAMLImports(workflowData.Jobs, importsResult.MergedJobs)
+		mergedJobs, err := c.mergeJobsFromYAMLImports(workflowData.Jobs, importsResult.MergedJobs)
+		if err != nil {
+			return err
+		}
+		workflowData.Jobs = mergedJobs
 	}
 
 	workflowData.Roles = c.extractRoles(frontmatter)

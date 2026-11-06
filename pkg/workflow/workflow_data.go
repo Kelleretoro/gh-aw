@@ -36,6 +36,7 @@ type SkipIfCheckFailingConfig struct {
 	AllowPending bool     // if true, pending/in-progress checks are not treated as failing (default: treat pending as failing)
 }
 type WorkflowData struct {
+	RepoProtectedFilesExclude      []string     // Repository-root path globs from aw.json, additive to handler exclusions
 	SourceDocument                 *aw.Document // Authored source before preprocessing, import merging, or defaults
 	WorkQueuePolicy                *WorkQueuePolicyConfig
 	workQueueRepoIssuesConfigured  bool
@@ -73,11 +74,15 @@ type WorkflowData struct {
 	ImportPaths                    []string // Import file paths for runtime-import macro generation (imports without inputs)
 	PromptImports                  []parser.PromptImportEntry
 	MainWorkflowMarkdown           string               // main workflow markdown without imports (for runtime-import)
+	MainWorkflowPromptPath         string               // compiler-selected author source, not a runtime-import fragment
 	DeferredPromptExpressions      []*ExpressionMapping // prompt values resolved after activation in the agent job
 	IncludedFiles                  []string             // list of files included via @include directives (rendered as comment in lock file)
 	ImportInputs                   map[string]any       // input values from imports with inputs (for github.aw.inputs.* substitution)
 	On                             string
 	AdmissionEnabled               bool // Opt-in from on.admission or repository admission configuration
+	TokenBrokerEnabled             bool // True when at least one token-broker capability is enabled
+	TokenBrokerCopilotRequest      bool // Use the broker for Copilot inference authentication in supported jobs
+	TokenBrokerCopilotTask         bool // Use the broker for Copilot task creation and assignment
 	WebhookSubscriptions           []WebhookSubscription
 	Permissions                    string
 	Network                        string // top-level network permissions configuration
@@ -109,9 +114,11 @@ type WorkflowData struct {
 	AI                             string        // "claude" or "codex" (for backwards compatibility)
 	Model                          string        // Top-level LLM model override (from frontmatter model: field or imports)
 	EngineConfig                   *EngineConfig // Extended engine configuration
-	AgentFile                      string        // Path to custom agent file (from imports)
-	AgentImportSpec                string        // Original import specification for agent file (e.g., "owner/repo/path@ref")
-	RepositoryImports              []string      // Repository-only imports (format: "owner/repo@ref") for .github folder merging
+	durableExecutionPlan           *DurableExecutionPlan
+	engineDefinition               *EngineDefinition // Per-workflow metadata, retained across batch compiler registry resets
+	AgentFile                      string            // Path to custom agent file (from imports)
+	AgentImportSpec                string            // Original import specification for agent file (e.g., "owner/repo/path@ref")
+	RepositoryImports              []string          // Repository-only imports (format: "owner/repo@ref") for .github folder merging
 	StopTime                       string
 	Cooldown                       time.Duration                   // minimum time between completed runs that executed the agent job
 	SkipIfMatch                    *SkipIfMatchConfig              // skip-if-match configuration with query and max threshold
@@ -230,6 +237,7 @@ type WorkflowData struct {
 	ModelPolicyBlocked             []string                        // merged models.blocked policy list (union across imports + main frontmatter)
 	DefaultAiCreditsPricing        *AiCreditsPricingConfig         // fallback per-token pricing from frontmatter models.default-ai-credits-pricing; used by AWF API proxy for unrecognized models
 	ActionPinMappings              map[string]string               // action-pin redirect table from aw.json action_pins: maps "owner/repo@version" → "owner/repo@version"
+	generatedActionRefs            map[string]struct{}             // compiler-owned references, including tag fallbacks when SHA resolution is unavailable
 	ActionPinPrefixes              map[string]string               // repository-prefix redirects from aw.json action_pin_prefixes
 	ActionPinSourceVersions        map[string]string               // inline labels for frontmatter steps already pinned by SHA
 	ContainerPinMappings           map[string]string               // container-pin redirect table from aw.json container_pins: maps source image → replacement image

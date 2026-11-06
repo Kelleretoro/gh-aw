@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs, { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { activeAgent, approvableRuns, buildQueue, checkRateLimit, classify, fetchActiveRuns, fetchCandidate, fetchQueue, formatNudge, formatSummary, gh } from "./pr-sous-chef.mjs";
+import { sanitizeContent } from "../actions/setup/js/sanitize_content.cjs";
+import { activeAgent, approvableRuns, buildQueue, checkRateLimit, classify, fetchActiveRuns, fetchCandidate, fetchQueue, formatAssignmentRequest, formatNudge, formatSummary, gh } from "./pr-sous-chef.mjs";
 
 const now = Date.parse("2026-10-03T18:00:00Z");
 const recent = "2026-10-03T16:00:00Z";
@@ -12,6 +13,7 @@ const pr = {
   state: "OPEN",
   author: { login: "Copilot" },
   headRefOid: "abc",
+  headCommittedAt: recent,
   headRefName: "copilot/fix",
   baseRefName: "main",
   createdAt: "2026-10-01T00:00:00Z",
@@ -39,7 +41,6 @@ const waitingRun = {
 
 function detail(threads = []) {
   return {
-    commits: { nodes: [{ commit: { committedDate: recent } }] },
     reviewThreads: { nodes: threads, pageInfo: { hasNextPage: false } },
     reviews: { nodes: [], pageInfo: { hasPreviousPage: false } },
   };
@@ -51,6 +52,15 @@ function nudge(state, at = "2026-10-03T16:30:00Z") {
     user: { login: "gh-aw-bot" },
     created_at: at,
     body: `@copilot fix conflicts\nSous-chef state: ${state}`,
+  };
+}
+
+function response() {
+  return {
+    id: 124,
+    user: { login: "Copilot" },
+    created_at: "2026-10-03T17:00:00Z",
+    body: "Work completed; please recheck the blockers",
   };
 }
 
@@ -83,11 +93,12 @@ test("unchanged implementation work never gets a repeat poke, even after the idl
   assert.equal(classify(failingPr, detail(), comments, [], now + 24 * 60 * 60 * 1000).skip_reason, "unchanged");
 });
 
-test("only genuinely conflicting or behind branches may repeat an idle nudge", () => {
+test("conflicting or behind branches require an intervening comment before another idle nudge", () => {
   for (const mergeStateStatus of ["CONFLICTING", "BEHIND"]) {
     const candidate = { ...pr, mergeStateStatus };
     const first = classify(candidate, detail(), [], [], now);
-    assert.ok(classify(candidate, detail(), [nudge(first.state_fingerprint)], [], now).state_fingerprint);
+    assert.equal(classify(candidate, detail(), [nudge(first.state_fingerprint)], [], now).skip_reason, "last_comment_sous_chef");
+    assert.ok(classify(candidate, detail(), [nudge(first.state_fingerprint), response()], [], now).state_fingerprint);
     assert.equal(classify(candidate, detail(), [nudge(first.state_fingerprint, "2026-10-03T17:55:00Z")], [], now).skip_reason, "not_idle");
   }
   for (const mergeStateStatus of ["BLOCKED", "DIRTY", "UNKNOWN", "CLEAN"]) {
@@ -96,6 +107,15 @@ test("only genuinely conflicting or behind branches may repeat an idle nudge", (
     assert.equal(classify(candidate, detail(), [nudge(first.state_fingerprint)], [], now).skip_reason, "unchanged");
   }
 });
+
+function stripHtmlComments(text) {
+  let previous;
+  do {
+    previous = text;
+    text = text.replace(/<!--[\s\S]*?--!?>/g, "");
+  } while (text !== previous);
+  return text.replace(/<!--/g, "");
+}
 
 test("visible fingerprint survives HTML marker removal and arbitrary comment order", () => {
   const first = classify(failingPr, detail(), [], [], now);
@@ -113,11 +133,121 @@ test("visible fingerprint survives HTML marker removal and arbitrary comment ord
   }
 });
 
+test("assignment state comments deduplicate without mentioning Copilot", () => {
+  const first = classify(failingPr, detail(), [], [], now);
+  const body = stripHtmlComments(formatNudge(first));
+  assert.doesNotMatch(body, /@copilot|assign.to.agent/i);
+  assert.equal(classify(failingPr, detail(), [{ ...nudge(first.state_fingerprint), body }], [], now).skip_reason, "unchanged");
+  assert.equal(classify(failingPr, detail(), [{ ...nudge(first.state_fingerprint), body, user: { login: "outsider" } }], [], now).skip_reason, undefined);
+});
+
+test("started coding agents can record assignment markers without member association", () => {
+  const first = classify(failingPr, detail(), [], [], now);
+  const body = stripHtmlComments(formatNudge(first));
+  for (const login of ["Copilot", "github-copilot[bot]", "copilot-swe-agent[bot]"]) {
+    const comment = { ...nudge(first.state_fingerprint), body, user: { login }, author_association: "CONTRIBUTOR" };
+    assert.equal(classify(failingPr, detail(), [comment], [], now).skip_reason, "unchanged");
+  }
+  const outsider = { ...nudge(first.state_fingerprint), body, user: { login: "copilot-impostor" } };
+  assert.ok(classify(failingPr, detail(), [outsider], [], now).nudge_needed);
+});
+
+test("pending assignment comments suppress consecutive requests without recording active work", () => {
+  const first = classify(failingPr, detail(), [], [], now);
+  const request = formatAssignmentRequest(first);
+  assert.ok(request.startsWith("@copilot\n\n"));
+  assert.doesNotMatch(request, /\[@copilot\]\(/);
+  assert.ok(sanitizeContent(request, { allowedAliases: ["copilot"] }).startsWith("@copilot\n\n"));
+  const body = request.replace(/<!--[\s\S]*?--!?>/g, "");
+  assert.match(body, /Sous-chef requested-head: abc/);
+  assert.match(body, /Sous-chef requested-work: [a-f0-9]{64}/);
+  assert.ok(body.endsWith(`Sous-chef requested-state: ${first.state_fingerprint}`));
+  assert.doesNotMatch(body, /Sous-chef (head|work|state):/);
+  const pending = { ...nudge(first.state_fingerprint), body };
+  assert.equal(classify(failingPr, detail(), [pending], [], now).skip_reason, "last_comment_sous_chef");
+  assert.equal(classify(failingPr, detail(), [{ ...pending, body: request }], [], now).skip_reason, "last_comment_sous_chef");
+  assert.ok(classify(failingPr, detail(), [pending, response()], [], now).nudge_needed);
+  const acknowledged = {
+    ...pending,
+    user: { login: "copilot-swe-agent[bot]" },
+    body: body.replace("@copilot\n\n", "").replace(/^Sous-chef requested-(head|work|state):/gm, "Sous-chef $1:"),
+  };
+  assert.doesNotMatch(acknowledged.body, /@copilot/);
+  assert.equal(classify(failingPr, detail(), [pending, acknowledged], [], now).skip_reason, "unchanged");
+  assert.equal(formatAssignmentRequest({ ...first, nudge_needed: false }), null);
+});
+
+test("failed or fallback finisher publications permit a later dispatch after another comment", () => {
+  const first = classify(failingPr, detail(), [], [], now);
+  for (const note of [
+    "> [!WARNING]\n> The `push_to_pull_request_branch` operation failed: denied. The code changes were not applied.",
+    "> [!NOTE]\n> The pull request was not created — a fallback review issue was created instead due to protected file changes: #1",
+    "> [!NOTE]\n> Direct push to the original pull request branch was not possible (diverged/non-fast-forward). A fallback pull request was created instead: #1",
+  ]) {
+    const body = `${note}\n\n${formatNudge(first)}`;
+    const comment = { ...nudge(first.state_fingerprint), body };
+    assert.equal(classify(failingPr, detail(), [comment], [], now).skip_reason, "last_comment_sous_chef");
+    assert.ok(classify(failingPr, detail(), [comment, response()], [], now).nudge_needed);
+  }
+});
+
 test("new HEAD and changed blockers can advance again", () => {
   const first = classify(pr, detail(), [], [], now);
-  const comments = [nudge(first.state_fingerprint)];
+  const comments = [nudge(first.state_fingerprint), response()];
   assert.ok(classify({ ...pr, headRefOid: "def" }, detail(), comments, [], now).state_fingerprint);
   assert.ok(classify(pr, detail([thread()]), comments, [], now).state_fingerprint);
+});
+
+test("latest sous-chef comments block new work regardless of provenance format or array order", () => {
+  const first = classify(pr, detail(), [], [], now);
+  for (const body of [
+    formatAssignmentRequest(first),
+    formatAssignmentRequest(first).replace(/<!--[\s\S]*?--!?>/g, ""),
+    formatNudge(first),
+    "Acknowledged\n<!-- gh-aw-workflow-call-id: github/gh-aw/pr-sous-chef -->",
+    "> Generated by [PR Sous Chef](https://github.com/github/gh-aw/actions/runs/1)",
+  ]) {
+    const last = { ...nudge(first.state_fingerprint), body };
+    const earlier = { ...response(), created_at: recent, updated_at: "2026-10-03T17:00:00Z" };
+    for (const comments of [
+      [earlier, last],
+      [last, earlier],
+    ]) {
+      for (const candidate of [pr, { ...failingPr, headRefOid: "new-head" }]) {
+        assert.equal(classify(candidate, detail([thread()]), comments, [], now).skip_reason, "last_comment_sous_chef");
+      }
+    }
+    assert.ok(classify(pr, detail(), [response(), last], [], now).nudge_needed);
+  }
+});
+
+test("latest comment selection handles GraphQL timestamps and creation-time ties", () => {
+  const last = { ...nudge("a".repeat(64)), id: 126, created_at: undefined, createdAt: "2026-10-03T17:00:00Z" };
+  assert.equal(classify(pr, detail(), [last, response()], [], now).skip_reason, "last_comment_sous_chef");
+  assert.ok(classify(pr, detail(), [last, { ...response(), id: 127 }], [], now).nudge_needed);
+});
+
+test("shared bot authors and untrusted provenance do not block new work", () => {
+  for (const comment of [
+    { ...nudge("a".repeat(64)), body: "Unrelated workflow report" },
+    { ...nudge("a".repeat(64)), user: { login: "outsider" } },
+  ]) {
+    assert.ok(classify(pr, detail(), [comment], [], now).nudge_needed);
+  }
+});
+
+test("latest sous-chef comments do not block independent CI approvals or review cleanup", () => {
+  const comments = [nudge("a".repeat(64))];
+  const data = detail();
+  data.reviews.nodes = [{ author: { login: "github-actions" }, state: "CHANGES_REQUESTED", databaseId: 8 }];
+  const result = classify(pr, data, comments, [waitingRun], now);
+  assert.equal(result.nudge_needed, false);
+  assert.equal(formatAssignmentRequest(result), null);
+  assert.deepEqual(result.dismiss_reviews, [8]);
+  assert.deepEqual(
+    result.approve_runs.map(run => run.run_id),
+    [7]
+  );
 });
 
 test("bot replies and old updatedAt churn do not change implementation state", () => {
@@ -140,8 +270,8 @@ test("latest legacy nudge is selected by timestamp, not REST array order", () =>
 
 test("legacy nudges do not suppress newly actionable blockers", () => {
   const legacy = { ...nudge("unused"), body: "<!-- gh-aw-pr-sous-chef-nudge --> @copilot fix" };
-  assert.ok(classify({ ...pr, mergeStateStatus: "CONFLICTING" }, detail(), [legacy], [], now).state_fingerprint);
-  assert.ok(classify({ ...pr, mergeStateStatus: "BEHIND" }, detail(), [legacy], [], now).state_fingerprint);
+  assert.ok(classify({ ...pr, mergeStateStatus: "CONFLICTING" }, detail(), [legacy, response()], [], now).state_fingerprint);
+  assert.ok(classify({ ...pr, mergeStateStatus: "BEHIND" }, detail(), [legacy, response()], [], now).state_fingerprint);
   assert.equal(classify(failingPr, detail(), [legacy], [], now).skip_reason, "unchanged_legacy");
 });
 
@@ -153,15 +283,13 @@ test("dependency bots are ignored using all known login formats", () => {
 
 test("bot comments cannot revive a completely stale PR", () => {
   const stale = detail();
-  stale.commits.nodes[0].commit.committedDate = "2026-09-01T00:00:00Z";
   const comments = [{ user: { login: "Copilot" }, body: "status", created_at: recent }];
-  assert.equal(classify({ ...pr, createdAt: "2026-09-01T00:00:00Z" }, stale, comments, [], now).skip_reason, "stale");
+  assert.equal(classify({ ...pr, createdAt: "2026-09-01T00:00:00Z", headCommittedAt: "2026-09-01T00:00:00Z" }, stale, comments, [], now).skip_reason, "stale");
 });
 
 test("fresh human feedback revives an older PR", () => {
   const stale = detail([thread()]);
-  stale.commits.nodes[0].commit.committedDate = "2026-09-01T00:00:00Z";
-  assert.ok(classify(pr, stale, [], [], now).state_fingerprint);
+  assert.ok(classify({ ...pr, headCommittedAt: "2026-09-01T00:00:00Z" }, stale, [], [], now).state_fingerprint);
 });
 
 test("an active coding agent blocks even an old run on a previous SHA", () => {
@@ -181,6 +309,16 @@ test("an active coding agent blocks even an old run on a previous SHA", () => {
 test("active reviewer workflows block duplicate sous-chef work", () => {
   for (const name of ["PR Code Quality Reviewer", "Ponytail Reviewer"]) {
     assert.equal(activeAgent(pr, [{ name, status: "queued", head_branch: pr.headRefName }]), true);
+  }
+});
+
+test("default-branch PR Finisher runs block only their selected PR", () => {
+  for (const status of ["queued", "in_progress", "pending", "requested", "waiting"]) {
+    const run = { name: "PR Finisher", path: ".github/workflows/pr-finisher.lock.yml", display_title: "PR Finisher #42", head_branch: "main", status };
+    assert.equal(activeAgent(pr, [run]), true);
+    assert.equal(activeAgent({ ...pr, number: 420 }, [run]), false);
+    assert.equal(activeAgent(pr, [{ ...run, status: "completed" }]), false);
+    assert.equal(activeAgent(pr, [{ ...run, path: ".github/workflows/unrelated.yml" }]), false);
   }
 });
 
@@ -303,7 +441,7 @@ test("active-run lookup paginates every nonterminal status", async () => {
   assert.ok(calls.every(args => args.includes("--paginate") && args.includes("--slurp")));
 });
 
-test("active-run lookup can be narrowed to one PR branch", async () => {
+test("targeted active-run lookup includes finishers dispatched on the default branch", async () => {
   const calls = [];
   await fetchActiveRuns(
     "github/gh-aw",
@@ -313,8 +451,11 @@ test("active-run lookup can be narrowed to one PR branch", async () => {
     },
     "copilot/fix a bug"
   );
-  assert.equal(calls.length, 5);
-  assert.ok(calls.every(args => args[1].includes("&branch=copilot%2Ffix%20a%20bug")));
+  assert.equal(calls.length, 10);
+  assert.equal(calls.filter(args => args[1].includes("&branch=copilot%2Ffix%20a%20bug")).length, 5);
+  const finishers = calls.filter(args => args[1].includes("/actions/workflows/pr-finisher.lock.yml/runs?"));
+  assert.equal(finishers.length, 5);
+  assert.ok(finishers.every(args => !args[1].includes("&branch=") && args.includes("--paginate") && args.includes("--slurp")));
 });
 
 const graphPr = {
@@ -324,6 +465,7 @@ const graphPr = {
   url: "https://github.com/github/gh-aw/pull/42",
   labels: { nodes: [], pageInfo: { hasNextPage: false } },
 };
+const headCommit = { sha: pr.headRefOid, commit: { committer: { date: recent } } };
 
 function metadataResponse(candidate = graphPr) {
   return { data: { repository: { pullRequest: candidate } } };
@@ -334,20 +476,24 @@ test("targeted refresh uses explicit GraphQL metadata and paginated REST checks"
   const candidate = await fetchCandidate("github/gh-aw", "42", args => {
     calls.push(args);
     if (args[1] === "graphql") return metadataResponse();
+    if (args[1] === "repos/github/gh-aw/commits/abc") return headCommit;
     if (args[1].includes("/check-runs?")) return [{ check_runs: [{ name: "CGO", status: "completed", conclusion: "failure", html_url: "https://github.com/run/1" }] }];
     return [{ statuses: [{ context: "external-ci", state: "pending", target_url: "https://github.com/run/2" }] }];
   });
   assert.equal(candidate.number, 42);
   assert.equal(calls[0][1], "graphql");
   assert.match(calls[0][3], /repository\(owner:\$owner,name:\$name\)\{pullRequest\(number:\$number\)/);
-  assert.doesNotMatch(calls[0][3], /\.\.\.|statusCheckRollup/);
+  assert.doesNotMatch(calls[0][3], /statusCheckRollup|commits\(/);
+  assert.doesNotMatch(calls[0][3], /headRef\{|committedDate|\.\.\. on Commit/);
   assert.deepEqual(calls[0].slice(4), ["-f", "owner=github", "-f", "name=gh-aw", "-F", "number=42"]);
   assert.deepEqual(calls.slice(1), [
+    ["api", "repos/github/gh-aw/commits/abc"],
     ["api", "repos/github/gh-aw/commits/abc/check-runs?per_page=100&filter=latest", "--paginate", "--slurp"],
     ["api", "repos/github/gh-aw/commits/abc/status?per_page=100", "--paginate", "--slurp"],
   ]);
   assert.equal(candidate.mergeStateStatus, "CONFLICTING");
   assert.equal(candidate.baseRefName, "main");
+  assert.equal(candidate.headCommittedAt, recent);
   assert.equal(candidate.statusCheckRollup[0].conclusion, "FAILURE");
   assert.equal(candidate.statusCheckRollup[1].state, "PENDING");
 });
@@ -368,6 +514,21 @@ test("targeted refresh fails closed when metadata is incomplete or the PR is abs
     { ...graphPr, labels: { nodes: [], pageInfo: { hasNextPage: true } } },
   ]) {
     await assert.rejects(() => fetchCandidate("github/gh-aw", "42", () => metadataResponse(result)), /could not refresh PR metadata/);
+  }
+});
+
+test("head commit activity must be valid and match the refreshed PR head", async () => {
+  for (const head of [null, [], {}, { ...headCommit, sha: "old-head" }, { sha: pr.headRefOid }, { sha: pr.headRefOid, commit: null }, { sha: pr.headRefOid, commit: { committer: { date: "invalid date" } } }]) {
+    let calls = 0;
+    await assert.rejects(
+      () =>
+        fetchCandidate("github/gh-aw", "42", args => {
+          calls++;
+          return args[1] === "graphql" ? metadataResponse() : head;
+        }),
+      /PR #42: could not refresh head commit activity/
+    );
+    assert.equal(calls, 2);
   }
 });
 
@@ -495,9 +656,7 @@ test("idle threshold is exactly ten minutes, including updated metadata", () => 
 
 test("fresh commits, reviews, comments, and thread replies restart the idle interval", () => {
   const fresh = "2026-10-03T17:51:00Z";
-  const committed = detail();
-  committed.commits.nodes[0].commit.committedDate = fresh;
-  assert.equal(classify(pr, committed, [], [], now).skip_reason, "not_idle");
+  assert.equal(classify({ ...pr, headCommittedAt: fresh }, detail(), [], [], now).skip_reason, "not_idle");
   const reviewed = detail();
   reviewed.reviews.nodes.push({ author: { login: "reviewer" }, authorAssociation: "MEMBER", submittedAt: fresh });
   assert.equal(classify(pr, reviewed, [], [], now).skip_reason, "not_idle");
@@ -560,12 +719,17 @@ test("a precise nudge lists only unanswered feedback and always requests a branc
   unanswered.comments.nodes[0].body = "Handle null input\n\n@copilot please address.";
   const result = classify(pr, detail([answered, unanswered, thread({ isResolved: true, id: "resolved" })]), [], [], now);
   const body = formatNudge(result);
-  assert.match(body, /@copilot address/);
+  assert.match(body, /Copilot assignment requested/);
   assert.match(body, /1\. Update this branch.*`main`.*`make merge-main`/);
   assert.match(body, /2\. Review \(scripts\/example.mjs:12\): Handle null input/);
   assert.match(body, /#discussion_r1/);
   assert.doesNotMatch(body, /Fix the regression/);
-  assert.equal(body.match(/@copilot/g).length, 1);
+  assert.doesNotMatch(body, /@copilot/);
+  assert.doesNotMatch(body, /pr-finisher/);
+  assert.match(body, /Once you start work, post this work summary as a PR comment/);
+  assert.match(body, /including the Sous-chef head, work, and state lines/);
+  assert.match(body, /this PR's existing branch/);
+  assert.match(body, /Do not merge or trigger CI/);
   assert.ok(body.endsWith(`Sous-chef state: ${result.state_fingerprint}`));
 });
 
@@ -675,7 +839,8 @@ test("answering some feedback does not re-nudge the remaining already-requested 
   first.isResolved = true;
   assert.equal(classify(candidate, data, comments, [], now).skip_reason, "unchanged");
   second.comments.nodes[0].body = "Newly discovered regression";
-  assert.ok(classify(candidate, data, comments, [], now).state_fingerprint);
+  assert.equal(classify(candidate, data, comments, [], now).skip_reason, "last_comment_sous_chef");
+  assert.ok(classify(candidate, data, [...comments, response()], [], now).state_fingerprint);
 });
 
 test("passing checks do not re-nudge unchanged failures on the same head", () => {
@@ -683,7 +848,8 @@ test("passing checks do not re-nudge unchanged failures on the same head", () =>
   const original = classify(candidate, detail(), [], [], now);
   const comments = [{ ...nudge(original.state_fingerprint), body: formatNudge(original) }];
   assert.equal(classify(failingPr, detail(), comments, [], now).skip_reason, "unchanged");
-  assert.ok(classify({ ...failingPr, headRefOid: "new-head" }, detail(), comments, [], now).state_fingerprint);
+  assert.equal(classify({ ...failingPr, headRefOid: "new-head" }, detail(), comments, [], now).skip_reason, "last_comment_sous_chef");
+  assert.ok(classify({ ...failingPr, headRefOid: "new-head" }, detail(), [...comments, response()], [], now).state_fingerprint);
 });
 
 const budgets = {
@@ -695,7 +861,7 @@ const budgets = {
 };
 const idleMsForTest = 10 * 60 * 1000;
 
-function queueAPI({ listed = [pr], candidate = graphPr, checks = [], statuses = [], data = detail(), comments = [], runs = [], approvals = [] } = {}) {
+function queueAPI({ listed = [pr], candidate = graphPr, head = headCommit, checks = [], statuses = [], data = detail(), comments = [], runs = [], approvals = [] } = {}) {
   const calls = [];
   return {
     calls,
@@ -706,13 +872,166 @@ function queueAPI({ listed = [pr], candidate = graphPr, checks = [], statuses = 
       if (args[1] === "graphql" && args[3].includes("headRefOid")) return metadataResponse(candidate);
       if (args[1].includes("/check-runs?")) return [{ check_runs: checks }];
       if (args[1].includes("/status?")) return [{ statuses }];
-      if (args[1].includes("/actions/runs?")) return [{ workflow_runs: args[1].includes("status=action_required") ? approvals : runs }];
-      if (args[1] === "graphql") return { data: { repository: { pullRequest: data } } };
+      if (args[1] === `repos/github/gh-aw/commits/${candidate.headRefOid}`) return head;
+      if (args[1].includes("/actions/runs?") || args[1].includes("/actions/workflows/pr-finisher.lock.yml/runs?")) return [{ workflow_runs: args[1].includes("status=action_required") ? approvals : runs }];
+      if (args[1] === "graphql") {
+        const field = args[3].includes("reviewThreads(") ? "reviewThreads" : "reviews";
+        return { data: { repository: { pullRequest: { number: candidate.number, [field]: data[field] } } } };
+      }
       if (args[1].includes("/comments?")) return [comments];
       assert.fail(`Unexpected API call: ${args.join(" ")}`);
     },
   };
 }
+
+test("scheduled and targeted queues scan every comment page before allowing another message", async () => {
+  for (const number of [undefined, "42"]) {
+    const { api, calls } = queueAPI();
+    const queue = await fetchQueue(
+      "github/gh-aw",
+      number,
+      args => {
+        if (args[1].includes("/comments?")) {
+          calls.push(args);
+          assert.ok(args.includes("--paginate") && args.includes("--slurp"));
+          return [Array.from({ length: 100 }, (_, id) => ({ ...response(), id, created_at: recent })), [{ ...nudge("unused"), body: "Acknowledged\n<!-- gh-aw-workflow-call-id: github/gh-aw/pr-sous-chef -->" }]];
+        }
+        return api(args);
+      },
+      now
+    );
+    assert.deepEqual(queue.prs, []);
+    assert.deepEqual(queue.skipped, [{ pr_number: 42, skip_reason: "last_comment_sous_chef" }]);
+  }
+});
+
+test("refresh isolates filtered reviews from thread connections and head commit activity", async () => {
+  const data = detail([thread()]);
+  const approvedReview = { databaseId: 7, author: { login: "reviewer" }, authorAssociation: "MEMBER", state: "COMMENTED", submittedAt: recent };
+  const deniedReview = { ...approvedReview, databaseId: 8, author: { login: "outsider" }, authorAssociation: "NONE" };
+  data.reviews.nodes = [approvedReview, deniedReview];
+  const { api, calls } = queueAPI({ data });
+  const queue = await fetchQueue(
+    "github/gh-aw",
+    "42",
+    args => {
+      const response = api(args);
+      if (args[1] !== "graphql" || !args[3].includes("reviews(last:")) return response;
+      const filtered = structuredClone(response);
+      // Reproduce the pinned proxy's first-connection replacement after filtering.
+      function replaceNodes(value) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+        if ("nodes" in value) {
+          value.nodes = [approvedReview];
+          return true;
+        }
+        return Object.values(value).some(replaceNodes);
+      }
+      assert.equal(replaceNodes(filtered.data), true);
+      return filtered;
+    },
+    now
+  );
+  assert.equal(queue.prs[0].number, 42);
+  assert.deepEqual(
+    queue.prs[0].unresolved_reviews.map(review => review.id),
+    ["PRRT_example"]
+  );
+  const body = formatNudge(queue.prs[0]);
+  assert.match(body, /Fix the regression/);
+  assert.match(body, /Sous-chef state: [a-f0-9]{64}/);
+  const queries = calls.filter(args => args[1] === "graphql").map(args => args[3]);
+  assert.equal(queries.length, 3);
+  assert.ok(queries.every(query => !query.includes("commits(")));
+  assert.ok(queries.every(query => !(query.includes("reviewThreads(") && query.includes("reviews("))));
+  assert.match(queries[1], /number author\{login\} authorAssociation/);
+});
+
+test("malformed or proxy-corrupted review connections fail closed with actionable errors", async () => {
+  const review = { databaseId: 7, state: "COMMENTED" };
+  for (const [field, connection] of [
+    ["reviewThreads", undefined],
+    ["reviewThreads", { nodes: [], pageInfo: {} }],
+    ["reviewThreads", { nodes: [review], pageInfo: { hasNextPage: false } }],
+    ["reviewThreads", { nodes: [null], pageInfo: { hasNextPage: false } }],
+    ["reviewThreads", { nodes: [thread({ comments: { nodes: [], pageInfo: {} } })], pageInfo: { hasNextPage: false } }],
+    ["reviewThreads", { nodes: [thread({ comments: { nodes: [review], pageInfo: { hasNextPage: false } } })], pageInfo: { hasNextPage: false } }],
+    ["reviews", undefined],
+    ["reviews", { nodes: [], pageInfo: {} }],
+    ["reviews", { nodes: [thread()], pageInfo: { hasPreviousPage: false } }],
+    ["reviews", { nodes: [{ state: "CHANGES_REQUESTED", databaseId: "7" }], pageInfo: { hasPreviousPage: false } }],
+  ]) {
+    const data = { ...detail(), [field]: connection };
+    const { api, calls } = queueAPI({ data });
+    await assert.rejects(() => fetchQueue("github/gh-aw", "42", api, now), new RegExp(`PR #42: could not refresh ${field}; missing or malformed GitHub response`));
+    assert.ok(!calls.some(args => args[1].includes("/comments?")), "Do not continue with invalid eligibility evidence");
+  }
+});
+
+test("absent or denied detail responses never produce a successful eligibility queue", async () => {
+  for (const field of ["reviewThreads", "reviews"]) {
+    for (const response of [null, [], {}, { data: null }, { data: { repository: { pullRequest: null } } }, { data: { repository: { pullRequest: { number: 43, [field]: detail()[field] } } } }, { errors: [{ message: "access denied" }] }]) {
+      const { api } = queueAPI();
+      await assert.rejects(() => fetchQueue("github/gh-aw", "42", args => (args[1] === "graphql" && args[3].includes(`${field}(`) ? response : api(args)), now), /could not refresh reviewThreads|could not refresh reviews|access denied/);
+    }
+  }
+});
+
+test("isolated review reads preserve incomplete-page exclusions and cleanup eligibility", async () => {
+  for (const field of ["reviewThreads", "reviews"]) {
+    const data = detail();
+    data[field].pageInfo[field === "reviews" ? "hasPreviousPage" : "hasNextPage"] = true;
+    const { api } = queueAPI({ data });
+    const queue = await fetchQueue("github/gh-aw", "42", api, now);
+    assert.deepEqual(queue.prs, []);
+    assert.deepEqual(queue.skipped, [{ pr_number: 42, skip_reason: "incomplete_reviews" }]);
+  }
+  const data = detail([thread({ isResolved: true })]);
+  data.reviews.nodes = [{ databaseId: 7, author: { login: "github-actions" }, state: "CHANGES_REQUESTED", submittedAt: recent }];
+  const { api } = queueAPI({ candidate: { ...graphPr, mergeStateStatus: "CLEAN" }, data });
+  const queue = await fetchQueue("github/gh-aw", "42", api, now);
+  assert.deepEqual(queue.prs[0].dismiss_reviews, [7]);
+  assert.equal(formatNudge(queue.prs[0]), null);
+});
+
+test("refreshed head commit activity prevents nudging a recently pushed PR", async () => {
+  const { api } = queueAPI({ head: { ...headCommit, commit: { committer: { date: "2026-10-03T17:55:00Z" } } } });
+  const queue = await fetchQueue("github/gh-aw", "42", api, now);
+  assert.deepEqual(queue.prs, []);
+  assert.deepEqual(queue.skipped, [{ pr_number: 42, skip_reason: "not_idle" }]);
+});
+
+test("scheduled and proxied refreshes read head activity by SHA without a GraphQL headRef target", async () => {
+  for (const number of [undefined, "42"]) {
+    const { api, calls } = queueAPI();
+    const queue = await fetchQueue("github/gh-aw", number, api, now);
+    assert.equal(queue.prs[0].number, 42);
+    assert.ok(queue.prs[0].state_fingerprint);
+    assert.equal(calls.filter(args => args[1] === "repos/github/gh-aw/commits/abc").length, 1);
+    const query = calls.find(args => args[1] === "graphql")[3];
+    assert.doesNotMatch(query, /headRef\{|committedDate|\.\.\. on Commit/);
+  }
+});
+
+test("failed head activity reads never become an eligible queue", async () => {
+  for (const number of [undefined, "42"]) {
+    const { api, calls } = queueAPI();
+    await assert.rejects(
+      () =>
+        fetchQueue(
+          "github/gh-aw",
+          number,
+          args => {
+            if (args[1] === "repos/github/gh-aw/commits/abc") throw new Error("gh: HTTP 403");
+            return api(args);
+          },
+          now
+        ),
+      /HTTP 403/
+    );
+    assert.ok(!calls.some(args => args[1].includes("/check-runs?")));
+  }
+});
 
 function retryTestConfig(t) {
   const delays = [];
@@ -894,6 +1213,36 @@ test("exhausted API retries reject the queue instead of returning a partial succ
   assert.equal(metadataAttempts, 3);
 });
 
+test("check-runs HTTP 500 exhaustion fails closed after the bounded retries", async t => {
+  const { config, delays } = retryTestConfig(t);
+  const { api, calls } = queueAPI();
+  let attempts = 0;
+  await assert.rejects(
+    () =>
+      fetchQueue(
+        "github/gh-aw",
+        undefined,
+        args =>
+          gh(
+            args,
+            async (_command, commandArgs) => {
+              if (commandArgs[1].includes("/check-runs?")) {
+                attempts++;
+                throw Object.assign(new Error("Command failed"), { code: 1, stderr: "gh: HTTP 500" });
+              }
+              return { stdout: JSON.stringify(api(commandArgs)) };
+            },
+            config
+          ),
+        now
+      ),
+    /All retry attempts exhausted/
+  );
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [2000, 4000]);
+  assert.ok(!calls.some(args => args[1].includes("/status?") || args[1].includes("/actions/")));
+});
+
 test("cheap metadata exclusions avoid all detail and active-run reads", async () => {
   for (const [changes, reason] of [
     [{ isDraft: true }, "closed_or_draft"],
@@ -1001,6 +1350,89 @@ test("workflow polls every five minutes but never starts an agent for low budget
   assert.match(workflow, /^  skip-if-no-match: .* -label:broccoli"$/m);
   assert.match(workflow, /^if: needs\.prefilter\.outputs\.rate_limit_low == 'false' && \(needs\.prefilter\.outputs\.eligible_count > 0 \|\| needs\.activation\.outputs\.slash_command == 'souschef'\)$/m);
   assert.match(workflow, /sparse-checkout: \|\n\s+scripts\n\s+actions\/setup\/js\n\s+\.github\/scripts/);
+  assert.match(workflow, /assign-to-agent:\n\s+name: copilot\n\s+allowed: \[copilot\]\n\s+target: "\*"\n\s+max: 4\n\s+github-token: \$\{\{ secrets\.AWI_MAINTENANCE_TOKEN \}\}/);
+  assert.match(workflow, /post its `nudges\[0\]\.body` exactly via `add_comment` on `nudges\[0\]\.pr_number`/);
+  assert.match(workflow, /The comment must start with the literal `@copilot` mention/);
+  assert.match(workflow, /If the latest is from PR Sous Chef, do not add an acknowledgement/);
+  assert.match(workflow, /leading Copilot mention, replacing/);
+  assert.match(workflow, /as `pull_number` and `copilot` as `agent`/);
+  assert.match(workflow, /custom-instructions: \|\n\s+Work on this PR's existing branch/);
+  assert.match(workflow, /"Sous-chef requested-state:" with "Sous-chef head:", "Sous-chef work:", and\n\s+"Sous-chef state:"/);
+  assert.match(workflow, /min-integrity: approved/);
+  assert.match(workflow, /^  mentions:\n    allowed: \["@copilot"\]$/m);
+  assert.doesNotMatch(workflow, /^\s+dispatch-workflow:/m);
+});
+
+test("targeted refresh detects an active default-branch finisher", async () => {
+  const { api } = queueAPI({
+    runs: [{ name: "PR Finisher", path: ".github/workflows/pr-finisher.lock.yml", display_title: "PR Finisher #42", head_branch: "main", status: "in_progress" }],
+  });
+  assert.equal((await fetchQueue("github/gh-aw", "42", api, now)).skipped[0].skip_reason, "agent_active");
+});
+
+test("finisher pins checkout and all writes to its validated input, excluding workflow YAML", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/pr-finisher.md", import.meta.url), "utf8");
+  assert.match(workflow, /run-name: "PR Finisher #\$\{\{ inputs.pr_number \}\}"/);
+  assert.match(workflow, /ref: \$\{\{ needs.preflight.outputs.head_sha \}\}/);
+  assert.match(workflow, /pull-request: false/);
+  assert.match(workflow, /PR_HEAD_SHA: \$\{\{ needs.preflight.outputs.head_sha \}\}/);
+  assert.match(workflow, /git switch -C "\$PR_HEAD_REF" "\$PR_HEAD_SHA"/);
+  assert.match(workflow, /"GH_AW_PR_HEAD_BASE_SHA=\$PR_HEAD_SHA"/);
+  assert.match(workflow, /min-integrity: approved/);
+  assert.match(workflow, /push-to-pull-request-branch:\n\s+target: \$\{\{ needs.preflight.outputs.pr_number \}\}/);
+  assert.equal([...workflow.matchAll(/target: \$\{\{ needs.preflight.outputs.pr_number \}\}/g)].length, 4);
+  assert.match(workflow, /exclude-lock-yml: true/);
+  assert.match(workflow, /excluded-files: \[".github\/workflows\/\*\.yml", ".github\/workflows\/\*\.yaml"\]/);
+  assert.match(workflow, /fallback-as-pull-request: false/);
+  assert.doesNotMatch(workflow, /^\s+(assign-to-agent|dispatch-workflow|create-pull-request):/m);
+});
+
+test("finisher preflight rejects invalid numbers and ineligible PRs before checkout", async () => {
+  const workflow = readFileSync(new URL("../.github/workflows/pr-finisher.md", import.meta.url), "utf8");
+  const script = workflow.match(/          script: \|\n([\s\S]*?)\nsteps:/)[1].replace(/^            /gm, "");
+  const run = new (Object.getPrototypeOf(async function () {}).constructor)("github", "context", "core", "process", script);
+  const candidate = { state: "open", draft: false, head: { repo: { full_name: "github/gh-aw" }, sha: "abc", ref: "copilot/fix" }, base: { ref: "main" }, labels: [], user: { login: "Copilot" } };
+  const outputs = {};
+  const context = { repo: { owner: "github", repo: "gh-aw" } };
+  const core = { setOutput: (key, value) => (outputs[key] = value) };
+  const process = { env: { PR_NUMBER: "42", GITHUB_REPOSITORY: "github/gh-aw" } };
+  const github = {
+    rest: {
+      pulls: {
+        get: async args => {
+          assert.deepEqual(args, { owner: "github", repo: "gh-aw", pull_number: 42 });
+          return { data: candidate };
+        },
+      },
+    },
+  };
+  await run(github, context, core, process);
+  assert.deepEqual(outputs, { pr_number: 42, head_sha: "abc", head_ref: "copilot/fix", base_ref: "main" });
+  for (const number of ["", "0", "-1", "1.5", "NaN", "9007199254740992"]) {
+    await assert.rejects(() => run(github, context, core, { env: { ...process.env, PR_NUMBER: number } }), /positive integer/);
+  }
+  for (const changes of [
+    { state: "closed" },
+    { draft: true },
+    { head: { repo: null } },
+    { head: { repo: { full_name: "outsider/fork" } } },
+    { labels: [{ name: "broccoli" }] },
+    { user: { login: "dependabot[bot]" } },
+    { user: { login: "renovate[bot]" } },
+  ]) {
+    const ineligible = { rest: { pulls: { get: async () => ({ data: { ...candidate, ...changes } }) } } };
+    await assert.rejects(() => run(ineligible, context, core, process), /requires an open/);
+  }
+});
+
+test("finisher distinguishes staged publication from published fixes and review cleanup", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/pr-finisher.md", import.meta.url), "utf8");
+  assert.match(workflow, /Describe new changes as submitted for publication, not pushed/);
+  assert.match(workflow, /staging\s+`push_to_pull_request_branch` does not confirm a remote commit/);
+  assert.match(workflow, /defer implementation-dependent review replies and\s+resolutions to a later pass/);
+  assert.match(workflow, /Reply to each addressed review comment before resolving its thread/);
+  assert.match(workflow, /Revisit\s+unresolved threads whose fixes are already published/);
+  assert.match(workflow, /never bypass that protection or broaden credentials to force a push/);
 });
 
 test("each API budget no-ops at exactly ten percent remaining", async () => {

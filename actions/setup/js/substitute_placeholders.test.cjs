@@ -47,6 +47,21 @@ describe("substitutePlaceholders", () => {
     expect(fs.readFileSync(testFile, "utf8")).toBe("Command: $(malicious) `backdoor` ${VAR} | pipe");
   });
 
+  it("preserves single-quoted JSON and shell metacharacters as data", async () => {
+    const canary = path.join(tempDir, "must-not-exist");
+    const value = JSON.stringify({
+      description: `user's cache'; touch "${canary}"; #`,
+      command: `$(touch "${canary}") \`touch "${canary}"\``,
+      multiline: "single ' and double \" quotes\n${PATH}; | & > * \\ backslash",
+    });
+    fs.writeFileSync(testFile, "__GH_AW_STATIC__", "utf8");
+
+    await substitutePlaceholders({ file: testFile, substitutions: { GH_AW_STATIC: value } });
+
+    expect(fs.readFileSync(testFile, "utf8")).toBe(value);
+    expect(fs.existsSync(canary)).toBe(false);
+  });
+
   it("should handle placeholders appearing multiple times", async () => {
     fs.writeFileSync(testFile, "__NAME__ is great. I love __NAME__!", "utf8");
     await substitutePlaceholders({ file: testFile, substitutions: { NAME: "Testing" } });
@@ -120,6 +135,7 @@ describe("substitutePlaceholders", () => {
     await substitutePlaceholders({
       file: promptPath,
       substitutions: { GH_AW_NEEDS_RELEASE_OUTPUTS_RELEASE_ID: "__GH_AW_DEFERRED_1234__" },
+      deferredBindings: { GH_AW_NEEDS_RELEASE_OUTPUTS_RELEASE_ID: "__GH_AW_DEFERRED_1234__" },
     });
     expect(fs.readFileSync(promptPath, "utf8")).toBe(system + "Release: __GH_AW_DEFERRED_1234__");
 
@@ -210,6 +226,8 @@ describe("substitutePlaceholders", () => {
     fs.writeFileSync(unrelated, "__GH_AW_DEFERRED_RELEASE__");
 
     for (const value of ["", "line one\n${{ literal }} $(literal) $& __GH_AW_DEFERRED_OTHER__"]) {
+      // Each iteration recreates the activation inputs, including their provenance.
+      fs.rmSync(path.join(promptDir, "prompt-literal-values.json"), { force: true });
       fs.writeFileSync(agentPath, stagedAgent);
       fs.writeFileSync(skillPath, stagedSkill);
       await substitutePlaceholders({

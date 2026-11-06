@@ -59,6 +59,17 @@ This action copies files from `actions/setup/`, including:
 - Agent job scripts (compute_text, create_issue, create_pull_request, etc.)
 - Safe output scripts (safe_outputs_*, safe_inputs_*, messages, etc.)
 - Prompt rendering scripts (`create_prompt.cjs`, `interpolate_prompt.cjs`, etc.)
+  retain an opaque author-owned view in `aw-prompts/prompt-literal-values.json`.
+  Placeholder substitution and validation use this provenance across activation
+  and deferred agent-job passes, while prompt and inline instruction files remain
+  fully rendered. Only compiler-declared deferred bindings are interpreted again;
+  placeholder-like text inside evaluated context stays literal. Inline metadata
+  is parsed before context restoration, and evaluated values are serialized as
+  YAML scalars rather than YAML structure.
+  Interpolation and renderer diagnostics report counts and branch outcomes, not
+  prompt previews, variable names, values, or opaque tokens. Provenance debug
+  logs report retained/discarded value counts and fixed rejection reasons.
+  Prompt artifacts still contain rendered content and must be treated as sensitive.
 - Utility scripts (sanitize_*, validate_*, generate_*, etc.)
 
 ### Shell Scripts (7 files from `sh/`)
@@ -102,6 +113,44 @@ redaction keep the broader four-character collection policy for plain header
 values; the runner-mask policy does not reduce that redaction.
 
 ## Development
+
+### Decisions client
+
+`js/decisions_client.cjs` exports
+`invokeDecisions({ baseURL, apiKey?, model, input, questions, timeoutMs?, fetchImpl?, onUsage? })`.
+It sends the whole question array in one `POST` to `<baseURL>/decisions` and
+returns the response, including its named answers, model, and token usage.
+The helper supports `predicate`, `choice`, and `score` questions, string or
+boolean choice values, and text/image/JSON question instructions.
+
+The caller supplies a provider API base URL (for example
+`https://api.openai.com/v1`) and its credential. No proxy or sandbox is required. The default
+timeout is 120 seconds. The client rejects invalid batches, mismatched answers,
+HTTP failures, and redirects without retrying or logging provider bodies.
+Refusals remain typed answers for the caller to handle. It requires no SDK,
+Actions globals, or agentic engine.
+
+The optional `onUsage(usage, model)` callback runs after receiving JSON, before
+answer validation, so callers can collect costs even when the answer batch is
+invalid. Evals use it to save response token usage and catalog-derived AIC and
+USD costs to the accounting artifact.
+
+### Synthetic message previews
+
+`js/testdata/messages_preview.md` contains locally rendered previews of shared
+comment, issue, pull-request body, and diagnostic templates. All fixture data is
+synthetic; the test does not publish anything to GitHub. Agent-only instruction
+templates are explicitly excluded.
+
+Check for rendering changes:
+
+```bash
+npm --prefix actions/setup/js run test:js -- --no-file-parallelism messages_preview.test.cjs
+```
+
+After an intentional template change, run the same command with `--update` and
+review the Markdown diff before committing it. New bundled Markdown templates
+are included automatically unless explicitly excluded as agent instructions.
 
 ### Structured issue reports
 

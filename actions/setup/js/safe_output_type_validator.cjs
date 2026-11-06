@@ -17,6 +17,9 @@ const { validateValueAgainstSchema } = require("./schema-validation.cjs");
 const { resolveDataSchema } = require("./data_schema_normalizer.cjs");
 const { isBlankOptionalField, normalizeBlankOptionalFields } = require("./optional_field_normalizer.cjs");
 const { normalizeSafeOutputName, normalizeSafeOutputConfig } = require("./safe_output_names.cjs");
+const { parseReportMarkdown } = require("./report_markdown.cjs");
+const { renderReport } = require("./report_ast.cjs");
+const { isDependencyUnsupportedType, validateSubmissionMetadata } = require("./safe_output_submission.cjs");
 
 /**
  * Default max body length for GitHub content
@@ -775,7 +778,12 @@ function executeCustomValidation(item, customValidation, lineNum, itemType) {
  * @returns {{isValid: boolean, normalizedItem?: Object, error?: string}}
  */
 function validateItem(item, itemType, lineNum, options) {
+  const metadataError = validateSubmissionMetadata(item);
+  if (metadataError) return { isValid: false, error: `Line ${lineNum}: ${metadataError}` };
   itemType = normalizeSafeOutputName(itemType);
+  if ((item["depends-on"] !== undefined || item.depends_on !== undefined) && isDependencyUnsupportedType(itemType)) {
+    return { isValid: false, error: `Line ${lineNum}: depends-on is not supported for ${itemType}, which executes outside the safe-output handler manager.` };
+  }
   const validationConfig = loadValidationConfig();
   const typeConfig = validationConfig[itemType];
 
@@ -793,6 +801,9 @@ function validateItem(item, itemType, lineNum, options) {
   // agent-controlled, so forwarding undeclared fields would let consumers act
   // on values that were never validated.
   const normalizedItem = { type: item.type };
+  if (item.output_id !== undefined) normalizedItem.output_id = item.output_id;
+  const dependency = item["depends-on"] !== undefined ? item["depends-on"] : item.depends_on;
+  if (dependency !== undefined) normalizedItem["depends-on"] = dependency;
   const errors = [];
 
   // Run custom validation first if defined
@@ -893,13 +904,12 @@ function validateItem(item, itemType, lineNum, options) {
     // If this safe-output type supports a body field, append structured data
     // as fenced JSON so it survives body sanitization.
     if (Object.prototype.hasOwnProperty.call(typeConfig.fields, "body")) {
-      const fencedData = `\`\`\`json\n${dataJSON}\n\`\`\``;
-      const dataBlock = typeConfig.collapseData === true ? `<details>\n<summary>Structured data</summary>\n\n${fencedData}\n\n</details>` : `${STRUCTURED_DATA_LABEL}\n${fencedData}`;
-      if (typeof normalizedItem.body === "string" && normalizedItem.body.length > 0) {
-        normalizedItem.body = `${normalizedItem.body}\n\n${dataBlock}`;
-      } else {
-        normalizedItem.body = dataBlock;
-      }
+      const children = parseReportMarkdown(normalizedItem.body || "", { minimumHeadingLevel: 2, allowMetadata: false, allowedMentions: options?.allowedAliases || [], deferMentions: options?.deferMentions, agentTainted: true });
+      /** @type {import("./report_ast.cjs").ReportBlock} */
+      const dataBlock = { type: "structured_data", data: JSON.parse(dataJSON), agentTainted: true };
+      if (typeConfig.collapseData === true) children.push({ type: "details", summary: "Structured data", agentTainted: false, children: [dataBlock] });
+      else children.push({ type: "paragraph", agentTainted: false, children: [{ type: "text", value: STRUCTURED_DATA_LABEL, agentTainted: false }] }, dataBlock);
+      normalizedItem.body = renderReport({ type: "report", title: "Safe output", children }).body.trimEnd();
     }
   }
 

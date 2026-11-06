@@ -13,7 +13,7 @@ import (
 
 type auditCacheSource string
 
-const auditSchemaVersion = 10
+const auditSchemaVersion = 12
 
 const (
 	auditCacheSourceFull auditCacheSource = "full"
@@ -51,11 +51,15 @@ func loadCachedAuditData(runOutputDir string, run WorkflowRun, source auditCache
 	}
 	auditData.Outcomes = nil
 	auditData.OutcomeSummary = nil
+	if auditData.Retries == nil {
+		auditData.Retries = readAuditRetrySummary(runOutputDir)
+	}
 	return auditData, true
 }
 
 func writeAuditData(runOutputDir string, auditData AuditData) error {
 	auditData.EvidenceSearch = nil
+	auditData.ModelCatalog = nil
 	auditData.SchemaVersion = auditSchemaVersion
 	data, err := json.MarshalIndent(auditData, "", "  ")
 	if err != nil {
@@ -104,6 +108,9 @@ func writeLogsAuditFile(processedRun ProcessedRun, processedRuns []ProcessedRun,
 	}
 	if processedRun.WorkQueue != nil {
 		auditData.WorkQueue = processedRun.WorkQueue
+	}
+	if auditData.Retries == nil {
+		auditData.Retries = readAuditRetrySummary(runOutputDir)
 	}
 	hydratedProcessedRuns := hydrateProcessedRunsWithCachedAudit(processedRuns)
 	auditData.Comparison = buildAuditComparisonForProcessedRuns(hydrateProcessedRunWithCachedAudit(processedRun), hydratedProcessedRuns)

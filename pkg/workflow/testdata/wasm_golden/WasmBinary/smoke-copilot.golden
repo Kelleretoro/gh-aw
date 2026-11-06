@@ -251,7 +251,7 @@ jobs:
         id: sanitized
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,api.npms.io,api.snapcraft.io,archive.ubuntu.com,azure.archive.ubuntu.com,bun.sh,cdn.jsdelivr.net,cdn.playwright.dev,codeload.github.com,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,deb.nodesource.com,deno.land,docs.github.com,esm.sh,get.pnpm.io,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,go.dev,golang.org,googleapis.deno.dev,googlechromelabs.github.io,goproxy.io,json-schema.org,json.schemastore.org,jsr.io,keyserver.ubuntu.com,lfs.github.com,nodejs.org,npm.pkg.github.com,npmjs.com,npmjs.org,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,packagecloud.io,packages.cloud.google.com,packages.microsoft.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,pkg.go.dev,playwright.download.prss.microsoft.com,ppa.launchpad.net,proxy.golang.org,raw.githubusercontent.com,registry.bower.io,registry.npmjs.com,registry.npmjs.org,registry.yarnpkg.com,repo.yarnpkg.com,s.symcb.com,s.symcd.com,security.ubuntu.com,skimdb.npmjs.com,storage.googleapis.com,sum.golang.org,telemetry.vercel.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.googleapis.com,www.npmjs.com,www.npmjs.org,yarnpkg.com"
+          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,api.npms.io,archive.ubuntu.com,azure.archive.ubuntu.com,bun.sh,cdn.jsdelivr.net,cdn.playwright.dev,codeload.github.com,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,deb.nodesource.com,deno.land,docs.github.com,esm.sh,get.pnpm.io,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,go.dev,golang.org,googleapis.deno.dev,googlechromelabs.github.io,goproxy.io,json-schema.org,json.schemastore.org,jsr.io,keyserver.ubuntu.com,lfs.github.com,nodejs.org,npm.pkg.github.com,npmjs.com,npmjs.org,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,pkg.go.dev,playwright.download.prss.microsoft.com,proxy.golang.org,raw.githubusercontent.com,registry.bower.io,registry.npmjs.com,registry.npmjs.org,registry.yarnpkg.com,repo.yarnpkg.com,s.symcb.com,s.symcd.com,security.ubuntu.com,skimdb.npmjs.com,storage.googleapis.com,sum.golang.org,telemetry.vercel.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.npmjs.com,www.npmjs.org,yarnpkg.com"
         with:
           script: |
             const path = require('path');
@@ -335,9 +335,9 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           GH_AW_PROMPT: ${{ runner.temp }}/gh-aw/aw-prompts/prompt.txt
-          GH_AW_ALLOWED_EXTENSIONS: ''
-          GH_AW_CACHE_DESCRIPTION: ''
-          GH_AW_CACHE_DIR: '/tmp/gh-aw/cache-memory/'
+          GH_AW_ALLOWED_EXTENSIONS: ""
+          GH_AW_CACHE_DESCRIPTION: ""
+          GH_AW_CACHE_DIR: "/tmp/gh-aw/cache-memory/"
           GH_AW_EXPR_76DF9333: ${{ github.event.pull_request.number || (fromJSON(steps.generate_aw_info.outputs.aw_context || '{}').item_type == 'pull_request' && fromJSON(steps.generate_aw_info.outputs.aw_context || '{}').item_number) }}
           GH_AW_EXPR_77C1A4D2: ${{ github.event.comment.id || fromJSON(steps.generate_aw_info.outputs.aw_context || '{}').comment_id }}
           GH_AW_EXPR_7C248226: ${{ github.event.issue.number || (fromJSON(steps.generate_aw_info.outputs.aw_context || '{}').item_type == 'issue' && fromJSON(steps.generate_aw_info.outputs.aw_context || '{}').item_number) }}
@@ -427,6 +427,7 @@ jobs:
             /tmp/gh-aw/aw-prompts/user.txt
             /tmp/gh-aw/aw-prompts/prompt-template.txt
             /tmp/gh-aw/aw-prompts/prompt-import-tree.json
+            /tmp/gh-aw/aw-prompts/prompt-literal-values.json
             /tmp/gh-aw/github_rate_limits.jsonl
             /tmp/gh-aw/base
             /tmp/gh-aw/.github/agents
@@ -447,6 +448,7 @@ jobs:
       discussions: read
       issues: read
       pull-requests: read
+    cache-mode: read
     timeout-minutes: 60
     env:
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -639,7 +641,7 @@ jobs:
             const { main } = require(path.join(actionsDir, 'checkout_pr_branch.cjs'));
             await main();
       - name: Install GitHub Copilot CLI
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh" COPILOT_VERSION --checksums-sha256 COPILOT_CHECKSUMS_SHA256 --prefer-toolcache
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh" COPILOT_VERSION --checksums-sha256 COPILOT_CHECKSUMS_SHA256 --prefer-toolcache --cooldown-days 3
         env:
           GH_HOST: github.com
           GH_AW_COPILOT_MIN_VERSION: 1.0.35
@@ -674,7 +676,7 @@ jobs:
             const determineAutomaticLockdown = require(path.join(actionsDir, 'determine_automatic_lockdown.cjs'));
             await determineAutomaticLockdown(github, context, core);
       - name: Restore agent config folders from base branch
-        if: steps.checkout-pr.outcome == 'success'
+        if: steps.checkout-pr.outputs.checked_out == 'true'
         env:
           GH_AW_AGENT_FOLDERS: ".agents .github"
           GH_AW_AGENT_FILES: "AGENTS.md"
@@ -1145,8 +1147,8 @@ jobs:
                 },
                 "handler": "gh.sh",
                 "env": {
-                  "GH_AW_GH_TOKEN": "GH_AW_GH_TOKEN",
-                  "GH_DEBUG": "GH_DEBUG"
+                  "GH_AW_GH_TOKEN": "GH_AW_MCP_SCRIPTS_ENV_6768_47485f41575f47485f544f4b454e",
+                  "GH_DEBUG": "GH_AW_MCP_SCRIPTS_ENV_6768_47485f4445425547"
                 },
                 "timeout": 60
               },
@@ -1172,7 +1174,9 @@ jobs:
                 },
                 "handler": "github-discussion-query.sh",
                 "env": {
-                  "GH_TOKEN": "GH_TOKEN"
+                  "GH_TOKEN": "GH_AW_MCP_SCRIPTS_ENV_6769746875622d64697363757373696f6e2d7175657279_47485f544f4b454e",
+                  "GITHUB_REPOSITORY": "GH_AW_MCP_SCRIPTS_ENV_6769746875622d64697363757373696f6e2d7175657279_4749544855425f5245504f5349544f5259",
+                  "GITHUB_REPOSITORY_OWNER": "GH_AW_MCP_SCRIPTS_ENV_6769746875622d64697363757373696f6e2d7175657279_4749544855425f5245504f5349544f52595f4f574e4552"
                 },
                 "timeout": 60
               },
@@ -1202,7 +1206,8 @@ jobs:
                 },
                 "handler": "github-issue-query.sh",
                 "env": {
-                  "GH_TOKEN": "GH_TOKEN"
+                  "GH_TOKEN": "GH_AW_MCP_SCRIPTS_ENV_6769746875622d69737375652d7175657279_47485f544f4b454e",
+                  "GITHUB_REPOSITORY": "GH_AW_MCP_SCRIPTS_ENV_6769746875622d69737375652d7175657279_4749544855425f5245504f5349544f5259"
                 },
                 "timeout": 60
               },
@@ -1232,7 +1237,8 @@ jobs:
                 },
                 "handler": "github-pr-query.sh",
                 "env": {
-                  "GH_TOKEN": "GH_TOKEN"
+                  "GH_TOKEN": "GH_AW_MCP_SCRIPTS_ENV_6769746875622d70722d7175657279_47485f544f4b454e",
+                  "GITHUB_REPOSITORY": "GH_AW_MCP_SCRIPTS_ENV_6769746875622d70722d7175657279_4749544855425f5245504f5349544f5259"
                 },
                 "timeout": 60
               }
@@ -1244,9 +1250,10 @@ jobs:
             const { startHttpServer } = require("./mcp_scripts_mcp_server_http.cjs");
             const configPath = path.join(__dirname, "tools.json");
             const port = parseInt(process.env.GH_AW_MCP_SCRIPTS_PORT || "3000", 10);
-            const apiKey = process.env.GH_AW_MCP_SCRIPTS_API_KEY || "";
+            const apiKey = process.env.GH_AW_MCP_SCRIPTS_API_KEY;
             startHttpServer(configPath, {
               port: port,
+              apiKey: apiKey,
               stateless: true,
               logDir: "${RUNNER_TEMP}/gh-aw/mcp-scripts/logs"
             }).catch(error => {
@@ -1607,9 +1614,15 @@ jobs:
           DEBUG: ${{ env.DEBUG || runner.debug == '1' && '*' || '' }}
           GH_AW_MCP_SCRIPTS_PORT: ${{ steps.mcp-scripts-config.outputs.mcp_scripts_port }}
           GH_AW_MCP_SCRIPTS_API_KEY: ${{ steps.mcp-scripts-config.outputs.mcp_scripts_api_key }}
-          GH_AW_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_DEBUG: 1
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_AW_MCP_SCRIPTS_ENV_6768_47485f41575f47485f544f4b454e: ${{ secrets.GITHUB_TOKEN }}
+          GH_AW_MCP_SCRIPTS_ENV_6768_47485f4445425547: 1
+          GH_AW_MCP_SCRIPTS_ENV_6769746875622d64697363757373696f6e2d7175657279_47485f544f4b454e: ${{ secrets.GITHUB_TOKEN }}
+          GH_AW_MCP_SCRIPTS_ENV_6769746875622d64697363757373696f6e2d7175657279_4749544855425f5245504f5349544f5259: ${{ github.repository }}
+          GH_AW_MCP_SCRIPTS_ENV_6769746875622d64697363757373696f6e2d7175657279_4749544855425f5245504f5349544f52595f4f574e4552: ${{ github.repository_owner }}
+          GH_AW_MCP_SCRIPTS_ENV_6769746875622d69737375652d7175657279_47485f544f4b454e: ${{ secrets.GITHUB_TOKEN }}
+          GH_AW_MCP_SCRIPTS_ENV_6769746875622d69737375652d7175657279_4749544855425f5245504f5349544f5259: ${{ github.repository }}
+          GH_AW_MCP_SCRIPTS_ENV_6769746875622d70722d7175657279_47485f544f4b454e: ${{ secrets.GITHUB_TOKEN }}
+          GH_AW_MCP_SCRIPTS_ENV_6769746875622d70722d7175657279_4749544855425f5245504f5349544f5259: ${{ github.repository }}
         run: |
           # Environment variables are set above to prevent template injection
           export DEBUG
@@ -1622,7 +1635,6 @@ jobs:
         id: start-mcp-gateway
         env:
           DEBUG: ${{ env.DEBUG || runner.debug == '1' && '*' || '' }}
-          GH_AW_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_AW_MCP_SCRIPTS_API_KEY: ${{ steps.mcp-scripts-start.outputs.api_key }}
           GH_AW_MCP_SCRIPTS_PORT: ${{ steps.mcp-scripts-start.outputs.port }}
           GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST: ${{ vars.GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST || 'true' }}
@@ -1630,8 +1642,6 @@ jobs:
           GH_AW_SAFE_OUTPUTS_CONFIG_PATH: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS_CONFIG_PATH }}
           GH_AW_SAFE_OUTPUTS_TOOLS_PATH: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS_TOOLS_PATH }}
           GH_AW_SINK_VISIBILITY: ${{ steps.determine-automatic-lockdown.outputs.visibility }}
-          GH_DEBUG: 1
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_MCP_GUARD_MIN_INTEGRITY: ${{ steps.determine-automatic-lockdown.outputs.min_integrity }}
           GITHUB_MCP_GUARD_REPOS: ${{ steps.determine-automatic-lockdown.outputs.repos }}
           GITHUB_MCP_SERVER_TOKEN: ${{ secrets.GH_AW_GITHUB_MCP_SERVER_TOKEN || secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
@@ -1667,7 +1677,7 @@ jobs:
           MCP_GATEWAY_UID=$(id -u 2>/dev/null || echo '0')
           MCP_GATEWAY_GID=$(id -g 2>/dev/null || echo '0')
           source "${RUNNER_TEMP}/gh-aw/actions/resolve_docker_socket_gid.sh"
-          export MCP_GATEWAY_DOCKER_COMMAND='docker run -i --rm --network bridge -p 127.0.0.1:'"${MCP_GATEWAY_PORT}"':'"${MCP_GATEWAY_PORT}"' --name awmg-mcpg --add-host host.docker.internal:host-gateway --user '"${MCP_GATEWAY_UID}"':'"${MCP_GATEWAY_GID}"' --group-add '"${DOCKER_SOCK_GID}"' -v '"${DOCKER_SOCK_PATH}"':/var/run/docker.sock -e MCP_GATEWAY_PORT -e MCP_GATEWAY_DOMAIN -e MCP_GATEWAY_AGENT_ID -e MCP_GATEWAY_PAYLOAD_DIR -e MCP_GATEWAY_PAYLOAD_SIZE_THRESHOLD -e DOCKER_HOST=unix:///var/run/docker.sock -e DEBUG -e MCP_GATEWAY_LOG_DIR -e GH_AW_MCP_LOG_DIR -e GH_AW_SAFE_OUTPUTS -e GH_AW_SAFE_OUTPUTS_CONFIG_PATH -e GH_AW_SAFE_OUTPUTS_TOOLS_PATH -e GH_AW_TARGET_REPO_SLUG -e GH_AW_PR_HEAD_BASE_BRANCH -e GH_AW_PR_HEAD_BASE_SHA -e GH_AW_PR_HEAD_BASE_REPO -e GH_AW_PR_HEAD_BASE_PR_NUMBER -e GH_AW_PR_HEAD_BASE_REF -e GH_AW_PR_HEAD_REPO -e GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST -e GH_AW_ASSETS_BRANCH -e GH_AW_ASSETS_MAX_SIZE_KB -e GH_AW_ASSETS_ALLOWED_EXTS -e DEFAULT_BRANCH -e GITHUB_MCP_SERVER_TOKEN -e GITHUB_MCP_GUARD_MIN_INTEGRITY -e GITHUB_MCP_GUARD_REPOS -e GH_AW_SINK_VISIBILITY -e GITHUB_REPOSITORY -e GITHUB_SERVER_URL -e GITHUB_SHA -e GITHUB_WORKSPACE -e GITHUB_TOKEN -e GITHUB_RUN_ID -e GITHUB_RUN_NUMBER -e GITHUB_RUN_ATTEMPT -e GITHUB_JOB -e GITHUB_ACTION -e GITHUB_EVENT_NAME -e GITHUB_EVENT_PATH -e GITHUB_ACTOR -e GITHUB_ACTOR_ID -e GITHUB_TRIGGERING_ACTOR -e GITHUB_WORKFLOW -e GITHUB_WORKFLOW_REF -e GITHUB_WORKFLOW_SHA -e GITHUB_REF -e GITHUB_REF_NAME -e GITHUB_REF_TYPE -e GITHUB_HEAD_REF -e GITHUB_BASE_REF -e RUNNER_TEMP -e RUNNER_TOOL_CACHE -e MCP_GATEWAY_ALLOWED_MOUNT_ROOTS -e GH_AW_MCP_SCRIPTS_PORT -e GH_AW_MCP_SCRIPTS_API_KEY -e GITHUB_AW_OTEL_TRACE_ID -e GITHUB_AW_OTEL_PARENT_SPAN_ID -e OTEL_EXPORTER_OTLP_HEADERS -e GH_AW_GH_TOKEN -e GH_DEBUG -e GH_TOKEN -v /tmp/gh-aw/mcp-payloads:/tmp/gh-aw/mcp-payloads:rw -v /opt:/opt:ro -v /tmp:/tmp:rw -v '"${GITHUB_WORKSPACE}"':'"${GITHUB_WORKSPACE}"':rw -v '"${RUNNER_TEMP}"'/gh-aw/safeoutputs:'"${RUNNER_TEMP}"'/gh-aw/safeoutputs:rw ghcr.io/github/gh-aw-mcpg:MCPG_VERSION'
+          export MCP_GATEWAY_DOCKER_COMMAND='docker run -i --rm --network bridge -p 127.0.0.1:'"${MCP_GATEWAY_PORT}"':'"${MCP_GATEWAY_PORT}"' --name awmg-mcpg --add-host host.docker.internal:host-gateway --user '"${MCP_GATEWAY_UID}"':'"${MCP_GATEWAY_GID}"' --group-add '"${DOCKER_SOCK_GID}"' -v '"${DOCKER_SOCK_PATH}"':/var/run/docker.sock -e MCP_GATEWAY_PORT -e MCP_GATEWAY_DOMAIN -e MCP_GATEWAY_AGENT_ID -e MCP_GATEWAY_PAYLOAD_DIR -e MCP_GATEWAY_PAYLOAD_SIZE_THRESHOLD -e DOCKER_HOST=unix:///var/run/docker.sock -e DEBUG -e MCP_GATEWAY_LOG_DIR -e GH_AW_MCP_LOG_DIR -e GH_AW_SAFE_OUTPUTS -e GH_AW_SAFE_OUTPUTS_CONFIG_PATH -e GH_AW_SAFE_OUTPUTS_TOOLS_PATH -e GH_AW_TARGET_REPO_SLUG -e GH_AW_PR_HEAD_BASE_BRANCH -e GH_AW_PR_HEAD_BASE_SHA -e GH_AW_PR_HEAD_BASE_REPO -e GH_AW_PR_HEAD_BASE_PR_NUMBER -e GH_AW_PR_HEAD_BASE_REF -e GH_AW_PR_HEAD_REPO -e GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST -e GH_AW_ASSETS_BRANCH -e GH_AW_ASSETS_MAX_SIZE_KB -e GH_AW_ASSETS_ALLOWED_EXTS -e DEFAULT_BRANCH -e GITHUB_MCP_SERVER_TOKEN -e GITHUB_MCP_GUARD_MIN_INTEGRITY -e GITHUB_MCP_GUARD_REPOS -e GH_AW_SINK_VISIBILITY -e GITHUB_REPOSITORY -e GITHUB_SERVER_URL -e GITHUB_SHA -e GITHUB_WORKSPACE -e GITHUB_TOKEN -e GITHUB_RUN_ID -e GITHUB_RUN_NUMBER -e GITHUB_RUN_ATTEMPT -e GITHUB_JOB -e GITHUB_ACTION -e GITHUB_EVENT_NAME -e GITHUB_EVENT_PATH -e GITHUB_ACTOR -e GITHUB_ACTOR_ID -e GITHUB_TRIGGERING_ACTOR -e GITHUB_WORKFLOW -e GITHUB_WORKFLOW_REF -e GITHUB_WORKFLOW_SHA -e GITHUB_REF -e GITHUB_REF_NAME -e GITHUB_REF_TYPE -e GITHUB_HEAD_REF -e GITHUB_BASE_REF -e RUNNER_TEMP -e RUNNER_TOOL_CACHE -e MCP_GATEWAY_ALLOWED_MOUNT_ROOTS -e GH_AW_MCP_SCRIPTS_PORT -e GH_AW_MCP_SCRIPTS_API_KEY -e GITHUB_AW_OTEL_TRACE_ID -e GITHUB_AW_OTEL_PARENT_SPAN_ID -e OTEL_EXPORTER_OTLP_HEADERS -v /tmp/gh-aw/mcp-payloads:/tmp/gh-aw/mcp-payloads:rw -v /opt:/opt:ro -v /tmp:/tmp:rw -v '"${GITHUB_WORKSPACE}"':'"${GITHUB_WORKSPACE}"':rw -v '"${RUNNER_TEMP}"'/gh-aw/safeoutputs:'"${RUNNER_TEMP}"'/gh-aw/safeoutputs:rw ghcr.io/github/gh-aw-mcpg:MCPG_VERSION'
 
           mkdir -p "$HOME/.copilot"
           GH_AW_NODE=$(which node 2>/dev/null || command -v node 2>/dev/null || echo node)
@@ -1942,7 +1952,6 @@ jobs:
           COPILOT_DUMMY_BYOK: dummy-byok-key-for-offline-mode
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           COPILOT_MODEL: ${{ vars.GH_AW_MODEL_AGENT_COPILOT || vars.GH_AW_DEFAULT_MODEL_COPILOT || 'default' }}
-          GH_AW_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_AW_LLM_PROVIDER: github
           GH_AW_MAX_AI_CREDITS: ${{ vars.GH_AW_DEFAULT_MAX_AI_CREDITS || '1000' }}
           GH_AW_MAX_TURNS: ${{ vars.GH_AW_DEFAULT_MAX_TURNS || '' }}
@@ -1951,8 +1960,6 @@ jobs:
           GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
           GH_AW_TIMEOUT_MINUTES: 15
           GH_AW_VERSION: dev
-          GH_DEBUG: 1
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_API_URL: ${{ github.api_url }}
           GITHUB_AW: true
           GITHUB_COPILOT_INTEGRATION_ID: agentic-workflows
@@ -2052,7 +2059,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
-          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,api.npms.io,api.snapcraft.io,archive.ubuntu.com,azure.archive.ubuntu.com,bun.sh,cdn.jsdelivr.net,cdn.playwright.dev,codeload.github.com,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,deb.nodesource.com,deno.land,docs.github.com,esm.sh,get.pnpm.io,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,go.dev,golang.org,googleapis.deno.dev,googlechromelabs.github.io,goproxy.io,json-schema.org,json.schemastore.org,jsr.io,keyserver.ubuntu.com,lfs.github.com,nodejs.org,npm.pkg.github.com,npmjs.com,npmjs.org,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,packagecloud.io,packages.cloud.google.com,packages.microsoft.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,pkg.go.dev,playwright.download.prss.microsoft.com,ppa.launchpad.net,proxy.golang.org,raw.githubusercontent.com,registry.bower.io,registry.npmjs.com,registry.npmjs.org,registry.yarnpkg.com,repo.yarnpkg.com,s.symcb.com,s.symcd.com,security.ubuntu.com,skimdb.npmjs.com,storage.googleapis.com,sum.golang.org,telemetry.vercel.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.googleapis.com,www.npmjs.com,www.npmjs.org,yarnpkg.com"
+          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,api.npms.io,archive.ubuntu.com,azure.archive.ubuntu.com,bun.sh,cdn.jsdelivr.net,cdn.playwright.dev,codeload.github.com,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,deb.nodesource.com,deno.land,docs.github.com,esm.sh,get.pnpm.io,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,go.dev,golang.org,googleapis.deno.dev,googlechromelabs.github.io,goproxy.io,json-schema.org,json.schemastore.org,jsr.io,keyserver.ubuntu.com,lfs.github.com,nodejs.org,npm.pkg.github.com,npmjs.com,npmjs.org,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,pkg.go.dev,playwright.download.prss.microsoft.com,proxy.golang.org,raw.githubusercontent.com,registry.bower.io,registry.npmjs.com,registry.npmjs.org,registry.yarnpkg.com,repo.yarnpkg.com,s.symcb.com,s.symcd.com,security.ubuntu.com,skimdb.npmjs.com,storage.googleapis.com,sum.golang.org,telemetry.vercel.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.npmjs.com,www.npmjs.org,yarnpkg.com"
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_API_URL: ${{ github.api_url }}
         with:
@@ -2253,6 +2260,7 @@ jobs:
     # Permissions for the conclusion job (workflow permissions default to none).
     permissions:
       actions: write
+      checks: read
       discussions: write
       issues: write
       pull-requests: write
@@ -2537,6 +2545,8 @@ jobs:
         env:
           GH_AW_GRADER_MANIFEST_0: '{"version":2,"graders":[]}'
           GH_AW_GRADER_MANIFEST_CHUNKS: '1'
+          GH_AW_SAFE_JOB_NAMES: "[\"send_slack_message\"]"
+          GH_AW_SAFE_JOB_RESULTS: "{\"send_slack_message\":{\"result\":${{ toJSON(needs.send_slack_message.result) }},\"outputs\":{}}}"
           GH_AW_JOB_DURATIONS: ${{ steps.report_failed_jobs.outputs.job_durations }}
           GH_AW_DAILY_AI_CREDITS_GUARDRAIL_STATUS: ${{ needs.activation.outputs.daily_ai_credits_guardrail_status }}
           GH_AW_DAILY_AI_CREDITS_EXCEEDED: ${{ needs.activation.outputs.daily_ai_credits_exceeded }}
@@ -2579,6 +2589,7 @@ jobs:
             /tmp/gh-aw/usage/detection/detection_result.json
             /tmp/gh-aw/usage/evals/token_usage.jsonl
             /tmp/gh-aw/usage/evals/execution.json
+            /tmp/gh-aw/usage/evals/evals_status.json
             /tmp/gh-aw/usage/experiment/state.jsonl
             /tmp/gh-aw/usage/experiment/state.json
             /tmp/gh-aw/usage/experiment/assignments.json
@@ -2616,6 +2627,7 @@ jobs:
             /tmp/gh-aw/usage/detection/detection_result.json
             /tmp/gh-aw/usage/evals/token_usage.jsonl
             /tmp/gh-aw/usage/evals/execution.json
+            /tmp/gh-aw/usage/evals/evals_status.json
             /tmp/gh-aw/usage/experiment/state.jsonl
             /tmp/gh-aw/usage/experiment/state.json
             /tmp/gh-aw/usage/experiment/assignments.json
@@ -2769,7 +2781,7 @@ jobs:
           node-version: '24'
           package-manager-cache: false
       - name: Install GitHub Copilot CLI
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh" COPILOT_VERSION --checksums-sha256 COPILOT_CHECKSUMS_SHA256 --prefer-toolcache
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh" COPILOT_VERSION --checksums-sha256 COPILOT_CHECKSUMS_SHA256 --prefer-toolcache --cooldown-days 3
         env:
           GH_HOST: github.com
           GH_AW_COPILOT_MIN_VERSION: 1.0.35
@@ -3056,7 +3068,7 @@ jobs:
       discussions: write
       issues: write
       pull-requests: write
-    timeout-minutes: 45
+    timeout-minutes: 15
     env:
       GH_AW_AGENT_AIC: ${{ needs.agent.outputs.aic }}
       GH_AW_AIC: ${{ needs.agent.outputs.aic }}
@@ -3152,7 +3164,7 @@ jobs:
           GH_AW_AGENT_OUTPUT: ${{ steps.setup-agent-output-env.outputs.GH_AW_AGENT_OUTPUT }}
           GH_AW_COMMENT_ID: ${{ needs.activation.outputs.comment_id }}
           GH_AW_MENTIONS_GITHUB_TOKEN: ${{ github.token }}
-          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,api.npms.io,api.snapcraft.io,archive.ubuntu.com,azure.archive.ubuntu.com,bun.sh,cdn.jsdelivr.net,cdn.playwright.dev,codeload.github.com,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,deb.nodesource.com,deno.land,docs.github.com,esm.sh,get.pnpm.io,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,go.dev,golang.org,googleapis.deno.dev,googlechromelabs.github.io,goproxy.io,json-schema.org,json.schemastore.org,jsr.io,keyserver.ubuntu.com,lfs.github.com,nodejs.org,npm.pkg.github.com,npmjs.com,npmjs.org,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,packagecloud.io,packages.cloud.google.com,packages.microsoft.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,pkg.go.dev,playwright.download.prss.microsoft.com,ppa.launchpad.net,proxy.golang.org,raw.githubusercontent.com,registry.bower.io,registry.npmjs.com,registry.npmjs.org,registry.yarnpkg.com,repo.yarnpkg.com,s.symcb.com,s.symcd.com,security.ubuntu.com,skimdb.npmjs.com,storage.googleapis.com,sum.golang.org,telemetry.vercel.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.googleapis.com,www.npmjs.com,www.npmjs.org,yarnpkg.com"
+          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,api.npms.io,archive.ubuntu.com,azure.archive.ubuntu.com,bun.sh,cdn.jsdelivr.net,cdn.playwright.dev,codeload.github.com,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,deb.nodesource.com,deno.land,docs.github.com,esm.sh,get.pnpm.io,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,go.dev,golang.org,googleapis.deno.dev,googlechromelabs.github.io,goproxy.io,json-schema.org,json.schemastore.org,jsr.io,keyserver.ubuntu.com,lfs.github.com,nodejs.org,npm.pkg.github.com,npmjs.com,npmjs.org,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,pkg.go.dev,playwright.download.prss.microsoft.com,proxy.golang.org,raw.githubusercontent.com,registry.bower.io,registry.npmjs.com,registry.npmjs.org,registry.yarnpkg.com,repo.yarnpkg.com,s.symcb.com,s.symcd.com,security.ubuntu.com,skimdb.npmjs.com,storage.googleapis.com,sum.golang.org,telemetry.vercel.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.npmjs.com,www.npmjs.org,yarnpkg.com"
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_API_URL: ${{ github.api_url }}
           GH_AW_SAFE_OUTPUT_JOBS: "{\"send_slack_message\":\"\"}"
@@ -3174,6 +3186,7 @@ jobs:
           name: safe-outputs-items
           path: |
             /tmp/gh-aw/safe-output-items.jsonl
+            /tmp/gh-aw/safe-output-outcomes.jsonl
             /tmp/gh-aw/temporary-id-map.json
             /tmp/gh-aw/safe-output-errors.json
           if-no-files-found: ignore
@@ -3240,12 +3253,17 @@ jobs:
       - activation
       - agent
       - detection
-    if: always() && needs.detection.result == 'success' && needs.agent.result == 'success'
+    if: >
+      always() && needs.detection.result == 'success' && needs.detection.outputs.detection_success == 'true' &&
+      needs.agent.result == 'success' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'repository_dispatch' || github.event_name == 'delete' || github.event_name == 'registry_package' ||
+      github.event_name == 'page_build' || github.event_name == 'schedule' || github.event_name == 'pull_request')
     runs-on: ubuntu-slim
     # Permissions for the update_cache_memory job (workflow permissions default to none).
     permissions:
       actions: write
       contents: read
+    cache-mode: write-only
     env:
       GH_AW_RUNTIME_FEATURES: ${{ vars.GH_AW_RUNTIME_FEATURES }}
       GH_AW_WORKFLOW_ID_SANITIZED: smokecopilot

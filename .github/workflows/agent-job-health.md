@@ -11,11 +11,16 @@ permissions:
   pull-requests: read
   discussions: read
   actions: read
+  copilot-requests: write
 tracker-id: agent-job-health
 
 
 engine:
   id: claude
+  model-provider: github
+  model-routing:
+    goal: cost
+    mode: economy
   mcp:
     tool-timeout: 10m
 max-ai-credits: 1500

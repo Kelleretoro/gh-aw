@@ -5,6 +5,10 @@
       "import": "github/gh-aw/.github/workflows/shared/aider.md"
     },
     {
+      "id": "atomic",
+      "import": "github/gh-aw/.github/workflows/shared/atomic.md"
+    },
+    {
       "id": "crush",
       "import": "github/gh-aw/.github/workflows/shared/crush.md"
     },
@@ -15,6 +19,10 @@
     {
       "id": "deepseek-harness",
       "import": "github/gh-aw/.github/workflows/shared/deepseek-harness.md"
+    },
+    {
+      "id": "factory",
+      "import": "github/gh-aw/.github/workflows/shared/factory.md"
     },
     {
       "id": "goose",

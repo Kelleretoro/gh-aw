@@ -226,7 +226,7 @@ func TestRepoMemoryStepsGeneration(t *testing.T) {
 	}
 
 	var builder strings.Builder
-	generateRepoMemorySteps(&builder, data)
+	NewCompiler().generateRepoMemorySteps(&builder, data, "agent")
 
 	output := builder.String()
 
@@ -1283,7 +1283,7 @@ func TestRepoMemoryWikiStepsGeneration(t *testing.T) {
 	}
 
 	var builder strings.Builder
-	generateRepoMemorySteps(&builder, data)
+	NewCompiler().generateRepoMemorySteps(&builder, data, "agent")
 
 	output := builder.String()
 	assert.Contains(t, output, "TARGET_REPO: ${{ github.repository }}.wiki",
@@ -1310,7 +1310,7 @@ func TestRepoMemoryWikiStepsWithTargetRepo(t *testing.T) {
 	}
 
 	var builder strings.Builder
-	generateRepoMemorySteps(&builder, data)
+	NewCompiler().generateRepoMemorySteps(&builder, data, "agent")
 
 	output := builder.String()
 	assert.Contains(t, output, "TARGET_REPO: myorg/myrepo.wiki",
@@ -1363,7 +1363,7 @@ func TestRepoMemoryNonWikiPromptSection(t *testing.T) {
 	var prompt strings.Builder
 	mappings := NewCompiler().generateUnifiedPromptCreationStep(&prompt, []PromptSection{*section}, nil, nil, &WorkflowData{})
 	assert.NotContains(t, prompt.String(), "GH_AW_WIKI_NOTE:")
-	assert.Contains(t, mappings, &ExpressionMapping{EnvVar: "GH_AW_WIKI_NOTE", Content: "''"})
+	assert.Contains(t, mappings, &ExpressionMapping{EnvVar: "GH_AW_WIKI_NOTE", Content: "", IsLiteral: true})
 }
 
 func TestRepoMemoryNonWikiCompilation(t *testing.T) {
@@ -1394,7 +1394,7 @@ Maintain the repository memory.
 	lock, err := os.ReadFile(filepath.Join(dir, "repo-memory.lock.yml"))
 	require.NoError(t, err)
 	assert.NotContains(t, string(lock), "GH_AW_WIKI_NOTE: ${{ '' }}")
-	assert.Contains(t, string(lock), "GH_AW_WIKI_NOTE: ''")
+	assert.Contains(t, string(lock), `GH_AW_WIKI_NOTE: ""`)
 }
 
 // TestRepoMemoryWikiPushAllowedRepos tests that wiki mode sets REPO_MEMORY_ALLOWED_REPOS
@@ -1717,7 +1717,7 @@ func TestRepoMemoryValidationConfigAndGeneratedSteps(t *testing.T) {
 
 	data := &WorkflowData{RepoMemoryConfig: config}
 	var restore strings.Builder
-	generateRepoMemorySteps(&restore, data)
+	NewCompiler().generateRepoMemorySteps(&restore, data, "agent")
 	assert.NotContains(t, restore.String(), "Validate repo-memory baseline (default)")
 	generateRepoMemoryBaselineValidationSteps(&restore, data)
 	restoreYAML := restore.String()

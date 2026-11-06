@@ -17,12 +17,10 @@ import (
 	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/sliceutil"
 	"github.com/github/gh-aw/pkg/typeutil"
+	"github.com/github/gh-aw/pkg/workflow/actionslanguageservice"
 )
 
 var frontmatterHashLog = logger.New("parser:frontmatter_hash")
-
-// templateExpressionRegex matches ${{ ... }} expressions (pre-compiled for performance)
-var templateExpressionRegex = regexp.MustCompile(`\$\{\{(.*?)\}\}`)
 
 // parseBoolFromFrontmatter extracts a boolean value from a frontmatter map.
 // Returns false if the key is absent, the map is nil, or the value is not a bool.
@@ -34,8 +32,8 @@ func parseBoolFromFrontmatter(m map[string]any, key string) bool {
 // This abstraction allows for different file reading strategies (disk, GitHub API, in-memory, etc.)
 type FileReader func(filePath string) ([]byte, error)
 
-// DefaultFileReader reads files from disk using os.ReadFile
-var DefaultFileReader FileReader = os.ReadFile
+// DefaultFileReader uses the parser's reader, including confined cache reads.
+var DefaultFileReader FileReader = ReadFile
 
 const maxFrontmatterHashInputBytes = 1 << 20
 
@@ -214,28 +212,18 @@ func computeFrontmatterHashFromContent(content string, parsedFrontmatter map[str
 	return computeFrontmatterHashTextBasedWithReader(frontmatterText, fullBody, baseDir, cache, relevantExpressions, fileReader)
 }
 
-// extractRelevantTemplateExpressions extracts template expressions from markdown
-// that reference env. or vars. contexts
+// extractRelevantTemplateExpressions retains the cross-language hash contract's
+// textual env./vars. filter. Hashing scans boundaries; it does not validate syntax.
 func extractRelevantTemplateExpressions(markdown string) []string {
 	frontmatterHashLog.Printf("Extracting relevant template expressions from markdown: size=%d bytes", len(markdown))
 	var expressions []string
 	seen := make(map[string]struct {
 	})
 
-	// Regex to match ${{ ... }} expressions
-	matches := templateExpressionRegex.FindAllStringSubmatch(markdown, -1)
-
-	for _, match := range matches {
-		if len(match) < 2 {
-			continue
-		}
-
-		content := strings.TrimSpace(match[1])
-
-		// Check if expression references env. or vars.
-		if strings.Contains(content, "env.") || strings.Contains(content, "vars.") {
+	for _, match := range extractHashTemplateExpressions(markdown) {
+		if strings.Contains(match.Content, "env.") || strings.Contains(match.Content, "vars.") {
 			// Store the full expression including ${{ }}
-			expr := match[0]
+			expr := markdown[match.Start:match.End]
 			// Deduplicate expressions
 			if !setutil.Contains(seen, expr) {
 				expressions = append(expressions, expr)
@@ -255,12 +243,11 @@ func extractAllTemplateExpressions(markdown string) []string {
 	var expressions []string
 	seen := make(map[string]struct {
 	})
-	matches := templateExpressionRegex.FindAllStringSubmatch(markdown, -1)
-	for _, match := range matches {
-		if len(match) < 2 || strings.TrimSpace(match[1]) == "" {
+	for _, match := range extractHashTemplateExpressions(markdown) {
+		if strings.TrimSpace(match.Content) == "" {
 			continue
 		}
-		expr := match[0]
+		expr := markdown[match.Start:match.End]
 		if !setutil.Contains(seen, expr) {
 			expressions = append(expressions, expr)
 			seen[expr] = struct {
@@ -269,6 +256,16 @@ func extractAllTemplateExpressions(markdown string) []string {
 	}
 	sort.Strings(expressions)
 	return expressions
+}
+
+func extractHashTemplateExpressions(markdown string) []actionslanguageservice.Interpolation {
+	matches, err := actionslanguageservice.ExtractExpressions(markdown)
+	if err != nil {
+		frontmatterHashLog.Printf("Cannot scan template expressions for hashing: %v", err)
+		// Preserve complete expressions before and after malformed openings. Syntax
+		// validation, rather than freshness hashing, rejects malformed input.
+	}
+	return matches
 }
 
 func mergeSortedUniqueStrings(groups ...[]string) []string {

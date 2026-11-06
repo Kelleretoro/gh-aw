@@ -10,6 +10,8 @@ Beyond basic frontmatter extraction, the package provides a rich import system t
 
 The package is designed for use both in the main CLI binary and in WebAssembly contexts (see `*_wasm.go` files). Build constraints separate platform-specific implementations for remote fetching and filesystem access.
 
+Actions expressions use the native `actionslanguageservice` grammar and quote-aware interpolation scanner. Import-input substitution supports static dot or single-quoted bracket references and compile-time-safe fallback chains, including parenthesized chains. Runtime operands and malformed expressions remain unchanged. Freshness hashing shares quote-aware boundary scanning with JavaScript, retaining complete expressions before an unclosed suffix. Its legacy textual `env.`/`vars.` filter is unchanged; hashing does not validate Actions grammar.
+
 ## Public API
 
 ### Types
@@ -62,10 +64,19 @@ The package is designed for use both in the main CLI binary and in WebAssembly c
 | `ProcessImportsFromFrontmatterWithSource` | `func(frontmatter map[string]any, baseDir string, cache *ImportCache, ...) (*ImportsResult, error)` | Resolves all `@import` directives in frontmatter, merging imported configs |
 | `ParseImportDirective` | `func(line string) *ImportDirectiveMatch` | Parses a single `@import` or `@include` line |
 | `NewImportCache` | `func(repoRoot string) *ImportCache` | Creates a new import cache rooted at the repository |
+| `(*ImportCache).ReadFile` | `func(path string) ([]byte, error)` | Reads a cache path through confined directory handles; rejects symlinks and non-regular files |
 | `ExpandIncludesWithManifest` | `func(content, baseDir string, extractTools bool) (string, []string, error)` | Expands `@include` directives in markdown body and returns included file paths |
 | `ExpandIncludesForEngines` | `func(content, baseDir string) ([]string, error)` | Returns engine names referenced via `@include` |
 | `ExpandIncludesForSafeOutputs` | `func(content, baseDir string) ([]string, error)` | Returns safe output types referenced via `@include` |
 | `ExtractBodyLevelImportPaths` | `func(content, baseDir string) []BodyLevelImport` | Scans markdown body for `{{#runtime-import}}` directives and returns them as workspace-root-relative `BodyLevelImport` entries |
+
+Native import-cache lookups reject symlink entries and symlink parent directories,
+including dangling links. Writes publish complete files atomically without
+truncating existing link targets. Use `ImportCache.ReadFile` or the parser's
+`ReadFile` for cache paths: a path returned by `Get` or `Set` can change after
+lookup and must not be read with an unconfined filesystem reader. On WebAssembly
+and Plan 9, confined disk caching is unavailable; browser virtual-file reads
+remain unchanged.
 
 #### GitHub URL Parsing
 
@@ -153,7 +164,7 @@ The package is designed for use both in the main CLI binary and in WebAssembly c
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `FormatImportCycleError` | `func(*ImportCycleError) error` | Formats a cycle error with the import chain |
-| `FormatImportError` | `func(*ImportError, yamlContent string) error` | Formats an import error with YAML context |
+| `FormatImportError` | `func(*ImportError, yamlContent string) error` | Formats an import error with YAML context without exposing its underlying error chain |
 | `NewFormattedParserError` | `func(formatted string) *FormattedParserError` | Creates a pre-formatted parser error |
 | `NewValidationError` | `func(field, value, reason, suggestion string) *ValidationError` | Creates a `ValidationError` embedding `validationerror.Payload`, for uniform detection via `errors.As` |
 | `FormatYAMLError` | `func(err error, frontmatterLineOffset int, sourceYAML string) string` | Formats a YAML error with source code context, adjusting line numbers by the frontmatter offset |
@@ -213,6 +224,15 @@ Inline skills are secondary skill definitions embedded in the same markdown file
 | `EnsureToolsSection` | `func(frontmatter map[string]any) map[string]any` | Ensures `tools` exists and is a map in frontmatter |
 | `QuoteCronExpressions` | `func(yamlContent string) string` | Ensures schedule cron values in YAML are quoted |
 
+#### Additional Exported Functions
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ActionPinSourceVersions` | `func(content []byte) map[string]string` | Collects inline version labels for SHA-pinned action references in YAML. |
+| `ExtractSubAgentModels` | `func(body string) []SubAgentModel` | Reads model declarations from inline sub-agent frontmatter; malformed frontmatter is handled as an advisory. |
+| `ParseMCPCACertFile` | `func(config map[string]any, serverType, name string) (string, error)` | Validates and returns an optional per-server CA certificate path from MCP configuration. |
+| `ValidateMCPCACertFile` | `func(value string) error` | Validates an author-controlled CA certificate path before it is used by generated shell content. |
+
 ### Constants / Variables
 
 | Name | Type | Description |
@@ -221,7 +241,7 @@ Inline skills are secondary skill definitions embedded in the same markdown file
 | `ValidMCPTypes` | `[]string` | Valid MCP transport types: `"stdio"`, `"http"`, `"local"` |
 | `IncludeDirectivePattern` | `*regexp.Regexp` | Matches `@import`, `@include`, and `{{#import ...}}` directives |
 | `LegacyIncludeDirectivePattern` | `*regexp.Regexp` | Matches legacy `@import`/`@include` forms |
-| `DefaultFileReader` | `FileReader` | Default file reader using `os.ReadFile` |
+| `DefaultFileReader` | `FileReader` | Default parser reader, including confined native import-cache reads |
 | `RepoConfigSchema` | `string` | Embedded JSON schema for repo-level configuration |
 
 ## Usage Examples

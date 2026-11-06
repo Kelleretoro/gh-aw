@@ -182,6 +182,9 @@ func computeConclusionJobPermissions(data *WorkflowData) *Permissions {
 			conclusionPerms.Set(PermissionContents, PermissionWrite)
 			conclusionPerms.Set(PermissionIssues, PermissionWrite)
 		}
+		if conclusionDetectionMayCreateIssue(data) {
+			conclusionPerms.Set(PermissionIssues, PermissionWrite)
+		}
 		if hasOTLPGitHubOIDCAuth(data.ParsedFrontmatter, data.RawFrontmatter) {
 			conclusionPerms.Set(PermissionIdToken, PermissionWrite)
 		}
@@ -202,10 +205,11 @@ func computeConclusionJobPermissions(data *WorkflowData) *Permissions {
 			conclusionPerms.Set(PermissionPullRequests, PermissionRead)
 		}
 	}
+	addAgentFailureChecksPermission(data, conclusionPerms)
 	// Only request issues: write when at least one conclusion-job mechanism can actually
 	// create/update an issue and that path is not already covered by
 	// ComputePermissionsForSafeOutputs (report-failed-jobs, agent-failure reporting,
-	// noop reporting, or missing-tool issue reporting). This keeps the permission grant
+	// noop, detection, or missing-tool issue reporting). This keeps the permission grant
 	// derived from the resolved configuration instead of being emitted unconditionally.
 	if conclusionMayCreateIssue(data) {
 		if level, ok := conclusionPerms.Get(PermissionIssues); !ok || level != PermissionWrite {
@@ -216,6 +220,14 @@ func computeConclusionJobPermissions(data *WorkflowData) *Permissions {
 		}
 	}
 	return conclusionPerms
+}
+
+func addAgentFailureChecksPermission(data *WorkflowData, permissions *Permissions) {
+	if !isWorkQueueParticipant(data) && conclusionReportFailureAsIssueEnabled(data) {
+		if level, ok := permissions.Get(PermissionChecks); !ok || level == PermissionNone {
+			permissions.Set(PermissionChecks, PermissionRead)
+		}
+	}
 }
 
 // conclusionReportFailedJobsEnabled returns true unless safe-outputs.report-failed-jobs is
@@ -243,9 +255,13 @@ func issueReportingCreateIssueEnabled(config *IssueReportingConfig) bool {
 	return config != nil && (config.CreateIssue == nil || !strings.EqualFold(strings.TrimSpace(*config.CreateIssue), "false"))
 }
 
+func conclusionDetectionMayCreateIssue(data *WorkflowData) bool {
+	return IsDetectionJobEnabled(data.SafeOutputs) && data.SafeOutputs.ThreatDetection.IsReportAsIssueEnabled()
+}
+
 // conclusionMayCreateIssue returns true if at least one conclusion-job mechanism can create or
 // update an issue: report-failed-jobs, agent-failure reporting (report-failure-as-issue), noop
-// reporting (noop.report-as-issue), or missing-tool issue reporting. This mirrors the resolved
+// reporting (noop.report-as-issue), detection runs, or missing-tool issue reporting. This mirrors the resolved
 // configuration so that disabling every issue-creating path removes issues: write from the
 // compiled conclusion job's permissions.
 func conclusionMayCreateIssue(data *WorkflowData) bool {
@@ -259,6 +275,9 @@ func conclusionMayCreateIssue(data *WorkflowData) bool {
 		return true
 	}
 	if conclusionMissingToolCreateIssueEnabled(data) {
+		return true
+	}
+	if conclusionDetectionMayCreateIssue(data) {
 		return true
 	}
 	return false
@@ -315,7 +334,7 @@ func buildUsageArtifactInputDownloadSteps(prefix string, hasEvals bool, experime
 
 // buildUsageArtifactUploadSteps creates steps that collect and upload a compact usage artifact.
 // The artifact includes aw_info.json, aw-info.jsonl, agent_usage.json, agent_usage.jsonl, detection_usage.jsonl,
-// evals.jsonl, evals token usage and execution evidence, A/B experiment state and assignments,
+// evals.jsonl, evals token usage, execution evidence and not-evaluated marker, A/B experiment state and assignments,
 // grader results, threat-detection outcome/verdict, and agent/detection token usage and
 // model-routing JSONL files
 // (when present), so the audit command can mine these results from the usage artifact alone.
@@ -360,6 +379,7 @@ func buildUsageArtifactUploadStep(prefix string, pinAction func(string) string) 
 		"            /tmp/gh-aw/usage/detection/detection_result.json\n",
 		"            /tmp/gh-aw/usage/evals/token_usage.jsonl\n",
 		"            /tmp/gh-aw/usage/evals/execution.json\n",
+		"            /tmp/gh-aw/usage/evals/evals_status.json\n",
 		"            /tmp/gh-aw/usage/experiment/state.jsonl\n",
 		"            /tmp/gh-aw/usage/experiment/state.json\n",
 		"            /tmp/gh-aw/usage/experiment/assignments.json\n",

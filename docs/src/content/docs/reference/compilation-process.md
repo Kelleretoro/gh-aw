@@ -19,6 +19,8 @@ Workflow schemas and built-in Actions/AW lint rules are bundled with the CLI; th
 
 Interactive compilation performs a best-effort compiler update check at most once every 24 hours. It runs in the background with a three-second total budget, cancels outstanding requests when compilation finishes, and probes identical current/latest release tags only once. `--no-check-update` disables this check; CI and non-interactive invocations skip it.
 
+Update-check timestamps persist in `gh-aw-update-check` under the operating system's per-user cache directory, with owner-only permissions on Unix. Legacy shared temporary markers are ignored. Opt-in Syft scans save SBOMs in a unique, private `gh-aw-syft-sboms-*` temporary directory and print each file's path. Successful outputs remain available for inspection and can be deleted when no longer needed; directories with no successful scans are removed.
+
 `gh aw update` refreshes upstream state on each invocation, but shares action release lists and tag resolutions across actions from the same repository within that invocation. Release lists use 100 entries per page, and source content already fetched for comparison or merging is reused. By default, `update` also recompiles workflows, so a separate `gh aw compile` is unnecessary unless additional compilation options are required.
 
 When SDK authentication is available, update uses native GitHub API clients with pooled HTTP connections for source metadata, workflow downloads, release lists, and action tags, instead of starting a fresh `gh api` subprocess for each request. Host selection follows the GitHub CLI helpers, including `GH_HOST` and repository detection. If native client setup fails, existing GitHub CLI requests remain available.
@@ -50,6 +52,12 @@ Container digest resolution uses registry metadata only (`docker buildx imagetoo
 ### Phase 1: Parsing and Validation
 
 The compiler extracts the YAML frontmatter, validates it against the workflow schema, validates expression safety (only allow-listed GitHub Actions expressions), and resolves imports.
+
+With `--validate`, generated Actions YAML also passes through a native Go port of the [Actions language-services parsers](https://github.com/actions/languageservices). The port uses the pinned upstream workflow schema and expression grammar, including field-specific context restrictions and implicit `if` expressions. Compiler validation adds the supported workflow/job `cache-mode` values (`read`, `write`, `write-only`, `none`) missing from that schema; the upstream conformance parser remains unchanged. It supplements the existing JSON Schema, dependency, and security checks; it does not evaluate expressions, fetch reusable workflows, or replace the compiler's Actions graph. Diagnostics identify positions in the generated YAML.
+
+Compiler expression extraction, condition optimization, import fallback folding, and context-reference checks share this parser and its quote-aware interpolation scanner. Reference detection and rewriting use AST access nodes, including single-quoted bracket notation, rather than matching reference-like text inside string literals. Existing security allowlists still apply. Actions string literals require single quotes with doubled-quote escaping (`'can''t'`); double-quoted and backtick literals, previously accepted by some compiler helpers, are rejected. The separate gh-aw experiment-comparison shorthand is normalized before Actions parsing.
+
+The parser runs offline, without Node.js or npm. Its conformance suite replays checked-in official-parser results during Go tests. To compare directly against the pinned `@actions/workflow-parser` and `@actions/expressions` packages, run `npm ci --prefix pkg/workflow/actionslanguageservice/conformance --ignore-scripts` followed by `make test-actions-parser-conformance`. CI runs both the recorded corpus and additional boundary cases against the official parsers. The comparison covers template-reader acceptance and expression ASTs, not expression evaluation or the upstream workflow converter's execution semantics.
 
 The compiler also warns when explicit prompt instructions require shell commands, native reads, or MCP tools denied by the resolved tool configuration. For example, ``Run `jq --version` `` or `Call mcp__github__list_issues` is checked against tool allowlists and GitHub toolsets, including imports. These advisory checks do not infer every command from prose or complex shell scripts and never expand permissions. Resolve warnings by changing the prompt to use permitted tools or allowing the specific required capability.
 
@@ -323,8 +331,8 @@ unrecognized versions fall back to Docker. Local actionlint uses shellcheck and
 pyflakes from `PATH` when those integrations are enabled; it does not install them.
 
 Compilation and `gh aw lint` ignore actionlint's unsupported-key diagnostic for
-workflow-level `cache-mode`. Other syntax and security diagnostics, including
-misplaced `cache-mode` keys, are unaffected.
+workflow- and job-level `cache-mode`. Other syntax and security diagnostics,
+including step-level keys, misspelled keys, and malformed values, are unaffected.
 
 ### Development Testing Mode
 

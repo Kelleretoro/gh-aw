@@ -8,7 +8,8 @@ const { getErrorMessage } = require("./error_helpers.cjs");
 const { isTransientError, isWorkflowsScopeTimeoutError, withRetry, RATE_LIMIT_RETRY_CONFIG } = require("./error_recovery.cjs");
 const { tryEnforceArrayLimit } = require("./limit_enforcement_helpers.cjs");
 const { MAX_ASSIGNEES } = require("./constants.cjs");
-const { encodePathSegments, renderTemplateFromFile, getPromptPath } = require("./messages_core.cjs");
+const { encodePathSegments, renderTemplateFromFile } = require("./messages_core.cjs");
+const { parseReportMarkdown } = require("./report_markdown.cjs");
 
 /** @type {string} Label always added to fallback issues so the triage system can find them */
 const MANAGED_FALLBACK_ISSUE_LABEL = "agentic-workflows";
@@ -221,13 +222,13 @@ function neutralizeClosingKeywordsForIssueBody(content) {
 }
 
 /**
- * Generate a patch preview with max 500 lines and 2000 chars for issue body
- * @param {string} patchContent - The full patch content
- * @returns {string} Formatted patch preview
+ * Build a patch preview with max 500 lines and 2000 chars for an issue body.
+ * @param {string} patchContent
+ * @returns {import("./report_ast.cjs").ReportBlock[]}
  */
-function generatePatchPreview(patchContent) {
+function buildPatchPreviewBlocks(patchContent) {
   if (!patchContent || !patchContent.trim()) {
-    return "";
+    return [];
   }
 
   const lines = patchContent.split("\n");
@@ -248,7 +249,99 @@ function generatePatchPreview(patchContent) {
   const shownLines = preview.split("\n").length;
   const summary = truncated ? `Show patch preview (${shownLines} of ${lines.length} lines)` : `Show patch (${lines.length} lines)`;
 
-  return `\n\n<details><summary>${summary}</summary>\n\n\`\`\`diff\n${preview}${truncated ? "\n... (truncated)" : ""}\n\`\`\`\n\n</details>`;
+  return [{ type: "details", summary, agentTainted: false, children: [{ type: "code_block", language: "diff", value: preview + (truncated ? "\n... (truncated)" : ""), agentTainted: true }] }];
+}
+
+/**
+ * Import a configured fallback template before substituting scalar data.
+ * Markdown fields must be passed as typed blocks, not rendered fragments.
+ * @param {string} templatePath
+ * @param {import("./report_markdown.cjs").ReportContext} values
+ * @returns {import("./report_ast.cjs").ReportBlock[]}
+ */
+function buildFallbackIssueBlocks(templatePath, values) {
+  return parseReportMarkdown(renderTemplateFromFile(templatePath, {}), { context: values, minimumHeadingLevel: 2, allowMetadata: true, agentTainted: false });
+}
+
+/**
+ * Build typed push-error content, expanding unsupported signed-commit shapes
+ * into cause-specific remediation. Other errors use the sanitized message.
+ * @param {string} rawErrorMessage
+ * @param {string} sanitizedErrorMessage
+ * @returns {import("./report_ast.cjs").ReportBlock[]}
+ */
+function buildPushErrorBlocks(rawErrorMessage, sanitizedErrorMessage) {
+  if (!/pushSignedCommits: refusing unsigned push/.test(rawErrorMessage) || !/createCommitOnBranch GraphQL mutation cannot represent/.test(rawErrorMessage)) {
+    return [
+      {
+        type: "paragraph",
+        agentTainted: false,
+        children: [
+          { type: "strong", children: [{ type: "text", value: "Original error:", agentTainted: false }], agentTainted: false },
+          { type: "text", value: ` ${sanitizedErrorMessage}`, agentTainted: true },
+        ],
+      },
+    ];
+  }
+  const causeMatch = rawErrorMessage.match(/refusing unsigned push for branch '.*?': ([^.]+?)(?=\. GitHub's createCommitOnBranch)/);
+  const cause = causeMatch ? causeMatch[1].trim() : "unsupported commit shape";
+  return [
+    {
+      type: "paragraph",
+      agentTainted: false,
+      children: [
+        { type: "strong", children: [{ type: "text", value: "Error:", agentTainted: false }], agentTainted: false },
+        { type: "text", value: ` Signed commit push refused — ${cause}`, agentTainted: true },
+      ],
+    },
+    ...parseReportMarkdown("GitHub's `createCommitOnBranch` GraphQL API cannot represent:\n\n- Merge commits\n- Symlinks (mode `120000`)\n- Submodule entries (mode `160000`)\n- Executable files (mode `100755`)", { agentTainted: false }),
+    ...parseReportMarkdown(
+      _remediationForCause(cause)
+        .map(line => line.replace(/^> ?/, ""))
+        .join("\n"),
+      { agentTainted: false }
+    ),
+  ];
+}
+
+/**
+ * @param {{mainBody: import("./report_ast.cjs").ReportBlock[], error: import("./report_ast.cjs").ReportBlock[], runUrl: string, artifact: "bundle" | "patch", commands: string, patchPreview?: import("./report_ast.cjs").ReportBlock[]}} options
+ * @returns {import("./report_ast.cjs").ReportBlock[]}
+ */
+function buildPushFailureIssueBlocks({ mainBody, error, runUrl, artifact, commands, patchPreview = [] }) {
+  return [
+    ...mainBody,
+    { type: "separator", agentTainted: false },
+    {
+      type: "alert",
+      kind: "NOTE",
+      agentTainted: false,
+      children: [
+        { type: "paragraph", agentTainted: false, children: [{ type: "text", value: "This was originally intended as a pull request, but the git push operation failed.", agentTainted: false }] },
+        ...error,
+        {
+          type: "paragraph",
+          agentTainted: false,
+          children: [
+            { type: "strong", children: [{ type: "text", value: "Workflow Run:", agentTainted: false }], agentTainted: false },
+            { type: "text", value: " ", agentTainted: false },
+            { type: "link", url: runUrl, children: [{ type: "text", value: `View run details and download ${artifact} artifact`, agentTainted: false }], agentTainted: false },
+          ],
+        },
+        {
+          type: "paragraph",
+          agentTainted: false,
+          children: [
+            { type: "text", value: `The ${artifact} file is available in the `, agentTainted: false },
+            { type: "code", value: "agent", agentTainted: false },
+            { type: "text", value: " artifact in the workflow run linked above.", agentTainted: false },
+          ],
+        },
+      ],
+    },
+    { type: "details", summary: "Create the pull request manually", agentTainted: false, children: [{ type: "code_block", language: "sh", value: commands, agentTainted: true }] },
+    ...patchPreview,
+  ];
 }
 
 /**
@@ -274,60 +367,6 @@ function buildManifestProtectionCreatePrUrl(githubServer, repoParts, baseBranch,
 }
 
 /**
- * Build a formatted markdown error section for a push-failure note block.
- *
- * When the raw error message matches the `pushSignedCommits: refusing unsigned push`
- * pattern the section is expanded into a structured block that names the cause and
- * lists remediation steps. For all other errors it degrades gracefully to a single
- * `**Original error:**` line using the sanitised, whitespace-collapsed form.
- *
- * The returned string contains one or more blockquote lines (lines starting with `>`)
- * with no leading or trailing blank lines. It is designed to be embedded directly
- * inside a `> [!NOTE]` block in a GitHub issue body, for example:
- *
- * ```
- * > [!NOTE]
- * > Intro sentence.
- * >
- * ${buildPushErrorSection(rawMsg, sanitizedMsg)}
- * >
- * > **Workflow Run:** [details](url)
- * ```
- *
- * @param {string} rawErrorMessage - Unprocessed error message; used for pattern detection and cause extraction.
- * @param {string} sanitizedErrorMessage - Sanitised, whitespace-collapsed message; used as the fallback line.
- * @returns {string} One or more blockquote lines for the error section (no leading/trailing blank lines).
- */
-function buildPushErrorSection(rawErrorMessage, sanitizedErrorMessage) {
-  // Only render the structured block for PushSignedCommitsUnsupportedShape errors,
-  // identified by the unique "cannot represent" boilerplate text. PushSignedCommitsPolicyViolation
-  // errors also start with "refusing unsigned push" but lack this boilerplate, so they fall
-  // through to the sanitized original-error fallback.
-  if (!/pushSignedCommits: refusing unsigned push/.test(rawErrorMessage) || !/createCommitOnBranch GraphQL mutation cannot represent/.test(rawErrorMessage)) {
-    return `> **Original error:** ${sanitizedErrorMessage}`;
-  }
-
-  // Extract the specific cause (e.g. "merge commit detected") anchored to the boilerplate.
-  // Using '.*?' (lazy) instead of '[^']*' (restricted) handles apostrophes in branch names.
-  const causeMatch = rawErrorMessage.match(/refusing unsigned push for branch '.*?': ([^.]+?)(?=\. GitHub's createCommitOnBranch)/);
-  const cause = causeMatch ? causeMatch[1].trim() : "unsupported commit shape";
-
-  const remediationLines = _remediationForCause(cause);
-
-  return [
-    `> **Error:** Signed commit push refused — ${cause}`,
-    `>`,
-    `> GitHub's \`createCommitOnBranch\` GraphQL API cannot represent:`,
-    `> - Merge commits`,
-    `> - Symlinks (mode \`120000\`)`,
-    `> - Submodule entries (mode \`160000\`)`,
-    `> - Executable files (mode \`100755\`)`,
-    `>`,
-    ...remediationLines,
-  ].join("\n");
-}
-
-/**
  * Returns cause-specific remediation lines for a signed-commits push refusal.
  * @param {string} cause - The extracted cause string from the error message.
  * @returns {string[]} Two blockquote lines: the fix instruction and the unsigned-push alternative.
@@ -348,6 +387,15 @@ function _remediationForCause(cause) {
 }
 
 /**
+ * @typedef {object} ObjectPackRecovery
+ * @property {string} tip
+ * @property {string} baseline
+ * @property {string} remote
+ * @property {string} artifactFileName
+ * @property {string[]} excludedFiles
+ */
+
+/**
  * Build the shell instructions for manually recreating a branch (and later opening a PR)
  * from a workflow-run artifact, matching whichever transport (bundle or format-patch)
  * was actually used to encode the changes. Used when the automated push failed and a
@@ -364,9 +412,11 @@ function _remediationForCause(cause) {
  * @param {string} params.branchName - branch to create/checkout locally
  * @param {string} [params.baseBranch] - base branch to create the new branch from (patch transport only)
  * @param {string} [params.tempRef] - temporary ref used while transplanting the bundle (bundle transport only)
+ * @param {{ identity?: ObjectPackRecovery }} [params.objectPackRecovery] - populated only after successful recovery
  * @returns {string} Shell instructions (no leading/trailing blank lines, no code fence)
  */
-function buildManualBranchRecoveryCommands({ hasBundleFile, runId, artifactFileName, branchName, baseBranch, tempRef }) {
+function buildManualBranchRecoveryCommands({ hasBundleFile, runId, artifactFileName, branchName, baseBranch, tempRef, objectPackRecovery }) {
+  if (objectPackRecovery?.identity) return buildObjectPackRecoveryCommands({ runId, branchName, objectPackRecovery: objectPackRecovery.identity });
   if (hasBundleFile) {
     if (!tempRef) {
       throw new Error("tempRef is required for bundle manual branch recovery commands");
@@ -427,9 +477,13 @@ function buildManualBranchRecoveryCommands({ hasBundleFile, runId, artifactFileN
  * @param {string} params.artifactFileName - bundle or patch file name (relative to the artifact root)
  * @param {string} params.branchName - existing remote branch to update
  * @param {string} [params.branchRemote] - remote name or URL containing the existing branch
+ * @param {{ identity?: ObjectPackRecovery }} [params.objectPackRecovery] - populated only after successful recovery
  * @returns {string} Shell instructions (no leading/trailing blank lines, no code fence)
  */
-function buildManualBranchApplyCommands({ hasBundleFile, runId, artifactFileName, branchName, branchRemote = "origin" }) {
+function buildManualBranchApplyCommands({ hasBundleFile, runId, artifactFileName, branchName, branchRemote = "origin", objectPackRecovery }) {
+  if (objectPackRecovery?.identity) {
+    return [buildObjectPackRecoveryCommands({ runId, branchName, branchRemote, objectPackRecovery: objectPackRecovery.identity }), `git push ${shellQuote(branchRemote)} ${shellQuote(`HEAD:refs/heads/${branchName}`)}`].join("\n");
+  }
   const bundlePath = `/tmp/agent-${runId}/${artifactFileName}`;
   const pushRef = `HEAD:refs/heads/${branchName}`;
   if (hasBundleFile) {
@@ -468,21 +522,50 @@ function buildManualBranchApplyCommands({ hasBundleFile, runId, artifactFileName
 }
 
 /**
- * Renders protected-files fallback issue body with a prefilled compare URL.
- * @param {string} mainBodyContent
- * @param {string} footerContent
- * @param {string} fileList
- * @param {string} createPrUrl
- * @returns {string}
+ * Recovery envelopes are not bundles or mail patches. Rebuild a binary diff
+ * locally, retaining publisher exclusions without publishing additional bytes.
+ * @param {object} params
+ * @param {string|number} params.runId
+ * @param {string} params.branchName
+ * @param {string} [params.branchRemote]
+ * @param {ObjectPackRecovery} params.objectPackRecovery
  */
-function renderManifestProtectionFallbackBody(mainBodyContent, footerContent, fileList, createPrUrl) {
-  const templatePath = getPromptPath("manifest_protection_create_pr_fallback.md");
-  return renderTemplateFromFile(templatePath, {
-    main_body: mainBodyContent,
-    footer: footerContent,
-    files: fileList,
-    create_pr_url: createPrUrl,
-  });
+function buildObjectPackRecoveryCommands({ runId, branchName, branchRemote, objectPackRecovery }) {
+  const { tip, baseline, remote, artifactFileName, excludedFiles } = objectPackRecovery;
+  const directory = `.gh-aw-manual-${runId}`;
+  const envelope = `${directory}/${artifactFileName}`;
+  const pack = `${directory}/recovery.pack`;
+  const patch = `${directory}/recovery.patch`;
+  const git = "git --no-replace-objects -c core.hooksPath=/dev/null";
+  return [
+    "set -eu",
+    "# Run in a clean, complete clone. Review the paired object preview before importing.",
+    `test -z "$(git status --porcelain)"`,
+    `gh run download ${shellQuote(runId)} -n agent -D ${shellQuote(directory)}`,
+    "# Validate the immutable envelope and paired preview; neither is a git bundle/mail patch.",
+    `python3 - ${shellQuote(envelope)} ${shellQuote(pack)} ${shellQuote(tip)} <<'GH_AW_RECOVERY_PY'`,
+    "import hashlib, json, pathlib, sys",
+    "source, output, tip = sys.argv[1:]",
+    "data = pathlib.Path(source).read_bytes()",
+    "magic = b'GH-AW-OBJECT-PACK 1\\n'",
+    "if not data.startswith(magic): raise SystemExit('Not an object-pack envelope')",
+    "header, pack = data[len(magic):].split(b'\\n', 1)",
+    "metadata = json.loads(header)",
+    "preview = pathlib.Path(source).with_suffix('.patch').read_bytes()",
+    "if metadata['tip'] != tip or hashlib.sha256(pack).hexdigest() != metadata['packHash'] or hashlib.sha256(preview).hexdigest() != metadata['previewHash']:",
+    "    raise SystemExit('Recovery identity or preview changed; refusing import')",
+    "pathlib.Path(output).write_bytes(pack)",
+    "GH_AW_RECOVERY_PY",
+    "# Fetch only the publisher-authorized baseline before importing untrusted objects.",
+    `${git} fetch ${shellQuote(remote)} ${shellQuote(baseline)}`,
+    ...(branchRemote ? [`${git} fetch ${shellQuote(branchRemote)} ${shellQuote(branchName)}`, `recovery_head=$(${git} rev-parse FETCH_HEAD)`] : []),
+    `${git} -c protocol.allow=never index-pack --fsck-objects --stdin < ${shellQuote(pack)}`,
+    `${git} -c protocol.allow=never fsck --strict --no-reflogs ${shellQuote(tip)}`,
+    `${git} -c protocol.allow=never diff --binary --full-index --no-ext-diff --no-textconv ${shellQuote(baseline)} ${shellQuote(tip)} -- . ${excludedFiles.map(pattern => shellQuote(`:(exclude)${pattern}`)).join(" ")} > ${shellQuote(patch)}`,
+    ...(branchRemote ? [`${git} checkout -B ${shellQuote(branchName)} "$recovery_head"`] : [`${git} checkout -b ${shellQuote(branchName)} ${shellQuote(baseline)}`]),
+    `${git} -c protocol.allow=never apply --3way --index ${shellQuote(patch)}`,
+    `${git} commit -m 'Apply reviewed workflow changes'`,
+  ].join("\n");
 }
 
 module.exports = {
@@ -501,10 +584,11 @@ module.exports = {
   mergeFallbackIssueLabels,
   sanitizeFallbackAssignees,
   neutralizeClosingKeywordsForIssueBody,
-  generatePatchPreview,
+  buildPatchPreviewBlocks,
+  buildFallbackIssueBlocks,
+  buildPushErrorBlocks,
+  buildPushFailureIssueBlocks,
   buildManifestProtectionCreatePrUrl,
-  renderManifestProtectionFallbackBody,
-  buildPushErrorSection,
   buildManualBranchRecoveryCommands,
   buildManualBranchApplyCommands,
 };

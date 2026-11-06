@@ -372,6 +372,32 @@ describe("schema-validation.cjs", () => {
       expect(violations).toHaveLength(1);
       expect(violations[0]).toMatchObject({ field: "body", limit: 65536, unit: "characters" });
     });
+
+    it("should honor maxLength above 10KB for custom safe-job inputs", async () => {
+      const { validateStringInputLengths, buildStringLengthValidationError, MAX_STRING_INPUT_BYTES } = await import("./schema-validation.cjs");
+      const customJobTool = {
+        name: "large_payload_job",
+        inputSchema: {
+          type: "object",
+          properties: {
+            payload: { type: "string", maxLength: 40000 },
+            legacy_payload: { type: "string" },
+          },
+        },
+      };
+
+      const acceptedPayload = "a".repeat(12 * 1024);
+      expect(acceptedPayload.length).toBeGreaterThan(MAX_STRING_INPUT_BYTES);
+      expect(validateStringInputLengths({ payload: acceptedPayload }, customJobTool.inputSchema)).toEqual([]);
+
+      const legacyViolations = validateStringInputLengths({ legacy_payload: acceptedPayload }, customJobTool.inputSchema);
+      expect(legacyViolations).toMatchObject([{ field: "legacy_payload", actualLength: acceptedPayload.length, limit: MAX_STRING_INPUT_BYTES, unit: "bytes" }]);
+
+      const oversizedPayload = "a".repeat(40001);
+      const violations = validateStringInputLengths({ payload: oversizedPayload }, customJobTool.inputSchema);
+      expect(violations).toMatchObject([{ field: "payload", actualLength: 40001, limit: 40000, unit: "characters" }]);
+      expect(buildStringLengthValidationError(customJobTool.name, violations)).toContain("'payload' exceeds maximum length of 40000 characters (got 40001 characters)");
+    });
   });
 
   describe("validateStringMinLengths", () => {
@@ -610,6 +636,101 @@ describe("schema-validation.cjs", () => {
       expect(message).toContain("labels[0] must be an object (string shorthand is not supported).");
       expect(message).toContain("Required fields: name, rationale, confidence");
       expect(message).toContain('Received: \"bug\"');
+    });
+
+    it("derives add_labels object-shape guidance from a workflow-configured item schema", async () => {
+      const { formatSchemaValidationError } = await import("./schema-validation.cjs");
+      const inputSchema = {
+        type: "object",
+        properties: {
+          labels: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["name", "confidence"],
+              properties: {
+                name: { type: "string" },
+                confidence: { type: "string", enum: ["HIGH", "MEDIUM", "LOW"] },
+              },
+            },
+          },
+        },
+      };
+      const message = formatSchemaValidationError("add_labels", { labels: ["bug"] }, { path: "labels[0]", message: "must be a object" }, inputSchema);
+      expect(message).toContain("Invalid arguments for add_labels:");
+      expect(message).toContain("labels[0] must be an object (string shorthand is not supported).");
+      expect(message).toContain("Required fields: name, confidence");
+      expect(message).not.toContain("rationale");
+      expect(message).toContain('Expected: {"name":"bug","confidence":"HIGH"}');
+      expect(message).toContain('Received: \"bug\"');
+    });
+
+    it("uses a boolean example for the required suggest field", async () => {
+      const { formatSchemaValidationError } = await import("./schema-validation.cjs");
+      const inputSchema = {
+        type: "object",
+        properties: {
+          labels: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["name", "suggest"],
+              properties: {
+                name: { type: "string" },
+                suggest: { type: "boolean" },
+              },
+            },
+          },
+        },
+      };
+      const message = formatSchemaValidationError("add_labels", { labels: ["bug"] }, { path: "labels[0]", message: "must be a object" }, inputSchema);
+      expect(message).toContain('Expected: {"name":"bug","suggest":true}');
+      expect(message).toContain("Required fields: name, suggest");
+    });
+
+    it("does not report optional fields as required or suggest an invalid example", async () => {
+      const { formatSchemaValidationError } = await import("./schema-validation.cjs");
+      const inputSchema = {
+        type: "object",
+        properties: {
+          labels: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                slug: { type: "string", pattern: "^[A-Z]{3}$" },
+              },
+            },
+          },
+        },
+      };
+      const message = formatSchemaValidationError("add_labels", { labels: ["bug"] }, { path: "labels[0]", message: "must be a object" }, inputSchema);
+      expect(message).toContain("No required fields are declared by the configured item schema.");
+      expect(message).toContain("Available fields: slug");
+      expect(message).not.toContain("Required fields:");
+      expect(message).not.toContain("Expected:");
+    });
+
+    it("omits an example when a constrained required value cannot be inferred", async () => {
+      const { formatSchemaValidationError } = await import("./schema-validation.cjs");
+      const inputSchema = {
+        type: "object",
+        properties: {
+          labels: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["slug"],
+              properties: {
+                slug: { type: "string", pattern: "^[A-Z]{3}$" },
+              },
+            },
+          },
+        },
+      };
+      const message = formatSchemaValidationError("add_labels", { labels: ["bug"] }, { path: "labels[0]", message: "must be a object" }, inputSchema);
+      expect(message).toContain("Required fields: slug");
+      expect(message).not.toContain("Expected:");
     });
   });
 });

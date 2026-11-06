@@ -39,10 +39,10 @@ byproducts are removed before upload, and removal failures block publication.
 │ Threat Detection│ (Analyzes for security issues)
 │ Job             │
 └────────┬────────┘
-         │ approved/blocked
+         │ configured output policy
          ▼
 ┌─────────────────┐
-│ Safe Output Jobs│ (Write permissions, only if safe)
+│ Safe Output Jobs│ (Scoped writes; warn/strict policy)
 │ Create Issues,  │
 │ PRs, Comments   │
 └─────────────────┘
@@ -123,6 +123,27 @@ safe-outputs:
 | `max-ai-credits` | integer | AI Credits cap for the detection run, independent of the main agent budget. Defaults to `400` when unset, with runtime override via `vars.GH_AW_DEFAULT_DETECTION_MAX_AI_CREDITS`. Accepts plain integers; `-1` disables the detection budget. |
 | `continue-on-error` | boolean | When `true` (default), detected threats and detection engine failures apply the warn-mode policy (annotate reviewable outputs, convert branch pushes, abort non-reviewable outputs) instead of blocking all safe outputs. When `false`, they fail the detection job and safe outputs are not applied. |
 | `report-as-issue` | boolean | When `true` (default), detection warnings/failures create or update the `[aw] Detection Runs` tracking issue. Set to `false` to keep threat detection and its enforcement enabled while skipping the tracking issue; results remain visible in the GitHub Actions run logs. |
+
+### Issue reporting permissions
+
+When detection is runnable and `report-as-issue` is enabled (the default), the
+`conclusion` job and its GitHub App token request `issues: write`. Reusable workflow
+callers must grant this permission throughout the caller chain. When
+`safe-outputs.github-app` is configured, the App must have **Issues: write** access;
+otherwise, token creation can fail. Reusable callers without the required scope
+can fail workflow validation before any job runs.
+
+The existing opt-out disables the tracking issue and its detection-specific
+permission grant without disabling threat detection or enforcement:
+
+```aw wrap
+safe-outputs:
+  threat-detection:
+    report-as-issue: false
+```
+
+Other enabled issue-writing outputs or conclusion reporters can still require
+`issues: write`.
 
 ### Private CA certificates
 
@@ -254,7 +275,7 @@ AI detection produces a structured JSON response:
 }
 ```
 
-If any threat is detected (`true`), the workflow fails and safe outputs are blocked.
+If any threat is detected (`true`), default warn mode annotates reviewable outputs, converts branch pushes to review pull requests, and aborts non-reviewable outputs; strict mode fails the detection job and blocks safe outputs. Detector failures follow the same mode-dependent policy; see [Error Handling](#error-handling).
 
 ## Custom Prompt Instructions
 
@@ -377,6 +398,20 @@ safe-outputs:
 
 **Execution Order:** Download artifacts → Stage detection inputs → Execute pre-steps (`steps:`) → Run AI analysis (if enabled) → Execute post-steps (`post-steps:`) → Upload detection log.
 
+### Prompt Provenance Artifacts
+
+`prompt-import-tree.json` retains `version: 1` and adds `trust` to its root and every import node, including nested and cached imports.
+
+| `trust` | Source and capabilities |
+|---|---|
+| `author` | Locally assembled system/user prompt or repository-local author file; imports and compiler-selected non-secret expression bindings are supported |
+| `untrusted` | External content in older artifacts; current prompt assembly does not fetch remote imports |
+| Missing | Older artifact with unknown trust; do not infer author capabilities |
+
+The runtime assigns labels from provenance, not imported text. Current trees contain only local author sources, including nested and cached imports; remote targets fail before fetching or tree insertion. A node's label does not establish the safety of its interpolated values. Cached nodes retain their own label and pre-expansion `rawContent`, even when `children` is empty because expansion already occurred. Labels are inspection metadata, not permission grants or proof against prompt injection. Content retrieved later by the agent inside the AWF sandbox is not a prompt-assembly import node.
+
+`prompt-template.txt` records the assembled template before interpolation-stage processing. The main author source is part of that assembled prompt rather than a separate runtime-import child. Keep the template and import tree alongside the final prompt when analyzing provenance.
+
 ## Example: LlamaGuard Integration
 
 Use Ollama with LlamaGuard 3 for specialized threat detection running after AI analysis:
@@ -462,30 +497,19 @@ safe-outputs:
 
 ## Error Handling
 
-**When Threats Are Detected:**
+**Threat Findings and Detector Failures:**
 
-The threat detection job fails with a clear error message and safe output jobs are skipped:
-
-```text
-❌ Threat detected: Potential SQL injection in code changes
-Reasons:
-- Unsanitized user input in database query
-- Missing parameterized query pattern
-```
-
-**When Detection Fails:**
-
-If the detection process itself fails (for example a provider outage, a retired model, or unparseable results), detection concludes with reason `agent_failure` or `parse_error` and no security verdict. What happens next depends on `continue-on-error`:
+A detected threat has reason `threat_detected`. A detector execution failure (for example a provider outage or retired model) has reason `agent_failure`; an invalid result has reason `parse_error`. The latter two mean the security assessment is incomplete, not that a threat was found or that the output is clean. For all three outcomes, enforcement depends on `safe-outputs.threat-detection.continue-on-error`:
 
 - **Warn mode** (`continue-on-error: true`, the default): the run continues and detection concludes `warning`. Safe outputs get the warn-mode policy from the [safe outputs specification](/gh-aw/specs/safe-outputs-specification/) instead of being applied as if detection passed:
-  - Reviewable outputs (such as `create-issue`, `add-comment`, `create-pull-request`) are applied with a `[!WARNING]` block, the `threat detection engine error` label string, and the `<!-- gh-aw-threat-engine-error -->` marker.
+  - Reviewable outputs (such as `create-issue`, `add-comment`, `create-pull-request`) carry a `[!CAUTION]` block, `agentic threat detected` label string, and `<!-- gh-aw-threat-detected -->` marker for an actual threat; detector failures use a `[!WARNING]` block, `Threat detection engine error` label string, and `<!-- gh-aw-threat-engine-error -->` marker.
   - `push-to-pull-request-branch` falls back to a review pull request with the same warning.
   - Non-reviewable outputs (such as `merge-pull-request`, `close-issue`, `assign-to-agent`) are not applied and are reported as failures in the step summary.
 - **Strict mode** (`continue-on-error: false`): the detection job fails and safe outputs are not applied.
 
 **When Detection Returns a Warning:**
 
-A warning is a lower-severity signal than a hard threat: the safe output is allowed to proceed, but human review is required before merge. When `create-pull-request` is the safe output, the handler submits a `REQUEST_CHANGES` pull request review whose body includes the detection reason and a link to the workflow run logs. If a `request_review` protected-files gate also fires in the same run, both signals are composed into a single review body separated by a horizontal rule.
+A warning conclusion describes enforcement mode, not the severity or absence of a threat. Reviewable outputs can proceed, but require human review before follow-up automation. When `create-pull-request` is the safe output, the handler submits a `REQUEST_CHANGES` pull request review whose body includes the detection reason and a link to the workflow run logs. If a `request_review` protected-files gate also fires in the same run, both signals are composed into a single review body separated by a horizontal rule. Configure repository merge protections to enforce the intended review requirement; a warning marker or label alone is not a platform approval gate.
 
 **Opting Out of Tracking Issues:**
 

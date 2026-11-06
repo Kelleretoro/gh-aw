@@ -2,6 +2,8 @@
 import { describe, it, expect, vi } from "vitest";
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
+const interpolationVectors = require("../../../pkg/parser/testdata/frontmatter_hash_interpolation_vectors.json");
 const {
   computeFrontmatterHash,
   computeBodyHash,
@@ -21,6 +23,88 @@ const {
 } = require("./frontmatter_hash_pure.cjs");
 
 describe("frontmatter_hash_pure (text-based)", () => {
+  describe("import read failures", () => {
+    const workflowPath = ".github/workflows/test.md";
+    const cases = [
+      { name: "frontmatter imports", computeHash: computeFrontmatterHash, content: "---\nengine: copilot\nimports:\n  - shared/test.md\n---\nBody" },
+      { name: "body imports", computeHash: computeBodyHash, content: "---\nengine: copilot\nimports:\n  - shared/test.md\n---\nBody" },
+      { name: "runtime imports", computeHash: computeFrontmatterHash, content: "---\nengine: copilot\n---\n{{#runtime-import shared/test.md}}" },
+    ];
+
+    describe.each(cases)("$name", ({ computeHash, content }) => {
+      function readerWithError(error) {
+        return createGitHubFileReader(
+          {
+            rest: {
+              repos: {
+                getContent: vi.fn(async ({ path: filePath }) => {
+                  if (filePath === workflowPath) return { data: { content } };
+                  throw error;
+                }),
+              },
+            },
+          },
+          "owner",
+          "repo",
+          "main"
+        );
+      }
+
+      it.each([{ status: 500, message: "Internal Server Error" }, { status: 403, message: "Secondary rate limit" }, { message: "Request timed out" }])("should propagate unreadable imports: $message", async error => {
+        await expect(computeHash(workflowPath, { fileReader: readerWithError(error), readerMode: "github-api" })).rejects.toThrow(error.message);
+      });
+
+      it("should skip genuinely absent API imports", async () => {
+        const hash = await computeHash(workflowPath, {
+          fileReader: readerWithError({ status: 404, message: "Not Found" }),
+          readerMode: "github-api",
+        });
+        const expected = await computeHash(workflowPath, {
+          fileReader: async filePath => {
+            if (filePath === workflowPath) return content;
+            throw Object.assign(new Error("not found"), { code: "ENOENT" });
+          },
+          readerMode: "github-api",
+        });
+        expect(hash).toBe(expected);
+      });
+
+      it("should skip genuinely absent local imports", async () => {
+        const fileReader = async filePath => (filePath === workflowPath ? content : defaultFileReader(filePath));
+        await expect(computeHash(workflowPath, { fileReader, readerMode: "github-api" })).resolves.toMatch(/^[a-f0-9]{64}$/);
+      });
+
+      it("should propagate errors from malformed imported frontmatter", async () => {
+        const fileReader = async filePath => (filePath === workflowPath ? content : "---\nengine: copilot");
+        await expect(computeHash(workflowPath, { fileReader, readerMode: "github-api" })).rejects.toThrow("ERR_PARSE: Frontmatter not properly closed");
+      });
+    });
+  });
+
+  describe("shared interpolation hash vectors", () => {
+    it.each(interpolationVectors)("$name", async ({ markdown, relevant, all }) => {
+      expect(extractRelevantTemplateExpressions(markdown)).toEqual(relevant);
+      expect(extractAllTemplateExpressions(markdown)).toEqual(all);
+      for (const runtimeImport of [false, true]) {
+        const workflowPath = ".github/workflows/vector.md";
+        const body = runtimeImport ? "{{#runtime-import prompts/vector.md}}" : markdown;
+        const expressions = runtimeImport ? all : relevant;
+        const canonical = { "frontmatter-text": "engine: copilot" };
+        if (expressions.length > 0) canonical["template-expressions"] = expressions;
+        const expected = crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+        const files = new Map([
+          [workflowPath, "---\nengine: copilot\n---\n" + body],
+          [".github/prompts/vector.md", markdown],
+        ]);
+        const fileReader = async filePath => {
+          if (!files.has(filePath)) throw new Error(`Missing fixture: ${filePath}`);
+          return files.get(filePath);
+        };
+        expect(await computeFrontmatterHash(workflowPath, { fileReader, readerMode: "github-api" })).toBe(expected);
+      }
+    });
+  });
+
   describe("extractFrontmatterAndBody", () => {
     it("should extract frontmatter text and body", () => {
       const content = `---
@@ -191,6 +275,24 @@ engine: copilot`;
       expect(relativeHash).toBe(absoluteHash);
     });
 
+    it("should try later runtime-import candidates after a read failure", async () => {
+      const workflowPath = ".github/workflows/test.md";
+      const firstCandidate = ".github/shared/test.md";
+      const secondCandidate = ".github/workflows/shared/test.md";
+      const reads = [];
+      const fileReader = async filePath => {
+        reads.push(filePath);
+        if (filePath === workflowPath) return "---\nengine: copilot\n---\n{{#runtime-import shared/test.md}}";
+        if (filePath === firstCandidate) throw Object.assign(new Error("Internal Server Error"), { status: 500 });
+        if (filePath === secondCandidate) return "Imported ${{ github.repository }}";
+        throw Object.assign(new Error("Not Found"), { status: 404 });
+      };
+
+      await expect(computeFrontmatterHash(workflowPath, { fileReader, readerMode: "github-api" })).resolves.toMatch(/^[a-f0-9]{64}$/);
+      expect(reads).toContain(firstCandidate);
+      expect(reads).toContain(secondCandidate);
+    });
+
     it("should not use local symlink containment when hashing GitHub API content", async () => {
       const workflowPath = ".github/workflows/remote-context-workflow.md";
       const promptPath = ".github/prompts/remote-context.md";
@@ -305,7 +407,7 @@ Cycle hash coverage.
         ["/repo/.github/workflows/shared/b.md", "B $" + "{{ needs.b.outputs.value }}\n{{#runtime-import shared/a.md}}\n"],
       ]);
       const fileReader = async filePath => {
-        if (!files.has(filePath)) throw new Error(`missing ${filePath}`);
+        if (!files.has(filePath)) throw Object.assign(new Error(`missing ${filePath}`), { code: "ENOENT" });
         return files.get(filePath);
       };
 

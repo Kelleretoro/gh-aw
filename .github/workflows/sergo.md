@@ -5,6 +5,7 @@ on:
   workflow_dispatch: null
 permissions:
   contents: read
+  copilot-requests: write
   discussions: read
   issues: read
   pull-requests: read
@@ -16,6 +17,7 @@ network:
   - github
   - go
 imports:
+- shared/lock-safe-pull-request.md
 - uses: shared/daily-audit-base.md
   with:
     expires: 1d
@@ -24,7 +26,8 @@ imports:
 - shared/otlp.md
 - shared/reporting.md
 safe-outputs:
-  create-issue:
+  create-pull-request:
+    exclude-lock-yml: true
     expires: 7d
     labels:
     - sergo
@@ -32,12 +35,20 @@ safe-outputs:
     max: 3
 description: Daily Go code quality analysis using Serena MCP language service protocol expert
 emoji: 🤖
-engine: claude
+engine:
+  id: claude
+  model-provider: github
+  model-routing:
+    goal: cost
+    mode: balanced
 name: "Sergo - Serena Go Expert"
 strict: true
 timeout-minutes: 45
 tools:
   bash:
+  - mkdir -p /tmp/gh-aw/repo-memory/default/serena
+  - gofmt -w *
+  - go test *
   - cat go.mod
   - cat go.sum
   - go list -m all
@@ -59,6 +70,11 @@ tools:
     - "*.json"
     - "*.jsonl"
 tracker-id: sergo-daily
+evals:
+  - id: strategy-split
+    question: Does the report describe the required equal split between cached strategy reuse and new exploration?
+  - id: validated-fixes
+    question: When fix pull requests are proposed, does the agent output provide validation results for the actual changes? Return UNKNOWN when no fix pull requests are proposed.
 ---
 
 # Sergo 🔬 - The Serena Go Expert
@@ -74,12 +90,13 @@ You are Sergo, focused on actionable Go static-analysis findings using Serena to
 
 ## Mission
 
-Each day: scan Serena tools, detect tool changes, select a 50/50 cached+new strategy, run deep analysis, generate 1-3 tasks, create up to 3 non-duplicate issues, update cache metrics, and publish a comprehensive discussion.
+Each day: scan Serena tools, detect tool changes, select a 50/50 cached+new strategy, run deep analysis, implement 1-3 focused fixes in non-duplicate pull requests, update cache metrics, and publish a comprehensive discussion.
 
 ## Execution Plan
 
 1) Initialize Serena memory and tool cache.
-- Ensure `/tmp/gh-aw/repo-memory/default/serena` exists.
+- Run `mkdir -p /tmp/gh-aw/repo-memory/default/serena` as a standalone command.
+- Discover the CLI schemas with standalone `serena --help` and `safeoutputs --help` commands. Do not combine initialization or discovery commands; each has its own restricted Bash permission.
 - Discover Serena tools and compare with `/tmp/gh-aw/repo-memory/default/sergo-tools-list.json`.
 - Treat missing cache files as expected first-run behavior.
 - Save updated tool snapshot to `/tmp/gh-aw/repo-memory/default/sergo-tools-list.json`.
@@ -107,10 +124,10 @@ Each day: scan Serena tools, detect tool changes, select a 50/50 cached+new stra
 - Choose high-impact, actionable, non-overlapping issues.
 - Include problem, locations, impact, recommendation, before/after intent, validation checklist, and effort.
 
-7) Create up to 3 issues.
-- Search existing open issues first (prioritize label `sergo`).
+7) Implement and validate up to 3 fixes, then create pull requests.
+- Search existing open issues and pull requests first (prioritize label `sergo`).
 - Skip duplicates and explain skip rationale.
-- Create 1-3 issues only when findings are strong and distinct.
+- Create 1-3 pull requests only when findings are strong and distinct and the fixes are validated. Use `noop` when nothing actionable remains.
 
 8) Track success and update cache.
 - Compute success score (0-10) using findings quality, coverage, and task quality.
@@ -136,7 +153,7 @@ Do not call `report_missing_data` for absent local cache files on startup.
 - Strategy selected with explicit 50/50 split.
 - Detailed, evidence-backed findings produced.
 - 1-3 high-quality tasks generated.
-- Up to 3 issues created (or duplicates skipped with rationale).
+- Up to 3 validated pull requests created (or duplicates skipped with rationale).
 - Cache files updated for next run.
 - Comprehensive discussion created.
 

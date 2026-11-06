@@ -40,6 +40,7 @@ var pullRequestHandlerRegistry = map[string]handlerBuilder{
 			AddStringSlice("_protected_files_exclude", defaultProtectedFilesExclude(c.ProtectedFilesExclude)).
 			AddStringSlice("allowed_files", c.AllowedFiles).
 			AddStringSlice("excluded_files", c.ExcludedFiles).
+			AddIfTrue("exclude_lock_yml", c.ExcludeLockYml).
 			AddIfNotEmpty("patch_format", c.PatchFormat).
 			AddBoolPtr("fallback_as_pull_request", c.FallbackAsPullRequest).
 			AddBoolPtr("signed_commits", c.SignedCommits).
@@ -79,15 +80,21 @@ var pullRequestHandlerRegistry = map[string]handlerBuilder{
 			return nil
 		}
 		c := cfg.MergePullRequest
-		return newHandlerConfigBuilder().
+		handler := newHandlerConfigBuilder().
 			AddTemplatableInt("max", c.Max).
 			AddIfNotEmpty("target", c.Target).
+			AddStringSlice("required_checks", c.RequiredChecks).
+			AddStringSlice("required_approvers", c.RequiredApprovers).
 			AddStringSlice("required_labels", c.RequiredLabels).AddIfNotEmpty("required_title_prefix", c.RequiredTitlePrefix).AddStringSlice("allowed_branches", c.AllowedBranches).
 			AddIfNotEmpty("target-repo", c.TargetRepoSlug).
 			AddStringSlice("allowed_repos", c.AllowedRepos).
 			AddIfNotEmpty("github-token", resolveHandlerGitHubToken(c.GitHubApp, "merge-pull-request", c.GitHubToken)).
 			AddTemplatableBool("staged", templatableBoolPtrToStringPtr(c.Staged)).
 			Build()
+		if len(c.RequiredCheckApps) > 0 {
+			handler["required_check_apps"] = c.RequiredCheckApps
+		}
+		return handler
 	},
 	"close_pull_request": func(cfg *SafeOutputsConfig) map[string]any {
 		if cfg.ClosePullRequests == nil {
@@ -286,6 +293,7 @@ func newCreatePullRequestHandlerConfigBuilder(cfg *SafeOutputsConfig, c *CreateP
 		AddStringSlice("_protected_files_exclude", defaultProtectedFilesExclude(c.ProtectedFilesExclude)).
 		AddStringSlice("allowed_files", c.AllowedFiles).
 		AddStringSlice("excluded_files", c.ExcludedFiles).
+		AddIfTrue("exclude_lock_yml", c.ExcludeLockYml).
 		AddIfTrue("preserve_branch_name", c.PreserveBranchName).
 		AddIfTrue("recreate_ref", c.RecreateRef).
 		AddIfNotEmpty("patch_format", c.PatchFormat).

@@ -12,6 +12,15 @@ import generateSafeOutputsTools from "./generate_safe_outputs_tools.cjs";
 
 const scriptPath = path.join(__dirname, "generate_safe_outputs_tools.cjs");
 const { main: generateTools } = generateSafeOutputsTools;
+const outputIdPattern = "^so_[A-Za-z0-9_-]{12}$";
+const dependencySchema = {
+  description: expect.any(String),
+  "x-synonyms": ["depends_on"],
+  oneOf: [
+    { type: "string", pattern: outputIdPattern },
+    { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", pattern: outputIdPattern } },
+  ],
+};
 
 describe("generate_safe_outputs_tools", () => {
   /** @type {string} */
@@ -168,6 +177,12 @@ describe("generate_safe_outputs_tools", () => {
     });
     expect(tools.map(tool => tool.name)).toEqual(["create_issue", "custom_job"]);
     for (const tool of tools) {
+      expect(tool.inputSchema.properties["depends-on"]).toEqual(dependencySchema);
+      expect(tool.inputSchema.required || []).not.toContain("depends-on");
+      expect(tool.inputSchema.properties).not.toHaveProperty("output_id");
+      expect(normalizeSafeOutputToolArguments(tool.name, { depends_on: "so_AAAAAAAAAAAA" }, undefined, tool.inputSchema)).toEqual({
+        "depends-on": "so_AAAAAAAAAAAA",
+      });
       for (const claim_handle of ["", " ", "\t", null]) {
         const normalized = normalizeSafeOutputToolArguments(tool.name, { claim_handle }, undefined, tool.inputSchema);
         expect(normalized).toHaveProperty("claim_handle", claim_handle);
@@ -192,7 +207,13 @@ describe("generate_safe_outputs_tools", () => {
     fs.writeFileSync(toolsMetaPath, JSON.stringify({ work_queue_scoped: false }));
     runScript();
     const [tool] = JSON.parse(fs.readFileSync(outputPath, "utf8"));
-    expect(tool.inputSchema).toEqual(sampleSourceTools[0].inputSchema);
+    expect(tool.inputSchema).toEqual({
+      ...sampleSourceTools[0].inputSchema,
+      properties: { ...sampleSourceTools[0].inputSchema.properties, "depends-on": dependencySchema },
+    });
+    expect(tool.inputSchema.properties).not.toHaveProperty("claim_handle");
+    expect(tool.inputSchema.properties).not.toHaveProperty("claim_id");
+    expect(tool.inputSchema.required).not.toContain("depends-on");
   });
 
   it("generates an Anthropic-compatible update_issue schema with update-field guidance", () => {
@@ -252,7 +273,8 @@ describe("generate_safe_outputs_tools", () => {
     const [tool] = JSON.parse(fs.readFileSync(outputPath, "utf8"));
     expect(tool.inputSchema.required).toEqual(["record"]);
     expect(tool.inputSchema.properties.ledger.enum).toEqual(["reviews"]);
-    expect(Object.keys(tool.inputSchema.properties)).toEqual(["ledger", "temp_id", "record"]);
+    expect(Object.keys(tool.inputSchema.properties)).toEqual(["ledger", "temp_id", "record", "depends-on"]);
+    expect(tool.inputSchema.properties["depends-on"]).toEqual(dependencySchema);
     expect(tool.inputSchema.properties.record).toMatchObject(schema);
     expect(validateValueAgainstSchema({ ledger: "reviews", operation: "append", value: { run_id: "42" } }, tool.inputSchema)).toBeTruthy();
     expect(validateValueAgainstSchema({ record: { run_id: 42 } }, tool.inputSchema)).toBeTruthy();
@@ -277,7 +299,8 @@ describe("generate_safe_outputs_tools", () => {
     const [tool] = JSON.parse(fs.readFileSync(outputPath, "utf8"));
     expect(tool.inputSchema.required).toEqual(["ledger", "record"]);
     expect(tool.inputSchema.properties.ledger.enum).toEqual(["reviews"]);
-    expect(Object.keys(tool.inputSchema.properties)).toEqual(["ledger", "temp_id", "record"]);
+    expect(Object.keys(tool.inputSchema.properties)).toEqual(["ledger", "temp_id", "record", "depends-on"]);
+    expect(tool.inputSchema.properties["depends-on"]).toEqual(dependencySchema);
     expect(tool.inputSchema.properties.record).toMatchObject(schema);
     expect(validateValueAgainstSchema({ ledger: "reviews", record: { run_id: "42" } }, tool.inputSchema)).toBeNull();
     expect(validateValueAgainstSchema({ ledger: "cache", record: { run_id: "42" } }, tool.inputSchema)).toBeTruthy();
@@ -295,7 +318,8 @@ describe("generate_safe_outputs_tools", () => {
     runScript();
     const [tool] = JSON.parse(fs.readFileSync(outputPath, "utf8"));
     expect(tool.inputSchema.required).toEqual(["record"]);
-    expect(Object.keys(tool.inputSchema.properties)).toEqual(["ledger", "temp_id", "record"]);
+    expect(Object.keys(tool.inputSchema.properties)).toEqual(["ledger", "temp_id", "record", "depends-on"]);
+    expect(tool.inputSchema.properties["depends-on"]).toEqual(dependencySchema);
     expect(tool.inputSchema.properties.record).toEqual(sourceRecordSchema);
     expect(validateValueAgainstSchema({ record: { run_id: "42" } }, tool.inputSchema)).toBeNull();
     expect(validateValueAgainstSchema({}, tool.inputSchema)).toBeTruthy();
@@ -456,7 +480,140 @@ describe("generate_safe_outputs_tools", () => {
     const result = JSON.parse(fs.readFileSync(outputPath, "utf8"));
     expect(result[0].inputSchema.properties.labels.items).toEqual(itemSchema);
     expect(result[0].inputSchema.properties.labels.description).toContain("plain string label names are not permitted");
+    expect(result[0].inputSchema.properties.labels.description).toContain("Required fields: name, confidence");
+    expect(result[0].inputSchema.properties.labels.description).toContain('Example: [{"name":"bug","confidence":"HIGH"}]');
+    expect(result[0].inputSchema.properties.labels.description).not.toContain("rationale");
     expect(result[0].description).not.toContain("INTENT ENCOURAGED:");
+  });
+
+  it("uses boolean and numeric values in configured add_labels examples", () => {
+    fs.writeFileSync(
+      toolsSourcePath,
+      JSON.stringify([
+        {
+          name: "add_labels",
+          description: "Adds labels.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              labels: { type: "array", items: { oneOf: [{ type: "string" }, { type: "object" }] } },
+            },
+          },
+        },
+      ])
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ add_labels: {} }));
+    const itemSchema = {
+      type: "object",
+      required: ["name", "suggest", "priority"],
+      additionalProperties: false,
+      properties: {
+        name: { type: "string" },
+        suggest: { type: "boolean" },
+        priority: { type: "number" },
+      },
+    };
+    fs.writeFileSync(
+      toolsMetaPath,
+      JSON.stringify({
+        description_suffixes: {},
+        repo_params: {},
+        dynamic_tools: [],
+        item_schemas: { add_labels: { labels: itemSchema } },
+      })
+    );
+
+    runScript();
+
+    const result = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(result[0].inputSchema.properties.labels.description).toContain('Example: [{"name":"bug","suggest":true,"priority":0}]');
+  });
+
+  it("does not present optional add_labels fields as required", () => {
+    fs.writeFileSync(
+      toolsSourcePath,
+      JSON.stringify([
+        {
+          name: "add_labels",
+          description: "Adds labels.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              labels: { type: "array", items: { oneOf: [{ type: "string" }, { type: "object" }] } },
+            },
+          },
+        },
+      ])
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ add_labels: {} }));
+    const itemSchema = {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        suggest: { type: "boolean" },
+      },
+    };
+    fs.writeFileSync(
+      toolsMetaPath,
+      JSON.stringify({
+        description_suffixes: {},
+        repo_params: {},
+        dynamic_tools: [],
+        item_schemas: { add_labels: { labels: itemSchema } },
+      })
+    );
+
+    runScript();
+
+    const result = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    const description = result[0].inputSchema.properties.labels.description;
+    expect(description).toContain("No required fields are declared by the configured item schema.");
+    expect(description).toContain("Available fields: name, suggest.");
+    expect(description).not.toContain("Required fields:");
+    expect(description).not.toContain("Example:");
+  });
+
+  it("omits add_labels examples when a required value cannot be inferred safely", () => {
+    fs.writeFileSync(
+      toolsSourcePath,
+      JSON.stringify([
+        {
+          name: "add_labels",
+          description: "Adds labels.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              labels: { type: "array", items: { oneOf: [{ type: "string" }, { type: "object" }] } },
+            },
+          },
+        },
+      ])
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ add_labels: {} }));
+    const itemSchema = {
+      type: "object",
+      required: ["slug"],
+      additionalProperties: false,
+      properties: {
+        slug: { type: "string", pattern: "^[A-Z]{3}$" },
+      },
+    };
+    fs.writeFileSync(
+      toolsMetaPath,
+      JSON.stringify({
+        description_suffixes: {},
+        repo_params: {},
+        dynamic_tools: [],
+        item_schemas: { add_labels: { labels: itemSchema } },
+      })
+    );
+
+    runScript();
+
+    const result = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    const description = result[0].inputSchema.properties.labels.description;
+    expect(description).toContain("Required fields: slug.");
+    expect(description).not.toContain("Example:");
   });
 
   it("keeps issue-intent requirements and guidance with a narrowed add_labels item schema", () => {
@@ -519,6 +676,7 @@ describe("generate_safe_outputs_tools", () => {
     expect(addLabelsTool.inputSchema.properties.labels.items).toEqual(itemSchema);
     expect(addLabelsTool.inputSchema.properties.labels.items.required).toEqual(expect.arrayContaining(["name", "rationale", "confidence"]));
     expect(addLabelsTool.inputSchema.properties.labels.description).toContain("Plain string label names are not permitted");
+    expect(addLabelsTool.inputSchema.properties.labels.description).toContain("confidence (exactly one of: LOW, MEDIUM, HIGH)");
     expect(addLabelsTool.description).toContain("INTENT REQUIRED:");
   });
 

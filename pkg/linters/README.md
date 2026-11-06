@@ -6,6 +6,8 @@ The `linters` package namespace contains custom static analysis linters used by 
 
 This package currently provides custom Go analyzers in the following subpackages:
 
+The method names mentioned in analyzer descriptions (such as `Err`, `Flush`, `Reset`, `Timeout`, and `Unlock`) are methods on the standard-library values being analyzed, not exports from the `linters` package.
+
 - `appendbytestring` — reports `append(b, []byte(s)...)` calls where `b` is `[]byte` and `s` is a string, which can be simplified to `append(b, s...)`.
 - `appendoneelement` — reports `append(s, []T{x}...)` calls where a single-element slice literal is spread and can be simplified to `append(s, x)`.
 - `blankassigncomma` — reports assignment statements where every result is discarded via 2 or more blank identifiers (e.g. `_, _ = f()`), which may indicate unintended result ignoring.
@@ -52,6 +54,7 @@ This package currently provides custom Go analyzers in the following subpackages
 - `osgetenvlibrary` — reports `os.Getenv` calls in library packages (`pkg/*`) where environment access should be injected.
 - `osisnotexist` — reports `os.IsNotExist`, `os.IsExist`, `os.IsPermission`, and `os.IsTimeout`, which do not inspect arbitrary wrapped errors. Immediate checks of fresh, unmodified errors from direct filesystem `os` calls in an adjacent assignment or enclosing `if` initializer are exempt. Use `errors.Is` with `fs.ErrNotExist`, `fs.ErrExist`, or `fs.ErrPermission`. For timeouts, use `errors.As` with `interface{ Timeout() bool }` and check `Timeout()`; `errors.Is(err, os.ErrDeadlineExceeded)` only covers deadline errors, not every timeout.
 - `osexitinlibrary` — reports `os.Exit` calls in library packages (`pkg/*`) where process termination should be delegated to `cmd/*` entry points.
+- `osopenreadallpreferreadfile` — implements the `osopen-readall-prefer-readfile` rule: recommends `os.ReadFile` when a newly declared `os.Open` file is used only by a direct deferred `Close` and one `io.ReadAll` or `ioutil.ReadAll` in the same block. Extra uses, reassignment, nested reads, and write-side opens are excluded. No automatic fix is offered; review open/read error handling when simplifying.
 - `ossetenvlibrary` — reports `os.Setenv` calls in library packages (`pkg/*`) where side effects should be isolated.
 - `packagelevelmutableslicemap` — reports package-level (file/package-scope) `var` slice/map declarations mutated from inside a function body via `append()` re-assignment, index assignment, or `delete()`. Mutations inside a top-level `init()` are exempt.
 - `panic-in-library-code` — reports `panic()` calls in library packages (`pkg/*`) where errors should be returned instead.
@@ -63,6 +66,7 @@ This package currently provides custom Go analyzers in the following subpackages
 - `seenmapbool` — reports `map[string]bool` used as a set (values always `true`) that should use `map[string]struct{}` instead.
 - `slicemakezerolength` — reports zero-length slice allocations before known-size range loops that append exactly one element per iteration, where the range length provides a capacity hint.
 - `sortslice` — reports `sort.Slice` / `sort.SliceStable` calls that should use `slices.SortFunc` / `slices.SortStableFunc`.
+- `splitindexzero` — reports `strings.Split(s, sep)[0]` and `strings.SplitN(s, sep, 2)[0]` calls that allocate a slice to read only the first segment; use `strings.Cut`.
 - `sprintferrdot` — reports redundant `.Error()` calls on error values passed to `fmt` format functions where the fmt package calls `.Error()` automatically.
 - `sprintferrorsnew` — reports `errors.New(fmt.Sprintf(...))` calls that should use `fmt.Errorf` instead.
 - `sprintfbool` — reports `fmt.Sprintf("%t", b)` calls where `b` is a single bool value and suggests using `strconv.FormatBool(b)` instead.
@@ -149,8 +153,8 @@ returning a channel does not transfer ownership.
 
 Micro-optimizations flagged by allocation/perf linters (e.g. `stringsconcatloop`, `appendoneelement`,
 `appendbytestring`, `bytesbufferstring`, `bytescomparestring`, `lenstringsplit`, `mapclearloop`,
-`readerstringconv`, `reflectdeepequalusage`, `seenmapbool`, `slicemakezerolength`, `sortslice`, `stringbytesroundtrip`, `stringsjoinone`, `tolowerequalfold`, and
-`writebytestring`) only matter on hot paths: applying them to code that tests never execute adds
+`readerstringconv`, `reflectdeepequalusage`, `seenmapbool`, `slicemakezerolength`, `sortslice`, `splitindexzero`,
+`stringbytesroundtrip`, `stringsjoinone`, `tolowerequalfold`, and `writebytestring`) only matter on hot paths: applying them to code that tests never execute adds
 churn without a measurable benefit. These linters consult the shared
 `pkg/linters/internal/coverage` package, which loads a Go coverage profile (produced by
 `go test -covermode=count -coverprofile=<path>`) referenced by the `GH_AW_LINT_COVERAGE_PROFILE`
@@ -217,6 +221,7 @@ environment variable and gates findings on the recorded execution hit count for 
 | `nilctxpassed` | Custom `go/analysis` analyzer that flags function calls where `nil` is passed as a `context.Context` argument |
 | `osgetenvlibrary` | Custom `go/analysis` analyzer that flags `os.Getenv` usage in library packages |
 | `osisnotexist` | Custom `go/analysis` analyzer that flags legacy `os` error predicates and recommends wrapped-error-aware checks |
+| `osopenreadallpreferreadfile` | Custom `go/analysis` analyzer that recommends `os.ReadFile` for an `os.Open` file used only by deferred `Close` and one `ReadAll` |
 | `osexitinlibrary` | Custom `go/analysis` analyzer that flags `os.Exit` usage in library packages |
 | `ossetenvlibrary` | Custom `go/analysis` analyzer that flags `os.Setenv` usage in library packages |
 | `packagelevelmutableslicemap` | Custom `go/analysis` analyzer that flags package-level slice/map `var` declarations mutated from inside a function body via `append()` re-assignment, index assignment, or `delete()` |
@@ -229,6 +234,7 @@ environment variable and gates findings on the recorded execution hit count for 
 | `seenmapbool` | Custom `go/analysis` analyzer that flags `map[string]bool` used as a set that should use `map[string]struct{}` |
 | `slicemakezerolength` | Custom `go/analysis` analyzer that flags zero-length slice allocations before known-size range loops that append one element per iteration |
 | `sortslice` | Custom `go/analysis` analyzer that flags `sort.Slice` / `sort.SliceStable` calls that should use `slices.SortFunc` / `slices.SortStableFunc` |
+| `splitindexzero` | Custom `go/analysis` analyzer that flags `strings.Split(s, sep)[0]` and `strings.SplitN(s, sep, 2)[0]` calls that allocate a slice to read only the first segment |
 | `sprintferrdot` | Custom `go/analysis` analyzer that flags redundant `.Error()` calls on error values passed to `fmt` format functions |
 | `sprintferrorsnew` | Custom `go/analysis` analyzer that flags `errors.New(fmt.Sprintf(...))` calls that should use `fmt.Errorf` instead |
 | `sprintfbool` | Custom `go/analysis` analyzer that flags `fmt.Sprintf("%t", b)` calls where `b` is a single bool value and suggests using `strconv.FormatBool(b)` instead |
@@ -370,6 +376,7 @@ _ = typeassertionnil.Analyzer
 - `github.com/github/gh-aw/pkg/linters/manualpathconcat` — manual-path-concat analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/osgetenvlibrary` — os-getenv-library analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/osisnotexist` — os-error-predicate analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/osopenreadallpreferreadfile` — os.Open/ReadAll simplification analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/osexitinlibrary` — os-exit-in-library analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/ossetenvlibrary` — os-setenv-library analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/packagelevelmutableslicemap` — package-level-mutable-slice-map analyzer subpackage

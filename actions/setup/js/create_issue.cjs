@@ -3,22 +3,23 @@
 
 const { createReportIssue, renderIssueParameters } = require("./issue_report.cjs");
 const { normalizeReportText, normalizeReportTitle } = require("./report_ast.cjs");
+const { parseReportMarkdown } = require("./report_markdown.cjs");
+const { renderSizedReport } = require("./report_size.cjs");
 
 const { sanitizeLabelContent } = require("./sanitize_label_content.cjs");
 const { sanitizeTitle, applyTitlePrefix } = require("./sanitize_title.cjs");
 const { sanitizeContent, expandAllowedAliases } = require("./sanitize_content.cjs");
 const { normalizeCloseOlderKey } = require("./generate_footer.cjs");
-const { appendExecutionProvenance } = require("./execution_provenance.cjs");
-const { buildIssueBodyReport } = require("./issue_body.cjs");
+const { appendExecutionProvenance, stripExecutionProvenance } = require("./execution_provenance.cjs");
+const { buildIssueBodyReport, ISSUE_BODY_SUFFIX } = require("./issue_body.cjs");
 const { generateTemporaryId, isTemporaryId, normalizeTemporaryId, getOrGenerateTemporaryId, replaceTemporaryIdReferences } = require("./temporary_id.cjs");
 const { resolveTargetRepoConfig, resolveAndValidateRepo } = require("./repo_helpers.cjs");
 const { createAuthenticatedGitHubClient } = require("./handler_auth.cjs");
 const { removeDuplicateTitleFromDescription } = require("./remove_duplicate_title.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
-const { ERR_VALIDATION } = require("./error_codes.cjs");
+const { ERR_API, ERR_VALIDATION } = require("./error_codes.cjs");
 const { withRetry, RATE_LIMIT_RETRY_CONFIG } = require("./error_recovery.cjs");
 const { renderTemplateFromFile } = require("./messages_core.cjs");
-const { createExpirationLine, addExpirationToFooter } = require("./ephemerals.cjs");
 const { MAX_SUB_ISSUES, getSubIssueCount, linkSubIssue } = require("./sub_issue_helpers.cjs");
 const { closeOlderIssues, searchOlderIssues } = require("./close_older_issues.cjs");
 const { parseBoolTemplatable, parseIntTemplatable } = require("./templatable.cjs");
@@ -29,7 +30,8 @@ const { parseAllowedIssueFields, validateAllowedIssueFields } = require("./allow
 const { buildWorkflowRunUrl } = require("./workflow_metadata_helpers.cjs");
 const { MAX_LABELS, MAX_ASSIGNEES } = require("./constants.cjs");
 const { findAgent, getIssueDetails, assignAgentToIssue } = require("./assign_agent_helpers.cjs");
-const { parseDeduplicateByTitle, normalizeTitleForDedup, findDuplicateByTitle } = require("./issue_title_dedup.cjs");
+const { createTokenBrokerGitHubClient, isTokenBrokerEnabled } = require("./token_broker_github.cjs");
+const { parseDeduplicateByTitle, normalizeTitleForDedup, normalizeDeduplicationLabels, hasDeduplicationLabels, findDuplicateIssue } = require("./issue_title_dedup.cjs");
 const { resolveDefaultMentions, resolveMentionsForItem } = require("./resolve_mentions_from_payload.cjs");
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const ISSUE_FIELD_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -126,6 +128,7 @@ function getIssueArrayLimitError(labels, assignees) {
  * Create a dedicated GitHub client for copilot assignment operations.
  *
  * Token precedence:
+ *   0. Token broker copilot-task capability, when opted in (never falls back)
  *   1. config["github-token"] — per-handler PAT configured in the workflow frontmatter
  *   2. GH_AW_ASSIGN_TO_AGENT_TOKEN — agent token injected by the compiler as a step env var
  *   3. global github — step-level token (fallback when no agent token is available)
@@ -134,6 +137,7 @@ function getIssueArrayLimitError(labels, assignees) {
  * @returns {Promise<Object>} Authenticated GitHub client
  */
 async function createCopilotAssignmentClient(config) {
+  if (isTokenBrokerEnabled()) return createTokenBrokerGitHubClient();
   const token = config["github-token"] || process.env.GH_AW_ASSIGN_TO_AGENT_TOKEN;
   if (!token) {
     core.debug("No dedicated agent token configured — using step-level github client for copilot assignment");
@@ -234,15 +238,19 @@ async function findOrCreateParentIssue({ githubClient, groupId, owner, repo, tit
   core.info(`Creating new parent issue for group: ${groupId}`);
   try {
     const template = createParentIssueTemplate(groupId, titlePrefix, workflowName, workflowSourceURL, expiresHours);
+    template.children.push(...parseReportMarkdown(appendExecutionProvenance("", workflowName, ""), { allowMetadata: true, agentTainted: false }));
     const { data: parentIssue } = await withRetry(
       () =>
-        createReportIssue(githubClient, {
-          owner,
-          repo,
-          title: template.title,
-          body: appendExecutionProvenance(template.body, workflowName, ""),
-          labels: labels,
-        }),
+        createReportIssue(
+          githubClient,
+          {
+            owner,
+            repo,
+            title: template.title,
+            labels: labels,
+          },
+          template
+        ),
       { initialDelayMs: 15000, maxDelayMs: 45000, jitterMs: 10000 },
       `create_parent_issue for group ${groupId}`
     );
@@ -262,7 +270,7 @@ async function findOrCreateParentIssue({ githubClient, groupId, owner, repo, tit
  * @param {string} workflowName - Name of the workflow
  * @param {string} workflowSourceURL - URL to the workflow source
  * @param {number} [expiresHours=0] - Hours until expiration (0 means no expiration)
- * @returns {any} - Template with title and body
+ * @returns {import("./report_ast.cjs").Report}
  */
 function createParentIssueTemplate(groupId, titlePrefix, workflowName, workflowSourceURL, expiresHours = 0) {
   // Use applyTitlePrefix to ensure proper spacing after prefix
@@ -277,17 +285,24 @@ function createParentIssueTemplate(groupId, titlePrefix, workflowName, workflowS
 
   // Load and render the issue template
   const issueTemplatePath = `${process.env.RUNNER_TEMP}/gh-aw/prompts/issue_group_parent.md`;
-  let body = renderTemplateFromFile(issueTemplatePath, templateContext);
-
-  // Add footer with workflow information
-  const footer = `\n\n> Workflow: [${workflowName}](${workflowSourceURL})`;
-
-  // Add expiration to footer if configured using ephemerals helper
-  const footerWithExpiration = addExpirationToFooter(footer, expiresHours, "Parent Issue");
-
-  body = `${body}${footerWithExpiration}`;
-
-  return { title, body };
+  const children = parseReportMarkdown(renderTemplateFromFile(issueTemplatePath, {}), { context: templateContext, minimumHeadingLevel: 2, allowMetadata: true, agentTainted: false });
+  /** @type {import("./report_ast.cjs").ReportInline[]} */
+  const workflowLabel = [{ type: "text", value: workflowName, agentTainted: false }];
+  /** @type {import("./report_ast.cjs").ReportInline[]} */
+  const workflowReference = workflowSourceURL ? [{ type: "link", url: workflowSourceURL, children: workflowLabel, agentTainted: false }] : workflowLabel;
+  children.push({
+    type: "quote",
+    agentTainted: false,
+    children: [
+      {
+        type: "paragraph",
+        agentTainted: false,
+        children: [{ type: "text", value: "Workflow: ", agentTainted: false }, ...workflowReference],
+      },
+    ],
+  });
+  if (expiresHours > 0) children.push({ type: "quote", agentTainted: false, children: [{ type: "expiration", expiresAt: new Date(Date.now() + expiresHours * 60 * 60 * 1000).toISOString(), agentTainted: false }] });
+  return { type: "report", title, children };
 }
 
 /**
@@ -674,13 +689,23 @@ async function searchTitleDedupIssues(githubClient, query) {
  * @param {Object} githubClient
  * @param {string} owner
  * @param {string} repo
+ * @param {string[]} labels
  * @returns {Promise<Array<{title: string}>>}
  */
-async function getRepoTitleDedupCandidates(githubClient, owner, repo) {
+async function getRepoTitleDedupCandidates(githubClient, owner, repo, labels) {
   const sinceDate = new Date(Date.now() - RECENTLY_CLOSED_DEDUP_DAYS * MS_PER_DAY).toISOString().slice(0, 10);
+  const labelQualifiers = labels
+    .map(
+      label =>
+        ` label:"${label
+          .replace(/\\/g, "\\\\")
+          .replace(/"/g, '\\"')
+          .replace(/\r?\n|\r/g, " ")}"`
+    )
+    .join("");
   const [openIssues, recentlyClosedIssues] = await Promise.all([
-    searchTitleDedupIssues(githubClient, `repo:${owner}/${repo} is:issue is:open`),
-    searchTitleDedupIssues(githubClient, `repo:${owner}/${repo} is:issue is:closed closed:>=${sinceDate}`),
+    searchTitleDedupIssues(githubClient, `repo:${owner}/${repo} is:issue is:open${labelQualifiers}`),
+    searchTitleDedupIssues(githubClient, `repo:${owner}/${repo} is:issue is:closed closed:>=${sinceDate}${labelQualifiers}`),
   ]);
 
   if (openIssues.truncated) {
@@ -738,12 +763,14 @@ async function main(config = {}) {
   const groupEnabled = parseBoolTemplatable(config.group, false);
   const closeOlderIssuesEnabled = parseBoolTemplatable(config.close_older_issues, false);
   const groupByDayEnabled = parseBoolTemplatable(config.group_by_day, false);
+  const deduplicateByLabels = normalizeDeduplicationLabels(config.deduplicate_by_labels);
   let deduplicateByTitle;
   try {
     deduplicateByTitle = parseDeduplicateByTitle(config.deduplicate_by_title);
   } catch (error) {
     throw new Error(`${ERR_VALIDATION}: ${getErrorMessage(error)}`, { cause: error });
   }
+  const deduplicationEnabled = deduplicateByTitle.enabled || deduplicateByLabels.length > 0;
   const rawCloseOlderKey = config.close_older_key ? String(config.close_older_key) : "";
   const closeOlderKey = rawCloseOlderKey ? normalizeCloseOlderKey(rawCloseOlderKey) : "";
   if (rawCloseOlderKey && !closeOlderKey) {
@@ -874,7 +901,6 @@ async function main(config = {}) {
       };
     }
     const { repo: qualifiedItemRepo, repoParts } = repoResult;
-    const allowedMentionAliases = await resolveMentionsForItem(context, githubClient, core, config.mentions, defaultMentionAliases, defaultTargetRepo, repoResult);
 
     // In staged mode no issues are created, so temporary IDs never resolve; validate the
     // references without deferring so dependent issues still get a staged preview.
@@ -886,6 +912,15 @@ async function main(config = {}) {
     if (blockedBy.error) {
       return { success: false, error: blockedBy.error };
     }
+    for (const blockedIssue of blockedBy.targets) {
+      const blockedRepoResult = resolveAndValidateRepo(blockedIssue, defaultTargetRepo, allowedRepos, "blocked-by dependency");
+      if (!blockedRepoResult.success) {
+        core.warning(`Skipping issue: ${blockedRepoResult.error}`);
+        return { success: false, error: blockedRepoResult.error };
+      }
+      blockedIssue.repo = blockedRepoResult.repo;
+    }
+    const allowedMentionAliases = await resolveMentionsForItem(context, githubClient, core, config.mentions, defaultMentionAliases, defaultTargetRepo, repoResult);
 
     // Get or generate the temporary ID for this issue
     const tempIdResult = getOrGenerateTemporaryId(message, "issue");
@@ -995,7 +1030,8 @@ async function main(config = {}) {
     // Sanitize body content to neutralize @mentions, URLs, and other security risks
     processedBody = sanitizeContent(normalizeReportText(processedBody, { preserveImageAttributes: true }), { allowedAliases: allowedMentionAliases, maxMentions });
 
-    const bodyLines = processedBody.split("\n");
+    const bodyNodes = parseReportMarkdown(stripExecutionProvenance(processedBody), { minimumHeadingLevel: 2, allowMetadata: true, agentTainted: true, allowedMentions: expandAllowedAliases(allowedMentionAliases) });
+    bodyNodes.push(...(message[ISSUE_BODY_SUFFIX] || []));
 
     if (!title) {
       // Use the first non-empty line of the body as the title fallback rather than
@@ -1038,9 +1074,9 @@ async function main(config = {}) {
       };
     }
 
-    if (deduplicateByTitle.enabled) {
+    if (deduplicationEnabled) {
       const withinRunCandidates = createdTitlesByRepo.get(qualifiedItemRepo) || [];
-      const withinRunDuplicate = findDuplicateByTitle(normalizedTitle, withinRunCandidates, deduplicateByTitle.maxDistance);
+      const withinRunDuplicate = findDuplicateIssue(normalizedTitle, withinRunCandidates, deduplicateByTitle);
       if (withinRunDuplicate) {
         core.warning(`Dropping duplicate create_issue (within-run) in ${qualifiedItemRepo}: "${title}" (matched "${withinRunDuplicate.title}", distance=${withinRunDuplicate.distance})`);
         return {
@@ -1058,7 +1094,7 @@ async function main(config = {}) {
         if (!repoTitleDedupCandidatesCache.has(repoCacheKey) && !skipRepoLevelSearch) {
           skipRepoLevelSearch = await shouldSkipRepoTitleDedupSearch(githubClient, repoParts.owner, repoParts.repo);
           if (!skipRepoLevelSearch) {
-            const dedupCandidatesPromise = getRepoTitleDedupCandidates(githubClient, repoParts.owner, repoParts.repo);
+            const dedupCandidatesPromise = getRepoTitleDedupCandidates(githubClient, repoParts.owner, repoParts.repo, deduplicateByLabels);
             dedupCandidatesPromise.catch(() => {
               if (repoTitleDedupCandidatesCache.get(repoCacheKey) === dedupCandidatesPromise) {
                 repoTitleDedupCandidatesCache.delete(repoCacheKey);
@@ -1071,9 +1107,11 @@ async function main(config = {}) {
         const repoCandidatesPromise = repoTitleDedupCandidatesCache.get(repoCacheKey);
         if (repoCandidatesPromise) {
           const repoCandidates = await repoCandidatesPromise;
-          const repoDuplicate = findDuplicateByTitle(normalizedTitle, repoCandidates, deduplicateByTitle.maxDistance);
+          const repoDuplicate = findDuplicateIssue(normalizedTitle, repoCandidates, deduplicateByTitle);
           if (repoDuplicate) {
-            recordSeenTitle(qualifiedItemRepo, title, normalizedTitle);
+            if (hasDeduplicationLabels(labels, deduplicateByLabels)) {
+              recordSeenTitle(qualifiedItemRepo, title, normalizedTitle);
+            }
             core.warning(`Dropping duplicate create_issue (repo-level) in ${qualifiedItemRepo}: "${title}" (matched "${repoDuplicate.title}", distance=${repoDuplicate.distance})`);
             return {
               success: true,
@@ -1094,11 +1132,21 @@ async function main(config = {}) {
     if (effectiveParentIssueNumber) {
       core.info("Detected issue context, parent issue " + effectiveParentRepo + "#" + effectiveParentIssueNumber);
       // Use full repo reference if cross-repo, short reference if same repo
-      if (effectiveParentRepo === qualifiedItemRepo) {
-        bodyLines.push(`Related to #${effectiveParentIssueNumber}`);
-      } else {
-        bodyLines.push(`Related to ${effectiveParentRepo}#${effectiveParentIssueNumber}`);
-      }
+      bodyNodes.push({
+        type: "paragraph",
+        agentTainted: false,
+        children: [
+          { type: "text", value: "Related to ", agentTainted: false },
+          effectiveParentRepo === qualifiedItemRepo
+            ? { type: "issue_reference", number: String(effectiveParentIssueNumber), agentTainted: false }
+            : {
+                type: "link",
+                url: `${context.serverUrl || "https://github.com"}/${effectiveParentRepo}/issues/${effectiveParentIssueNumber}`,
+                children: [{ type: "text", value: `${effectiveParentRepo}#${effectiveParentIssueNumber}`, agentTainted: false }],
+                agentTainted: false,
+              },
+        ],
+      });
     }
 
     const workflowName = process.env.GH_AW_WORKFLOW_NAME ?? "Workflow";
@@ -1106,7 +1154,7 @@ async function main(config = {}) {
     const workflowId = process.env.GH_AW_WORKFLOW_ID ?? "";
     const callerWorkflowId = process.env.GH_AW_CALLER_WORKFLOW_ID ?? "";
     const runUrl = buildWorkflowRunUrl(context, context.repo);
-    const report = buildIssueBodyReport(title, bodyLines.join("\n"), {
+    const report = buildIssueBodyReport(title, bodyNodes, {
       repo: repoParts,
       footer: includeFooter,
       bodyFooter: config.body_footer,
@@ -1192,7 +1240,7 @@ async function main(config = {}) {
       if (stagedBlockedBy.length > 0) {
         logStagedPreviewInfo(`Would mark issue as blocked by: ${stagedBlockedBy.join(", ")}`);
       }
-      if (deduplicateByTitle.enabled) {
+      if (deduplicationEnabled && hasDeduplicationLabels(labels, deduplicateByLabels)) {
         recordSeenTitle(qualifiedItemRepo, title, normalizedTitle);
       }
       // Return success with staged flag and preview info
@@ -1217,7 +1265,7 @@ async function main(config = {}) {
 
       core.info(`Created issue ${qualifiedItemRepo}#${issue.number}: ${issue.html_url}`);
       createdIssues.push({ ...issue, _repo: qualifiedItemRepo });
-      if (deduplicateByTitle.enabled) {
+      if (deduplicationEnabled && hasDeduplicationLabels(labels, deduplicateByLabels)) {
         recordSeenTitle(qualifiedItemRepo, title, normalizedTitle);
       }
 
@@ -1286,10 +1334,12 @@ async function main(config = {}) {
         try {
           const agentId = await findAgent(repoParts.owner, repoParts.repo, "copilot", issue.number, copilotClient);
           if (!agentId) {
+            if (isTokenBrokerEnabled()) throw new Error(`${ERR_API}: Broker-authenticated copilot assignment failed for issue #${issue.number}: agent unavailable`);
             core.warning(`copilot coding agent is not available for ${qualifiedItemRepo}`);
           } else {
             const issueDetails = await getIssueDetails(repoParts.owner, repoParts.repo, issue.number, copilotClient);
             if (!issueDetails) {
+              if (isTokenBrokerEnabled()) throw new Error(`${ERR_API}: Broker-authenticated copilot assignment failed for issue #${issue.number}: issue details unavailable`);
               core.warning(`Failed to get issue details for copilot assignment of issue #${issue.number}`);
             } else if (issueDetails.currentAssignees.some(a => a.id === agentId)) {
               core.info(`copilot is already assigned to issue #${issue.number}`);
@@ -1298,12 +1348,14 @@ async function main(config = {}) {
               if (assigned) {
                 core.info(`Successfully assigned copilot coding agent to issue #${issue.number}`);
               } else {
+                if (isTokenBrokerEnabled()) throw new Error(`${ERR_API}: Broker-authenticated copilot assignment failed for issue #${issue.number}`);
                 core.warning(`Failed to assign copilot to issue #${issue.number}`);
               }
             }
           }
         } catch (error) {
           core.warning(`Failed to assign copilot to issue #${issue.number}: ${getErrorMessage(error)}`);
+          if (isTokenBrokerEnabled()) throw error;
         }
       }
 
@@ -1394,7 +1446,21 @@ async function main(config = {}) {
               owner: repoParts.owner,
               repo: repoParts.repo,
               issue_number: effectiveParentIssueNumber,
-              body: appendExecutionProvenance(`Created related issue: #${issue.number}`, workflowName, runUrl),
+              body: renderSizedReport({
+                type: "report",
+                title: "Related issue",
+                children: [
+                  {
+                    type: "paragraph",
+                    agentTainted: false,
+                    children: [
+                      { type: "text", value: "Created related issue: ", agentTainted: false },
+                      { type: "issue_reference", number: String(issue.number), agentTainted: false },
+                    ],
+                  },
+                  ...parseReportMarkdown(appendExecutionProvenance("", workflowName, runUrl), { allowMetadata: true, agentTainted: false }),
+                ],
+              }).body,
             });
             core.info("✓ Added comment to parent issue #" + effectiveParentIssueNumber + " (sub-issue linking not available)");
           } catch (commentError) {

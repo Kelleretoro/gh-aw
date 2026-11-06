@@ -49,6 +49,14 @@ Translating Markdown workflows (`.md` files) into GitHub Actions YAML format (`.
 
 The compiled GitHub Actions workflow file from a workflow markdown file (`.md`). Contains complete GitHub Actions YAML with security hardening applied. Both `.md` and `.lock.yml` files should be committed to version control. At runtime, GitHub Actions executes the lock file using a coding agent while referencing the markdown for instructions.
 
+### Lock File Exclusion (`exclude-lock-yml`)
+
+A `create-pull-request` and `push-to-pull-request-branch` safe-output option that omits compiled `.lock.yml` files under `.github/workflows/` from patch and bundle transports. It avoids GitHub's workflow-write restriction when the GitHub Actions token publishes changes. Other workflow YAML files are not excluded and still require workflow-write credentials. When exclusions drop changes, the pull request body warns to re-run `gh aw compile` and commit the regenerated locks with authorized credentials. See [Safe Outputs (Pull Requests)](/gh-aw/reference/safe-outputs-pull-requests/).
+
+### Actions Lock Integration (`--actions-lock`)
+
+A `gh aw compile` flag that runs the separately installed `gh actions-lock` extension after compilation to update `.github/workflows/actions.lock`. The extension scans all workflows in its default directory, and compilation never installs it. The flag is incompatible with `--no-emit`, `--read-only`, `--watch`, and `--dry-run`, and does not replace `.github/aw/actions-lock.json`. See [CLI Commands](/gh-aw/setup/cli/).
+
 ## Tools and Integration
 
 ### MCP (Model Context Protocol)
@@ -253,6 +261,15 @@ safe-outputs:
     max-ai-credits: 750
 ```
 
+### Token Broker (`token-broker:`)
+
+An experimental frontmatter field that exchanges the job's OIDC identity for short-lived credentials from an organization-operated broker instead of using existing secrets. The `copilot-request` and `copilot-task` modes can be selected independently. Brokered request authentication is supported in threat-detection and evals jobs, and the broker endpoint comes from the `GH_AW_TOKEN_BROKER_URL` Actions variable or secret at runtime. A missing configuration or failed exchange blocks the affected operation rather than falling back to other credentials. See [Token Broker](/gh-aw/reference/frontmatter/#token-broker-token-broker) and the [Token Broker Specification](/gh-aw/specs/token-broker-specification/).
+
+```aw wrap
+token-broker:
+  copilot-task: true
+```
+
 ### Staged Mode
 
 A preview mode where workflows simulate actions without making changes. The AI generates output showing what would happen, but no GitHub API write operations are performed. Use for testing before production runs. See [Staged Mode](/gh-aw/reference/staged-mode/) for details.
@@ -319,7 +336,7 @@ safe-outputs:
     - "!inference_access_error"
 ```
 
-Common categories include `agent_failure`, `timed_out`, `missing_safe_outputs`, `report_incomplete`, `missing_tool`, `missing_data`, `inference_access_error`, `copilot_org_billing_error`, and `ai_credits_rate_limit_error`. See [Safe Outputs Reference](/gh-aw/reference/safe-outputs/) for the full list.
+Common categories include `agent_failure`, `activation_failed`, `timed_out`, `missing_safe_outputs`, `report_incomplete`, `missing_tool`, `missing_data`, `inference_access_error`, `copilot_org_billing_error`, and `ai_credits_rate_limit_error`. See [Safe Outputs Reference](/gh-aw/reference/safe-outputs/) for the full list.
 
 ### Report Failed Jobs (`report-failed-jobs:`)
 
@@ -412,7 +429,7 @@ A repository secret name used to authenticate Copilot inference with a specific 
 
 ### Copilot Org Billing Opt-Out (`copilot-requests: none`)
 
-A frontmatter setting, `permissions: copilot-requests: none`, that explicitly declines centralized organization billing for the Copilot engine. Without it, `gh aw compile` emits an informational tip on every compilation suggesting `copilot-requests: write` when the conditions for org billing are otherwise met; setting `none` silences that tip for workflows intentionally using individual/seat billing via `COPILOT_GITHUB_TOKEN`. See [Billing Reference](/gh-aw/reference/billing/).
+A frontmatter setting, `permissions: copilot-requests: none`, that explicitly declines centralized organization billing for the Copilot engine. Without it, `gh aw compile` emits an informational tip once per compile run, even when compiling multiple workflows, suggesting `copilot-requests: write` when the conditions for org billing are otherwise met; setting `none` silences that tip for workflows intentionally using individual/seat billing via `COPILOT_GITHUB_TOKEN`. See [Billing Reference](/gh-aw/reference/billing/).
 
 ### Copilot Org Billing Error (`copilot_org_billing_error`)
 
@@ -432,7 +449,7 @@ An `artifacts:` array on a custom safe-outputs job that declares agent-job files
 
 ### Dispatch Repository (`dispatch-repository`)
 
-An experimental safe output type that triggers `repository_dispatch` events in external repositories for cross-repository orchestration. Each key under `safe-outputs.dispatch-repository:` defines a named tool exposed to the agent. A tool requires a `workflow` identifier (forwarded in `client_payload` for routing), an `event_type`, and either a static `repository` slug or an `allowed_repositories` list. GitHub Actions expressions (`${{ ... }}`) are supported in repository fields and are passed through without format validation. At compile time the compiler emits a warning: `Using experimental feature: dispatch-repository`. See [Safe Outputs Reference](/gh-aw/reference/safe-outputs/#repository-dispatch-dispatch-repository).
+A safe output type that triggers `repository_dispatch` events in external repositories for cross-repository orchestration. Each key under `safe-outputs.dispatch-repository:` defines a named tool exposed to the agent. A tool requires a `workflow` identifier (forwarded in `client_payload` for routing), an `event_type`, and either a static `repository` slug or an `allowed_repositories` list. GitHub Actions expressions (`${{ ... }}`) are supported in repository fields and are passed through without format validation. See [Safe Outputs Reference](/gh-aw/reference/safe-outputs/#repository-dispatch-dispatch-repository).
 
 ### Runner Group (`runs-on: {group: ...}`)
 
@@ -506,7 +523,7 @@ An Azure DevOps work-item field that assigns items to a sprint or release cycle 
 
 ### Approve Workflow Run (`approve-workflow-run:`)
 
-An experimental safe output capability that approves a GitHub Actions workflow run in the "action required" state, such as runs for fork pull requests or pull requests created by Copilot. The agent supplies a positive integer `run_id`; the handler verifies the run is a pull request run tied to an authorized pull request and is still awaiting approval (status `action_required` or `waiting`, or conclusion `action_required`) before calling GitHub's approval API. Requires `actions: write` and an explicit external `github-token` or `github-app`, since the default `github.token` cannot approve workflow runs; `pull-requests: write` is required when `comment` is enabled (the default), otherwise `pull-requests: read` suffices. `allowed-workflows` is required and restricts approval to matching workflow filenames; `allowed-pull-requests` extends authorization beyond the triggering pull request. Only pull requests whose head branch lives in the current repository (including agent-initiated `copilot/*` pull requests) are approvable by default; pull requests from other repositories are refused unless their repository matches an `allowed-repos` entry. The safe output always refuses to run from `pull_request_target`. After a successful approval, a comment announcing the run has started (with a generated attribution footer) is posted on each associated pull request unless `comment: false` is set. Compiling a workflow with `approve-workflow-run` emits an experimental feature warning. See [Safe Outputs (Pull Requests)](/gh-aw/reference/safe-outputs-pull-requests/#approve-workflow-run-approve-workflow-run).
+A safe output capability that approves a GitHub Actions workflow run in the "action required" state, such as runs for fork pull requests or pull requests created by Copilot. The agent supplies a positive integer `run_id`; the handler verifies the run is a pull request run tied to an authorized pull request and is still awaiting approval (status `action_required` or `waiting`, or conclusion `action_required`) before calling GitHub's approval API. Requires `actions: write` and an explicit external `github-token` or `github-app`, since the default `github.token` cannot approve workflow runs; `pull-requests: write` is required when `comment` is enabled (the default), otherwise `pull-requests: read` suffices. `allowed-workflows` is required and restricts approval to matching workflow filenames; `allowed-pull-requests` extends authorization beyond the triggering pull request. Only pull requests whose head branch lives in the current repository (including agent-initiated `copilot/*` pull requests) are approvable by default; pull requests from other repositories are refused unless their repository matches an `allowed-repos` entry. The safe output always refuses to run from `pull_request_target`. After a successful approval, a comment announcing the run has started (with a generated attribution footer) is posted on each associated pull request unless `comment: false` is set. See [Safe Outputs (Pull Requests)](/gh-aw/reference/safe-outputs-pull-requests/#approve-workflow-run-approve-workflow-run).
 
 ### Merge Pull Request (`merge-pull-request:`)
 
@@ -526,7 +543,7 @@ A safe output capability for modifying a pull request's `title` or `body`. Title
 
 ### Protected Files
 
-A security mechanism on `create-pull-request` and `push-to-pull-request-branch` safe outputs that prevents AI agents from modifying sensitive repository files. By default, protects dependency manifests (e.g., `package.json`, `go.mod`), GitHub Actions workflow files, and lock files. Configured via `protected-files:` with three policies: `blocked` (default — fails with error), `allowed` (no restriction), or `fallback-to-issue` (creates a review issue for human inspection instead of applying changes). Also accepts an object form `{ policy: string, exclude: [...] }` to remove specific files or path prefixes from the default protected set while keeping protection active for the remaining files. See [Safe Outputs (Pull Requests)](/gh-aw/reference/safe-outputs-pull-requests/#protected-files).
+A security mechanism on `create-pull-request` and `push-to-pull-request-branch` safe outputs that prevents AI agents from modifying sensitive repository files. By default, protects dependency manifests (e.g., `package.json`, `go.mod`), GitHub Actions workflow files, and lock files. Configured via `protected-files:` with three policies: `blocked` (default — fails with error), `allowed` (no restriction), or `fallback-to-issue` (creates a review issue for human inspection instead of applying changes). Also accepts an object form `{ policy: string, exclude: [...] }` to remove specific files or path prefixes from the default protected set while keeping protection active for the remaining files. Repository-wide exceptions can be set with `protected_files.exclude` in `.github/workflows/aw.json` using root-relative path globs (e.g., `.changeset/*.md`); catch-all patterns such as `**` are rejected, and these exceptions never bypass `allowed-files`. See [Safe Outputs (Pull Requests)](/gh-aw/reference/safe-outputs-pull-requests/#protected-files).
 
 ### Allow Workflows (`allow-workflows:`)
 
@@ -921,7 +938,9 @@ evals:
 
 ### Feature Flags (`features:`)
 
-A frontmatter section that enables experimental or optional compiler and runtime behaviors as key-value pairs. Feature flags provide controlled access to new capabilities before they become defaults or are fully stabilized. Common flags include `action-mode` (controls how custom action references are compiled), `copilot-requests` (enables GitHub Actions token authentication for Copilot; currently in **private preview** — will not work unless your account has been onboarded), `mcp-gateway` (enables the MCP gateway proxy), `integrity-reactions` (enables reaction-based integrity promotion and demotion), `cli-proxy` (enables CLI proxy mode for integrity enforcement at the network boundary), and `awf-diagnostic-logs` (enables AWF Docker operational diagnostics collection on failure). `byok-copilot` is deprecated because Copilot BYOK behavior is now the default for `engine: copilot`. See [Feature Flags Reference](/gh-aw/reference/feature-flags/).
+A frontmatter section that enables experimental or optional compiler and runtime behaviors as key-value pairs. Feature flags provide controlled access to new capabilities before they become defaults or are fully stabilized. Common flags include `action-mode` (controls how custom action references are compiled), `mcp-gateway` (enables the MCP gateway proxy), `integrity-reactions` (enables reaction-based integrity promotion and demotion), `cli-proxy` (enables CLI proxy mode for integrity enforcement at the network boundary), and `awf-diagnostic-logs` (enables AWF Docker operational diagnostics collection on failure). `byok-copilot` is deprecated because Copilot BYOK behavior is now the default for `engine: copilot`. See [Feature Flags Reference](/gh-aw/reference/feature-flags/).
+
+Workflows that still use the legacy `features.copilot-requests` flag should use `permissions.copilot-requests: write` instead when enabled. Run `gh aw fix --write` to apply the `features-copilot-requests-to-permissions` codemod, which removes the old flag and grants the permission when it was enabled.
 
 ### Force Clean Git Credentials (`force-clean-git-credentials`)
 
@@ -955,7 +974,7 @@ A typed parameter contract declared in a shared workflow file that enables calle
 
 ### Runtime Import (`{{#runtime-import}}`)
 
-A body-level directive that injects the text content of another file at a specific point in the workflow markdown. Unlike the `imports:` frontmatter field (which merges configuration), `{{#runtime-import filepath}}` splices raw markdown text — useful for sharing reusable prompt snippets, tone instructions, or reference material. Use `{{#runtime-import? filepath}}` for an optional include that silently skips a missing file. Paths are resolved within the `.github` folder with or without the `.github/` prefix. See [Runtime Imports](/gh-aw/reference/templating/#runtime-imports).
+A body-level directive that includes local author files at a specific point in the workflow markdown. Unlike the `imports:` frontmatter field, it does not merge workflow configuration. Local files within `.github` or explicit `.agents/` paths share compiler-selected non-secret author bindings and support nested imports. Runtime imports perform no network fetching; external content must be retrieved by the agent inside the AWF sandbox. Use `{{#runtime-import? target}}` for optional local files; optional syntax does not permit remote targets. See [Runtime Imports](/gh-aw/reference/templating/#runtime-imports).
 
 ### Emoji (`emoji:`)
 
@@ -1117,6 +1136,14 @@ A frontmatter option that appends custom key/value pairs to the standard gh-aw a
 ### OTLP Authorization Header Guard
 
 A compiler-enforced rule for `observability.otlp` headers requiring the bare secret expression for `Authorization` values rather than a scheme prefix such as `Bearer`. For Sentry endpoints, gh-aw automatically rewrites `Authorization` to `x-sentry-auth`, so no prefix is needed. Prevents scheme-only header values (a stray auth scheme with no token) from being sent to the OTLP backend. See [OpenTelemetry](/gh-aw/reference/open-telemetry/).
+
+### OTLP Protobuf Encoding (`OTEL_EXPORTER_OTLP_PROTOCOL`)
+
+An opt-in wire encoding for the gh-aw JavaScript OTLP exporter. The exporter defaults to OTLP/HTTP JSON (`http/json`); setting `OTEL_EXPORTER_OTLP_PROTOCOL` to `http/protobuf` sends binary protobuf for traces and compact session logs, using a dependency-free encoder built on Node.js built-ins. `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` and `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` override the encoding per signal. gRPC is not supported, and the local `otel.jsonl` trace mirror remains raw OTLP JSON. Required for Azure Monitor OTLP ingestion. See [OpenTelemetry](/gh-aw/reference/open-telemetry/#protobuf-encoding-and-azure-monitor).
+
+### OTLP Partial Success
+
+An OTLP export response that reports some spans or log records as rejected even though the HTTP request succeeded. The exporter inspects `partialSuccess` in JSON and protobuf responses for traces and logs, warns with a signal-specific rejection count, and increments `gh-aw.otlp.export_errors`. Accepted records are not retried, and collector messages are withheld because they may contain private data. See [OpenTelemetry](/gh-aw/reference/open-telemetry/).
 
 ### Custom Span (`logSpan`)
 
@@ -1390,6 +1417,8 @@ on:
 ### Frontmatter Hash
 
 A deterministic SHA-256 hash of a workflow's frontmatter configuration, including all imported workflow frontmatter collected in breadth-first order. The hash covers security-relevant fields (`engine`, `on`, `permissions`, `tools`, `network`, `safe-outputs`, etc.) while excluding the markdown body. Identical configurations produce identical hashes across the Go and JavaScript compiler implementations, enabling change detection, tamper verification, and reproducibility checks. To also hash the prompt body, use `on.stale-check: "full"` (see [Body Hash](#body-hash)). See [Frontmatter Hash Specification](/gh-aw/specs/frontmatter-hash-specification/).
+
+Activation reads the source, lock file, and imports at the immutable `GITHUB_WORKFLOW_SHA` when `GITHUB_WORKFLOW_REF` identifies the workflow being checked. This avoids depending on a pull request merge ref that may disappear after merge, or a branch or tag that may move while the run is queued. Reusable workflow resolution continues to prefer the callee's SHA from `referenced_workflows`, not the caller's SHA. Hash mismatches and unverifiable contents still fail the check.
 
 ### Custom Routing Signal (`engine_base_url_customized`)
 

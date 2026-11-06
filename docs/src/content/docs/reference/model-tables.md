@@ -7,6 +7,8 @@ sidebar:
 
 This page lists the built-in model aliases used by GitHub Agentic Workflows.
 
+Copilot catalogs can differ by organization and lag Copilot seats; an exact ID missing from a complete live catalog is not offered to this workflow, so prefer `opus` or `sonnet` aliases. Run `gh aw audit <run-url> --models` for detailed model information from that run; see [workflow-specific catalog availability](/gh-aw/reference/engines/#model-aliases).
+
 ## Model Aliases
 
 Model aliases let you write `engine: copilot` with a human-friendly model name such as `sonnet` or `mini`, and gh-aw resolves it to the best available concrete model at compile time. Each alias holds an ordered list of patterns; the first pattern that matches an available model wins.
@@ -76,7 +78,7 @@ Meta-aliases reference other aliases by name. They are resolved recursively unti
 |------------|------------|
 | `opusplan` | `opus?effort=high` |
 | `small` | `mini` |
-| `detection` | `small` |
+| `detection` | `small` → `copilot/gpt-*-luna` → `openai/gpt-*-luna` → `small-agent` → `agent` |
 | `evals` | `small` |
 | `mini` | `haiku` → `gpt-5-mini` → `gpt-5-nano` → `gemini-flash-lite` |
 | `large` | `sonnet` → `gpt-6` → `gpt-5-pro` → `gpt-5` → `gemini-pro` |

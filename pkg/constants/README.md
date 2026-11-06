@@ -39,6 +39,9 @@ The package also acts as the authoritative source for the generated workflow con
 | `GetAllEngineSecretNames` | `func GetAllEngineSecretNames() []string` | Returns the deduplicated union of engine primary secrets, alternative secrets, and system secrets. |
 | `GetEngineOption` | `func GetEngineOption(engineValue string) *EngineOption` | Returns the configured engine option for an engine value, or `nil` when none exists. |
 | `GetWorkflowDir` | `func GetWorkflowDir() string` | Returns the workflow directory, honoring `GH_AW_WORKFLOWS_DIR` and normalizing path separators to `/`. |
+| `EngineExecutionStepName` | `func EngineExecutionStepName(name string) string` | Returns `name` unchanged when it follows the engine execution-step naming contract; otherwise adds the required prefix. |
+| `IsCompilerOwnedJobName` | `func IsCompilerOwnedJobName(name string) bool` | Reports whether a job name is owned by the compiler, including generated maintenance jobs. |
+| `IsEngineExecutionStepName` | `func IsEngineExecutionStepName(name string) bool` | Reports whether a name follows the evals or detection engine execution-step naming contract. |
 
 ### Constants
 
@@ -63,6 +66,7 @@ The package also acts as the authoritative source for the generated workflow con
 | `GroupConcurrencyQueueFeatureFlag` | `FeatureFlag` | `"group-concurrency-queue"` | Controls whether generated group concurrency uses `queue: max`. |
 | `DangerouslyDisableSandboxAgentFeatureFlag` | `FeatureFlag` | `"dangerously-disable-sandbox-agent"` | Required to allow `sandbox.agent: false`. |
 | `DangerouslyAllowRolesReadAndPullRequestTargetFeatureFlag` | `FeatureFlag` | `"dangerously-allow-roles-read-and-pull-request-target"` | Suppresses the non-strict warning for `pull_request_target` with `on.roles` containing `read` or `all`. |
+| `DangerouslyAllowPullRequestTargetForksAllFeatureFlag` | `FeatureFlag` | `"dangerously-allow-pull-request-target-forks-all"` | Allows unrestricted `pull_request_target` fork admission in strict mode; the warning remains. |
 | `GHAWDetectionFeatureFlag` | `FeatureFlag` | `"gh-aw-detection"` | Enables the external threat-detection binary path by default; set to `false` for the legacy inline path. |
 | `AgentJobName` | `JobName` | `"agent"` | Built-in agent job identifier. |
 | `ActivationJobName` | `JobName` | `"activation"` | Built-in activation job identifier. |

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -46,6 +47,8 @@ func toEngineEnvValueString(value any) (string, bool) {
 type EngineConfig struct {
 	ID                 string
 	Version            string
+	Cooldown           *int // Minimum release age in days; nil defaults to 3, zero disables it outside strict mode.
+	cooldownError      error
 	ChecksumsSHA256    string      // Trusted release checksum-manifest digest (Copilot CLI only)
 	LLMProvider        LLMProvider // Inference provider override for this engine (engine.provider / engine.model-provider)
 	ContextWindow      int         // Model context window metadata for engines that need explicit model catalog entries
@@ -87,7 +90,9 @@ type EngineConfig struct {
 
 	// Extensions is a list of engine-specific plugin names to install before launching the engine.
 	// Currently used by the Pi engine: each entry is passed to `pi install <extension>`.
-	Extensions []string
+	Extensions   []string
+	Durable      *DurableConfig
+	durableError error
 
 	ModelRouting   *CopilotModelRoutingConfig
 	FallbackModels []string
@@ -363,6 +368,12 @@ func extractStringEngineConfig(engineStr string, topLevel engineTopLevelConfig) 
 
 func extractObjectEngineConfig(engineObj map[string]any, topLevel engineTopLevelConfig) (string, *EngineConfig, string) {
 	engineLog.Print("Found engine in object format, parsing configuration")
+	if pi, ok := engineObj["pi"].(map[string]any); ok {
+		options := make(map[string]any, len(pi)+1)
+		maps.Copy(options, pi)
+		options["id"] = "pi"
+		return extractReferencedEngineConfig(options, topLevel)
+	}
 	if runtime, hasRuntime := engineObj["runtime"]; hasRuntime {
 		return extractInlineEngineConfig(runtime, engineObj, topLevel)
 	}
@@ -424,6 +435,8 @@ func parseNonEmptyAuthDefinition(authObj map[string]any) *AuthDefinition {
 }
 
 func applyInlineEngineFields(config *EngineConfig, engineObj map[string]any, topLevel engineTopLevelConfig) {
+	applyEngineDurableField(config, engineObj)
+	applyEngineCooldownField(config, engineObj)
 	applyEngineBareField(config, engineObj)
 	applyEnginePermissionMode(config, engineObj)
 	applyEngineContextWindowField(config, engineObj)
@@ -453,6 +466,8 @@ func extractReferencedEngineConfig(engineObj map[string]any, topLevel engineTopL
 }
 
 func applyReferencedEngineFields(config *EngineConfig, engineObj map[string]any, topLevel engineTopLevelConfig) {
+	applyEngineDurableField(config, engineObj)
+	applyEngineCooldownField(config, engineObj)
 	applyEngineProviderFields(config, engineObj)
 	applyEnginePermissionMode(config, engineObj)
 	applyEngineContextWindowField(config, engineObj)
@@ -874,6 +889,10 @@ func (c *Compiler) extractEngineConfigFromJSON(engineJSON string) (*EngineConfig
 	}
 
 	_, config, model := c.ExtractEngineConfig(tempFrontmatter)
+	// Strict policy is validated after merging, using the main workflow's mode.
+	if err := validateEngineCooldown(config, false); err != nil {
+		return nil, "", err
+	}
 	return config, model, nil
 }
 

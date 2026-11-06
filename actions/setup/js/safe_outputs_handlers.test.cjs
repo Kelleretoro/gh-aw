@@ -9,6 +9,7 @@ import { validateTransactions } from "./push_ledger_changes.cjs";
 import { resolveTransportPaths } from "./resolve_transport_paths.cjs";
 import { getPatchPathForBranchInRepo } from "./git_patch_utils.cjs";
 import { getBundlePathForBranchInRepo } from "./generate_git_bundle.cjs";
+import { simulateLinuxDescriptors } from "./test_linux_descriptors.mjs";
 import {
   looksLikeExploratoryBranch,
   normalizeProbeValue,
@@ -20,6 +21,7 @@ import {
 } from "./intent_probe.cjs";
 
 const LARGE_CONTENT_BODY = "A".repeat(70000);
+const outputId = expect.stringMatching(/^so_[A-Za-z0-9_-]{12}$/);
 const testScratchRoot = path.resolve(`.safe-outputs-handlers-${crypto.randomUUID()}`);
 const originalGitCeiling = process.env.GIT_CEILING_DIRECTORIES;
 
@@ -109,8 +111,8 @@ describe("safe_outputs_handlers", () => {
     expect(configured.ledgerBuiltinHandler("map", "put")({ ledger: "cache", key: "a", value: { status: "ready" }, temp_id: "entry" }).isError).not.toBe(true);
     expect(configured.ledgerBuiltinHandler("map", "put")({ ledger: "other", key: "b", value: 2 }).isError).not.toBe(true);
     expect(mockAppendSafeOutput.mock.calls.map(([entry]) => entry)).toEqual([
-      { type: "ledger_append", ledger: "cache", operation: "put", key: "a", value: { status: "ready" }, temp_id: "entry" },
-      { type: "ledger_append", ledger: "other", operation: "put", key: "b", value: 2 },
+      { type: "ledger_append", ledger: "cache", operation: "put", key: "a", value: { status: "ready" }, temp_id: "entry", output_id: outputId },
+      { type: "ledger_append", ledger: "other", operation: "put", key: "b", value: 2, output_id: outputId },
     ]);
   });
 
@@ -132,9 +134,9 @@ describe("safe_outputs_handlers", () => {
     expect(configured.ledgerAgentAppendHandler({ ledger: "knowledge", operation: "note", ...note }).isError).toBe(true);
     expect(configured.ledgerAgentAppendHandler({ ledger: "history", operation: "append", value: "ok" }).isError).not.toBe(true);
     expect(mockAppendSafeOutput.mock.calls.map(([entry]) => entry)).toEqual([
-      { type: "ledger_append", ledger: "knowledge", temp_id: "first", operation: "note", ...note },
-      { type: "ledger_append", ledger: "knowledge", operation: "vote", note_id: "#first", vote: "up" },
-      { type: "ledger_append", ledger: "history", operation: "append", value: "ok" },
+      { type: "ledger_append", ledger: "knowledge", temp_id: "first", operation: "note", ...note, output_id: outputId },
+      { type: "ledger_append", ledger: "knowledge", operation: "vote", note_id: "#first", vote: "up", output_id: outputId },
+      { type: "ledger_append", ledger: "history", operation: "append", value: "ok", output_id: outputId },
     ]);
   });
 
@@ -173,7 +175,7 @@ describe("safe_outputs_handlers", () => {
     expect(configured.ledgerAgentAppendHandler({ ledger: "unknown", record }).isError).toBe(true);
     expect(mockAppendSafeOutput).not.toHaveBeenCalled();
     expect(configured.ledgerAgentAppendHandler({ record }).isError).not.toBe(true);
-    expect(mockAppendSafeOutput).toHaveBeenCalledExactlyOnceWith({ type: "ledger_append", record });
+    expect(mockAppendSafeOutput).toHaveBeenCalledExactlyOnceWith({ type: "ledger_append", record, output_id: outputId });
 
     const previousRunnerTemp = process.env.RUNNER_TEMP;
     process.env.RUNNER_TEMP = testWorkspaceDir;
@@ -439,12 +441,13 @@ describe("safe_outputs_handlers", () => {
         field1: "value1",
         field2: "value2",
         type: "test-type",
+        output_id: outputId,
       });
       expect(result).toEqual({
         content: [
           {
             type: "text",
-            text: JSON.stringify({ result: "success" }),
+            text: JSON.stringify({ result: "success", output_id: mockAppendSafeOutput.mock.calls[0][0].output_id }),
           },
         ],
       });
@@ -476,8 +479,8 @@ describe("safe_outputs_handlers", () => {
 
       const result = handler(null);
 
-      expect(mockAppendSafeOutput).toHaveBeenCalledWith({ type: "test-type" });
-      expect(result.content[0].text).toBe(JSON.stringify({ result: "success" }));
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith({ type: "test-type", output_id: outputId });
+      expect(JSON.parse(result.content[0].text)).toEqual({ result: "success", output_id: mockAppendSafeOutput.mock.calls[0][0].output_id });
     });
 
     it("should handle undefined args", () => {
@@ -485,8 +488,8 @@ describe("safe_outputs_handlers", () => {
 
       const result = handler(undefined);
 
-      expect(mockAppendSafeOutput).toHaveBeenCalledWith({ type: "test-type" });
-      expect(result.content[0].text).toBe(JSON.stringify({ result: "success" }));
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith({ type: "test-type", output_id: outputId });
+      expect(JSON.parse(result.content[0].text)).toEqual({ result: "success", output_id: mockAppendSafeOutput.mock.calls[0][0].output_id });
     });
 
     it("should enforce data_schema for default handler payloads", () => {
@@ -544,16 +547,41 @@ describe("safe_outputs_handlers", () => {
     });
   });
 
-  describe("uploadAssetHandler", () => {
+  describe.skipIf(process.platform === "win32")("uploadAssetHandler", () => {
     let testRunnerTemp;
+    let restoreDescriptors;
 
     beforeEach(() => {
       const testId = Math.random().toString(36).substring(7);
       testRunnerTemp = path.join(testScratchRoot, `test-runner-temp-${testId}`);
       process.env.RUNNER_TEMP = testRunnerTemp;
+      if (process.platform !== "linux") {
+        // Exercise the Linux upload path on macOS without an absolute-path
+        // production fallback. These handler tests do not rename directories.
+        const originals = { openSync: fs.openSync, lstatSync: fs.lstatSync, mkdirSync: fs.mkdirSync };
+        const pinned = new Map();
+        const resolve = filename => {
+          if (typeof filename !== "string") return filename;
+          const match = /^\/proc\/self\/fd\/(\d+)(?:\/(.*))?$/.exec(filename);
+          return match ? path.join(pinned.get(Number(match[1])), match[2] || "") : filename;
+        };
+        fs.openSync = (filename, ...args) => {
+          const resolved = resolve(filename);
+          const fd = originals.openSync(resolved, ...args);
+          pinned.set(fd, resolved);
+          return fd;
+        };
+        for (const method of ["lstatSync", "mkdirSync"]) fs[method] = (filename, ...args) => originals[method](resolve(filename), ...args);
+        restoreDescriptors = () => Object.assign(fs, originals);
+        vi.stubGlobal("process", new Proxy(process, { get: (target, key) => (key === "platform" ? "linux" : Reflect.get(target, key)) }));
+      }
     });
 
     afterEach(() => {
+      vi.restoreAllMocks();
+      restoreDescriptors?.();
+      restoreDescriptors = undefined;
+      vi.unstubAllGlobals();
       delete process.env.RUNNER_TEMP;
       try {
         if (fs.existsSync(testRunnerTemp)) {
@@ -611,7 +639,10 @@ describe("safe_outputs_handlers", () => {
       const entry = mockAppendSafeOutput.mock.calls[0][0];
       expect(entry.type).toBe("upload_asset");
       expect(entry.fileName).toBe("test.png");
-      expect(entry.sha).toBeDefined();
+      expect(entry.sha).toBe(crypto.createHash("sha256").update("test content").digest("hex"));
+      expect(entry.size).toBe(Buffer.byteLength("test content"));
+      const stagedFile = path.join(testRunnerTemp, "gh-aw", "safeoutputs", "assets", `${crypto.createHash("sha256").update(testFile).digest("hex")}.png`);
+      expect(fs.readFileSync(stagedFile)).toEqual(Buffer.from("test content"));
       expect(entry.url).toContain("test-branch");
 
       expect(result.content[0].type).toBe("text");
@@ -658,7 +689,7 @@ describe("safe_outputs_handlers", () => {
       // Use a path in the workspace that doesn't exist
       const args = { path: path.join(testWorkspaceDir, "nonexistent.png") };
 
-      expect(() => handlers.uploadAssetHandler(args)).toThrow("File not found");
+      expect(() => handlers.uploadAssetHandler(args)).toThrow(/^ERR_SYSTEM: File not found/);
     });
 
     it("should throw error if file outside allowed directories", () => {
@@ -669,33 +700,134 @@ describe("safe_outputs_handlers", () => {
       expect(() => handlers.uploadAssetHandler(args)).toThrow("File path must be within workspace directory");
     });
 
-    it("should allow files in /tmp directory", () => {
+    it("should allow /tmp paths through root validation", () => {
       process.env.GH_AW_ASSETS_BRANCH = "test-branch";
+      const args = { path: `/tmp/nonexistent-upload-${crypto.randomUUID()}.png` };
+      // The macOS Linux simulation sees the host's /tmp symlink and rejects
+      // it at the guard, after the lexical allowed-root check has succeeded.
+      expect(() => handlers.uploadAssetHandler(args)).toThrow(/^ERR_SYSTEM: File not found|^ERR_VALIDATION: Asset symlinks are not allowed/);
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
 
-      const testFile = `/tmp/test-upload-${Date.now()}.png`;
-      const localFile = path.join(testWorkspaceDir, "test-upload.png");
-      fs.writeFileSync(localFile, "test content");
-      const originalExistsSync = fs.existsSync;
-      const originalStatSync = fs.statSync;
-      const originalReadFileSync = fs.readFileSync;
-      const originalCopyFileSync = fs.copyFileSync;
-      const existsSpy = vi.spyOn(fs, "existsSync").mockImplementation(filePath => filePath === testFile || originalExistsSync(filePath));
-      const statSpy = vi.spyOn(fs, "statSync").mockImplementation((filePath, options) => originalStatSync(filePath === testFile ? localFile : filePath, options));
-      const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation((filePath, options) => originalReadFileSync(filePath === testFile ? localFile : filePath, options));
-      const copySpy = vi.spyOn(fs, "copyFileSync").mockImplementation((source, destination, flags) => originalCopyFileSync(source === testFile ? localFile : source, destination, flags));
+    it.each(["file", "dangling", "parent", "hardlink", "directory"])("rejects %s sources without staging sentinel content", kind => {
+      process.env.GH_AW_ASSETS_BRANCH = "assets/test";
+      const sentinel = path.join(testScratchRoot, "external-sentinel.png");
+      fs.writeFileSync(sentinel, "harmless external sentinel");
+      const source = path.join(testWorkspaceDir, "leak.png");
+      let requestedPath = source;
+      if (kind === "file") fs.symlinkSync(sentinel, source);
+      else if (kind === "dangling") fs.symlinkSync(path.join(testScratchRoot, "missing-sentinel"), source);
+      else if (kind === "parent") {
+        fs.symlinkSync(testScratchRoot, source, "dir");
+        requestedPath = path.join(source, "external-sentinel.png");
+      } else if (kind === "hardlink") fs.linkSync(sentinel, source);
+      else fs.mkdirSync(source);
 
-      try {
-        const args = { path: testFile };
-        const result = handlers.uploadAssetHandler(args);
+      expect(() => handlers.uploadAssetHandler({ path: requestedPath })).toThrow(expect.objectContaining({ code: "ERR_VALIDATION", message: expect.stringMatching(/^ERR_VALIDATION:/) }));
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      expect(fs.existsSync(path.join(testRunnerTemp, "gh-aw", "safeoutputs", "assets"))).toBe(false);
+      expect(fs.readFileSync(sentinel, "utf8")).toBe("harmless external sentinel");
+    });
 
-        expect(mockAppendSafeOutput).toHaveBeenCalled();
-        expect(result.content[0].type).toBe("text");
-      } finally {
-        existsSpy.mockRestore();
-        statSpy.mockRestore();
-        readSpy.mockRestore();
-        copySpy.mockRestore();
+    it.each(["file", "parent"])("rejects the alert 1039 %s link to /proc/self/environ before reading any bytes", kind => {
+      process.env.GH_AW_ASSETS_BRANCH = "assets/test";
+      const source = path.join(testWorkspaceDir, "leak.png");
+      if (kind === "file") fs.symlinkSync("/proc/self/environ", source);
+      else {
+        const external = fs.mkdtempSync(path.join(testScratchRoot, "external-proc-"));
+        fs.symlinkSync("/proc/self/environ", path.join(external, "leak.png"));
+        fs.symlinkSync(external, source, "dir");
       }
+      const requestedPath = kind === "file" ? source : path.join(source, "leak.png");
+      const opened = vi.spyOn(fs, "openSync");
+      const read = vi.spyOn(fs, "readSync");
+      const copied = vi.spyOn(fs, "copyFileSync");
+
+      expect(() => handlers.uploadAssetHandler({ path: requestedPath })).toThrow(expect.objectContaining({ code: "ERR_VALIDATION", message: expect.stringMatching(/^ERR_VALIDATION:.*symlinks/) }));
+      expect(opened.mock.calls.every(([, flags]) => (flags & fs.constants.O_DIRECTORY) !== 0)).toBe(true);
+      expect(read).not.toHaveBeenCalled();
+      expect(copied).not.toHaveBeenCalled();
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      expect(fs.existsSync(path.join(testRunnerTemp, "gh-aw", "safeoutputs", "assets"))).toBe(false);
+    });
+
+    it.each(["file", "parent"])("rejects a %s swapped to a symlink between inspection and open without reading bytes", kind => {
+      process.env.GH_AW_ASSETS_BRANCH = "assets/test";
+      const parent = path.join(testWorkspaceDir, "nested");
+      fs.mkdirSync(parent);
+      const source = path.join(parent, "chart.png");
+      fs.writeFileSync(source, "safe chart");
+      const originalOpen = fs.openSync;
+      let swapped = false;
+      vi.spyOn(fs, "openSync").mockImplementation((filename, ...args) => {
+        if (path.basename(String(filename)) === (kind === "file" ? "chart.png" : "nested")) {
+          swapped = true;
+          if (kind === "file") {
+            fs.unlinkSync(source);
+            fs.symlinkSync("/proc/self/environ", source);
+          } else {
+            fs.renameSync(parent, `${parent}-original`);
+            fs.symlinkSync("/proc/self", parent, "dir");
+          }
+        }
+        return originalOpen(filename, ...args);
+      });
+      const read = vi.spyOn(fs, "readSync");
+
+      expect(() => handlers.uploadAssetHandler({ path: source })).toThrow(expect.objectContaining({ code: "ERR_VALIDATION" }));
+      expect(swapped).toBe(true);
+      expect(read).not.toHaveBeenCalled();
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      expect(fs.existsSync(path.join(testRunnerTemp, "gh-aw", "safeoutputs", "assets"))).toBe(false);
+    });
+
+    it("rejects workspace and tmp prefix lookalikes", () => {
+      process.env.GH_AW_ASSETS_BRANCH = "assets/test";
+      for (const source of [`${testWorkspaceDir}-sibling/leak.png`, "/tmp-lookalike/leak.png"]) {
+        expect(() => handlers.uploadAssetHandler({ path: source })).toThrow("File path must be within workspace directory");
+      }
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it.each(["file", "parent"])("rejects a %s symlink in the staging destination", kind => {
+      process.env.GH_AW_ASSETS_BRANCH = "assets/test";
+      const source = path.join(testWorkspaceDir, "chart.png");
+      fs.writeFileSync(source, "safe chart");
+      const sentinel = path.join(testWorkspaceDir, "sentinel");
+      fs.writeFileSync(sentinel, "unchanged sentinel");
+      const assets = path.join(testRunnerTemp, "gh-aw", "safeoutputs", "assets");
+      fs.mkdirSync(path.dirname(assets), { recursive: true });
+      if (kind === "parent") fs.symlinkSync(testWorkspaceDir, assets, "dir");
+      else {
+        fs.mkdirSync(assets);
+        fs.symlinkSync(sentinel, path.join(assets, `${crypto.createHash("sha256").update(source).digest("hex")}.png`));
+      }
+
+      expect(() => handlers.uploadAssetHandler({ path: source })).toThrow(/symlinks are not allowed|EEXIST/);
+      if (kind === "parent") expect(() => handlers.uploadAssetHandler({ path: source })).toThrow(expect.objectContaining({ code: "ERR_VALIDATION", message: expect.stringMatching(/^ERR_VALIDATION:/) }));
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      expect(fs.readFileSync(sentinel, "utf8")).toBe("unchanged sentinel");
+    });
+
+    it("stages the exact hashed snapshot even if the source changes before staging", () => {
+      process.env.GH_AW_ASSETS_BRANCH = "assets/test";
+      const source = path.join(testWorkspaceDir, "chart.png");
+      fs.writeFileSync(source, "original chart");
+      const originalWrite = fs.writeFileSync;
+      const spy = vi.spyOn(fs, "writeFileSync").mockImplementation((filename, ...args) => {
+        if (typeof filename === "number") originalWrite(source, "replacement chart");
+        return originalWrite(filename, ...args);
+      });
+      try {
+        handlers.uploadAssetHandler({ path: source });
+      } finally {
+        spy.mockRestore();
+      }
+      const entry = mockAppendSafeOutput.mock.calls[0][0];
+      const staged = path.join(testRunnerTemp, "gh-aw", "safeoutputs", "assets", `${crypto.createHash("sha256").update(source).digest("hex")}.png`);
+      expect(fs.readFileSync(staged, "utf8")).toBe("original chart");
+      expect(entry.sha).toBe(crypto.createHash("sha256").update("original chart").digest("hex"));
+      expect(entry.size).toBe(Buffer.byteLength("original chart"));
     });
 
     it("should reject file with disallowed extension", () => {
@@ -770,7 +902,27 @@ describe("safe_outputs_handlers", () => {
 
       const args = { path: testFile };
 
-      expect(() => handlers.uploadAssetHandler(args)).toThrow("exceeds maximum allowed size");
+      expect(() => handlers.uploadAssetHandler(args)).toThrow(expect.objectContaining({ code: "ERR_VALIDATION", message: expect.stringMatching(/^ERR_VALIDATION:.*exceeds maximum allowed size/) }));
+    });
+
+    it.each(["read", "write"])("retains true %s I/O errors as ERR_SYSTEM", operation => {
+      process.env.GH_AW_ASSETS_BRANCH = "test-branch";
+      const source = path.join(testWorkspaceDir, "chart.png");
+      fs.writeFileSync(source, "safe");
+      vi.spyOn(fs, operation === "read" ? "readSync" : "writeFileSync").mockImplementation(() => {
+        throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      });
+      expect(() => handlers.uploadAssetHandler({ path: source })).toThrow(/^ERR_SYSTEM:.*permission denied/);
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it.each(["darwin", "win32"])("preserves unsupported %s platform validation errors", platform => {
+      process.env.GH_AW_ASSETS_BRANCH = "test-branch";
+      const source = path.join(testWorkspaceDir, "chart.png");
+      fs.writeFileSync(source, "safe");
+      vi.stubGlobal("process", new Proxy(process, { get: (target, key) => (key === "platform" ? platform : Reflect.get(target, key)) }));
+      expect(() => handlers.uploadAssetHandler({ path: source })).toThrow(expect.objectContaining({ code: "ERR_VALIDATION", message: expect.stringMatching(/^ERR_VALIDATION:.*requires Linux/) }));
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
     });
   });
 
@@ -3163,10 +3315,13 @@ describe("safe_outputs_handlers", () => {
         }
       });
 
-      it("rejects disallowed files introduced after the existing PR head", async () => {
+      it.each(["am", "bundle"])("rejects disallowed files introduced and reverted after the existing PR head despite YAML exclusions (%s)", async format => {
         const { repoDir } = createRepoWithDisallowedHistoryFile();
+        const workflowDir = path.join(repoDir, ".github/workflows/nested");
+        fs.mkdirSync(workflowDir, { recursive: true });
+        fs.writeFileSync(path.join(workflowDir, "omitted.yaml"), "name: excluded\n");
         fs.writeFileSync(path.join(repoDir, "agent.js"), "console.log('agent');\n");
-        execSync("git add agent.js", { cwd: repoDir, stdio: "pipe" });
+        execSync("git add .", { cwd: repoDir, stdio: "pipe" });
         execSync("git commit -m 'agent script'", { cwd: repoDir, stdio: "pipe" });
         execSync("git rm agent.js", { cwd: repoDir, stdio: "pipe" });
         execSync("git commit -m 'revert agent script'", { cwd: repoDir, stdio: "pipe" });
@@ -3174,7 +3329,7 @@ describe("safe_outputs_handlers", () => {
         process.env.GITHUB_BASE_REF = "main";
         process.env.GITHUB_WORKSPACE = repoDir;
         const localHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
-          push_to_pull_request_branch: { allowed_files: ["*.md"] },
+          push_to_pull_request_branch: { allowed_files: ["*.md"], excluded_files: ["*.yml", "*.yaml"], patch_format: format },
         });
         try {
           const result = await localHandlers.pushToPullRequestBranchHandler({ branch: "feature/work" });
@@ -3715,6 +3870,28 @@ describe("safe_outputs_handlers", () => {
   });
 
   describe("createIssueHandler", () => {
+    it.each([
+      [true, ["documentation", "automated"], "Same title", "duplicate_dropped"],
+      [true, ["automated"], "Same title", "success"],
+      [true, ["documentation", "automated"], "Different title", "success"],
+      [1, ["Documentation", "automated"], "Same titlf", "duplicate_dropped"],
+      [false, ["documentation", "automated"], "Different title", "duplicate_dropped"],
+      [false, ["automated"], "Different title", "success"],
+    ])("should combine MCP title %j and labels %j as AND filters for %s", (titleFilter, firstLabels, secondTitle, expected) => {
+      const h = createHandlers(mockServer, mockAppendSafeOutput, {
+        create_issue: {
+          deduplicate_by_title: titleFilter,
+          deduplicate_by_labels: [" documentation ", "automated", " "],
+          labels: ["automated"],
+        },
+      });
+
+      h.createIssueHandler({ title: "Same title", body: "First body", labels: firstLabels.filter(label => label !== "automated") });
+      const second = h.createIssueHandler({ title: secondTitle, body: "Second body", labels: ["documentation"] });
+
+      expect(JSON.parse(second.content[0].text).result).toBe(expected);
+    });
+
     it("should deduplicate against fallback title derived from first meaningful body line", () => {
       const h = createHandlers(mockServer, mockAppendSafeOutput, {
         create_issue: {
@@ -3808,6 +3985,22 @@ describe("safe_outputs_handlers", () => {
       const droppedEntry = mockAppendSafeOutput.mock.calls[1][0];
       expect(droppedEntry._dropped_duplicate_by_title).toBe(true);
       expect(droppedEntry.body).toContain("[Content too large, saved to file:");
+    });
+
+    it("keeps explicitly length-limited custom input fields inline", () => {
+      const payload = "A".repeat(70000);
+      const h = createHandlers(mockServer, mockAppendSafeOutput, {
+        publish_report: {
+          inputs: {
+            payload: { type: "string", maxLength: 100000 },
+          },
+        },
+      });
+
+      const response = h.defaultHandler("publish_report")({ payload });
+
+      expect(JSON.parse(response.content[0].text)).toEqual({ result: "success", output_id: outputId });
+      expect(mockAppendSafeOutput).toHaveBeenCalledExactlyOnceWith({ payload, type: "publish_report", output_id: JSON.parse(response.content[0].text).output_id });
     });
 
     it("should reject invalid deduplicate-by-title configuration", () => {
@@ -3912,13 +4105,17 @@ describe("safe_outputs_handlers", () => {
 
   describe("pushRepoMemoryHandler", () => {
     let memoryDir;
+    let restoreDescriptors;
 
     beforeEach(() => {
+      restoreDescriptors = simulateLinuxDescriptors(vi);
       const testId = Math.random().toString(36).substring(7);
       memoryDir = path.join(testScratchRoot, `test-repo-memory-${testId}`);
     });
 
     afterEach(() => {
+      restoreDescriptors?.();
+      vi.unstubAllGlobals();
       try {
         if (fs.existsSync(memoryDir)) {
           fs.rmSync(memoryDir, { recursive: true, force: true });
@@ -4921,7 +5118,7 @@ describe("safe_outputs_handlers", () => {
         });
         const result = wildcardHandlers.updateIssueHandler({ issue_number: 42, ...update });
         expect(result.isError).toBeUndefined();
-        expect(mockAppendSafeOutput).toHaveBeenCalledWith({ type: "update_issue", issue_number: 42, ...update });
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith({ type: "update_issue", issue_number: 42, ...update, output_id: outputId });
       }
     );
 

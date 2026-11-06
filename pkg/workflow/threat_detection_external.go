@@ -118,7 +118,6 @@ func buildThreatDetectionWorkflowData(data *WorkflowData, engineID string) *Work
 	if engineID == "" {
 		engineID = "claude"
 	}
-
 	detectionData := &WorkflowData{
 		AI:                   engineID,
 		ActionCache:          data.ActionCache,
@@ -143,6 +142,7 @@ func buildThreatDetectionWorkflowData(data *WorkflowData, engineID string) *Work
 			},
 		},
 	}
+	inheritTokenBrokerConfig(data, detectionData)
 	if isOTLPEnabled(data) {
 		detectionData.ExcludedEnv = append(detectionData.ExcludedEnv, otlpSandboxExcludedEnvVarNames...)
 	}
@@ -369,6 +369,7 @@ var declarableDetectionEngineIDs = []string{"copilot", "claude", "codex"}
 func (c *Compiler) resolveCustomEngineDetectionEngineID(engineID string) string {
 	if def := c.engineCatalog.Get(engineID); def != nil && def.DetectionEngine != "" {
 		if slices.Contains(declarableDetectionEngineIDs, def.DetectionEngine) {
+			threatLog.Printf("Engine definition %q declares detection-engine %q", engineID, def.DetectionEngine)
 			return def.DetectionEngine
 		}
 		threatLog.Printf("Engine definition %q declares an unsupported detection-engine %q; using %q instead", engineID, def.DetectionEngine, defaultThreatDetectionEngineID)
@@ -398,7 +399,9 @@ type externalDetectorPathSetup struct {
 // staged on the shared volume before AWF starts.
 func (c *Compiler) buildExternalDetectorPathSetup(data *WorkflowData, engineID string) externalDetectorPathSetup {
 	setup := externalDetectorPathSetup{}
+	threatLog.Printf("Building external detector path setup: engine=%s", engineID)
 	if isArcDindTopology(data) {
+		threatLog.Print("ARC/DinD topology detected, staging threat detection inputs on shared volume")
 		setup.hostSetup = `bash "${RUNNER_TEMP}/gh-aw/actions/stage_threat_detection_arc_dind.sh" stage`
 		setup.commandPrefix = `export PATH="${RUNNER_TEMP}/gh-aw/bin:$PATH" && `
 		if engineID == "codex" {
@@ -465,7 +468,7 @@ func (c *Compiler) buildInstallDetectionEngineForExternalDetectorStep(data *Work
 	threatDetectionData := buildExternalDetectorWorkflowData(data, engineID)
 
 	installSteps := engine.GetInstallationSteps(threatDetectionData)
-	filteredInstallSteps := make([]GitHubActionStep, 0, len(installSteps)+1)
+	filteredInstallSteps := make([]GitHubActionStep, 0, len(installSteps))
 	for _, step := range installSteps {
 		if isAWFBinaryInstallStep(step) {
 			continue
@@ -660,7 +663,7 @@ func (c *Compiler) buildExternalDetectorExecutionStep(data *WorkflowData) []stri
 		executionCondition += " && steps.detection_staging_reset.outcome == 'success'"
 	}
 	steps := []string{
-		"      - name: Execute threat detection with AWF\n",
+		"      - name: " + constants.ThreatDetectionExecutionStepName + "\n",
 		"        id: detection_agentic_execution\n",
 		fmt.Sprintf("        if: %s\n", executionCondition),
 		"        continue-on-error: true\n",
@@ -695,7 +698,7 @@ func (c *Compiler) buildExternalDetectorExecutionStep(data *WorkflowData) []stri
 		steps = append(steps, prefixed)
 	}
 
-	return steps
+	return append(c.buildTokenBrokerRequestStep(threatDetectionData, detectionExecutionCondition), steps...)
 }
 
 func codexAzureOIDCReflectionGuard() string {

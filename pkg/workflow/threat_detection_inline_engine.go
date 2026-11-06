@@ -165,6 +165,7 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 		}
 	}
 
+	steps = append(steps, c.buildTokenBrokerRequestStep(threatDetectionData, detectionExecutionCondition)...)
 	logFile := constants.ThreatDetectionLogPath
 	executionSteps := engine.GetExecutionSteps(threatDetectionData, logFile)
 	for _, step := range executionSteps {
@@ -179,6 +180,7 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 			if strings.Contains(line, "id: agentic_execution") {
 				isAWFExecutionStep = true
 				step = injectComponentExecutionStarted(step, "detection", detectionExecutionEvidencePath)
+				step = enforceEngineExecutionStepName(step, engine)
 				break
 			}
 		}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/stringutil"
+	"github.com/goccy/go-yaml"
 )
 
 // compiler_activation_outputs contains activation outputs, artifact upload wiring, and environment assembly.
@@ -190,6 +191,7 @@ func (c *Compiler) addActivationArtifactUploadStep(ctx *activationJobBuildContex
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/aw-prompts/user.txt\n")
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/aw-prompts/prompt-template.txt\n")
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/aw-prompts/prompt-import-tree.json\n")
+	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/aw-prompts/prompt-literal-values.json\n")
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/"+constants.GithubRateLimitsFilename.String()+"\n")
 	ctx.steps = append(ctx.steps, "            /tmp/gh-aw/base\n")
 	if len(ctx.data.AmbientFolders) > 0 {
@@ -337,7 +339,17 @@ func (c *Compiler) addActivationInfoArtifactUploadStep(ctx *activationJobBuildCo
 func (c *Compiler) buildActivationEnvironment(ctx *activationJobBuildContext) string {
 	if ctx.data.ManualApproval != "" {
 		compilerActivationJobLog.Print("Activation job uses manual-approval environment gate")
-		return "environment: " + stringutil.StripANSI(ctx.data.ManualApproval)
+		manualApproval := stringutil.StripANSI(ctx.data.ManualApproval)
+		var environmentConfig map[string]any
+		if err := yaml.Unmarshal([]byte(ctx.data.Environment), &environmentConfig); err == nil {
+			if environment, ok := environmentConfig["environment"].(map[string]any); ok {
+				environment["name"] = manualApproval
+				if updatedConfig, err := yaml.Marshal(environmentConfig); err == nil {
+					return c.indentYAMLLines(string(updatedConfig), "    ")
+				}
+			}
+		}
+		return "environment: " + manualApproval
 	}
 	return c.indentYAMLLines(ctx.data.Environment, "    ")
 }

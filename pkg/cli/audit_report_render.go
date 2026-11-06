@@ -29,6 +29,7 @@ func renderConsole(data AuditData, logsPath string) {
 	renderConsoleComparison(data.Comparison)
 	renderConsoleFingerprint(data.BehaviorFingerprint)
 	renderConsoleMetrics(data.Metrics)
+	renderConsoleRetries(data.Retries)
 	if data.Ledger != nil {
 		if data.Ledger.TransactionsAdded != nil {
 			fmt.Fprintf(os.Stderr, "  ledger: transactions_added=%d\n", *data.Ledger.TransactionsAdded)
@@ -47,6 +48,7 @@ func renderConsole(data AuditData, logsPath string) {
 	renderConsoleTokenUsage(data.FirewallTokenUsage)
 	renderConsoleDetectionModelUsage(data.DetectionModelUsage)
 	renderConsoleModelRouting(data.ModelRouting)
+	renderConsoleModelCatalog(data.ModelCatalog, data.EngineConfig)
 	renderConsoleModelEndpointMismatches(data.ModelEndpointMismatches)
 	renderConsoleGitHubAPIUsage(data.GitHubRateLimitUsage)
 	renderConsoleJobs(data.Jobs)
@@ -747,6 +749,18 @@ func renderConsolePolicyAndExperiments(data AuditData) {
 	}
 	renderConsoleExperiments(data.Experiments)
 	renderConsoleGraders(data.Graders)
+	renderConsoleEvals(data.Evals)
+}
+
+func renderConsoleEvals(evals *EvalsSummary) {
+	if evals == nil {
+		return
+	}
+	line := fmt.Sprintf("  evals: questions=%d yes=%d no=%d unknown=%d", evals.Questions, evals.Yes, evals.No, evals.Unknown)
+	if evals.ExecutionState != "" {
+		line += " execution=" + evals.ExecutionState
+	}
+	fmt.Fprintln(os.Stderr, line)
 }
 
 func renderConsoleGraders(graders *GradersData) {

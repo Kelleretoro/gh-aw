@@ -488,7 +488,10 @@ var safeOutputHandlers = []safeOutputHandlerDescriptor{
 			if !isSafeOutputHandlerEnabledAndUnstaged(safeOutputs, "MergePullRequest") {
 				return nil
 			}
-			return NewPermissionsContentsWritePRWrite()
+			permissions := NewPermissionsContentsWritePRWrite()
+			// Branch-policy check requirements are discovered at runtime.
+			permissions.Set(PermissionChecks, PermissionRead)
+			return permissions
 		},
 	},
 	{
@@ -509,9 +512,6 @@ var safeOutputHandlers = []safeOutputHandlerDescriptor{
 			}
 			if safeOutputs.PushToPullRequestBranch.AllowWorkflows {
 				permissions.Set(PermissionWorkflows, PermissionWrite)
-			}
-			if getCheckBranchProtection(safeOutputs.PushToPullRequestBranch) {
-				permissions.Set(PermissionAdministration, PermissionRead)
 			}
 			return permissions
 		},
@@ -800,6 +800,33 @@ func getHandlerGitHubApp(config *SafeOutputsConfig, fieldName string) *GitHubApp
 		return nil
 	}
 	return app
+}
+
+// getHandlerGitHubToken extracts the GitHub token from the handler config at the
+// given SafeOutputsConfig field using reflection. It first looks for a direct
+// GitHubToken field, then falls back to the embedded BaseSafeOutputConfig.GitHubToken.
+// Returns an empty string if no handler token is set.
+func getHandlerGitHubToken(config *SafeOutputsConfig, fieldName string) string {
+	field, ok := safeOutputPointerFieldValue(config, fieldName)
+	if !ok || field.IsNil() {
+		return ""
+	}
+	inner := field.Elem()
+	if !inner.IsValid() || inner.Kind() != reflect.Struct {
+		return ""
+	}
+	tokenField := inner.FieldByName("GitHubToken")
+	if !tokenField.IsValid() {
+		baseField := inner.FieldByName("BaseSafeOutputConfig")
+		if !baseField.IsValid() || baseField.Kind() != reflect.Struct {
+			return ""
+		}
+		tokenField = baseField.FieldByName("GitHubToken")
+	}
+	if !tokenField.IsValid() || tokenField.Kind() != reflect.String {
+		return ""
+	}
+	return tokenField.String()
 }
 
 func mergeSafeOutputFieldIfNil(result, imported *SafeOutputsConfig, fieldName string) {

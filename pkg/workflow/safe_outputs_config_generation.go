@@ -40,6 +40,7 @@ func generateSafeOutputsConfig(data *WorkflowData) (string, error) {
 	safeOutputsConfig := make(map[string]any)
 	addStandardHandlerConfigs(safeOutputsConfig, data)
 	if handlerConfig := buildCommentMemoryHandlerConfig(data.CommentMemoryConfig, data.SafeOutputs.Footer, data.SafeOutputs.BodyFooter); handlerConfig != nil {
+		delete(handlerConfig, "github-token")
 		safeOutputsConfig[commentMemoryHandlerKey] = handlerConfig
 	}
 
@@ -114,6 +115,16 @@ func addStandardHandlerConfigs(safeOutputsConfig map[string]any, data *WorkflowD
 		if handlerCfg == nil {
 			continue
 		}
+		// Credentials are only needed by the safe_outputs job, never by the agent.
+		delete(handlerCfg, "github-token")
+		delete(handlerCfg, "head-github-token")
+		if tools, ok := handlerCfg["tools"].(map[string]any); ok {
+			for _, tool := range tools {
+				if toolConfig, ok := tool.(map[string]any); ok {
+					delete(toolConfig, "github-token")
+				}
+			}
+		}
 		injectCurrentCheckoutPatchWorkspacePath(handlerName, handlerCfg, data)
 		injectCheckoutMapping(handlerName, handlerCfg, data)
 		excludeFiles := ParseStringArrayFromConfig(handlerCfg, "_protected_files_exclude", nil)
@@ -122,6 +133,7 @@ func addStandardHandlerConfigs(safeOutputsConfig map[string]any, data *WorkflowD
 		delete(handlerCfg, "_protected_files_exclude")
 		if _, hasProtectedFiles := handlerCfg["protected_files"]; hasProtectedFiles {
 			excludeNames, excludePaths := splitProtectedFilesExcludes(excludeFiles)
+			excludePaths = append(excludePaths, data.RepoProtectedFilesExclude...)
 			fullManifestFiles := getAllManifestFiles(engineManifestFiles...)
 			fullPathPrefixes := getProtectedPathPrefixes(engineManifestPathPrefixes...)
 			handlerCfg["protected_files"] = sliceutil.Exclude(fullManifestFiles, excludeNames...)
@@ -196,7 +208,7 @@ func addSafeJobsConfig(safeOutputsConfig map[string]any, jobs map[string]*SafeJo
 	safeOutputsConfigLog.Printf("Processing %d safe job configurations", len(jobs))
 	for jobName, jobConfig := range jobs {
 		safeOutputsConfigLog.Printf("Generating config for safe job: %s", jobName)
-		safeJobConfig := map[string]any{}
+		safeJobConfig := map[string]any{"supports_dependencies": false}
 		if jobConfig.Description != "" {
 			safeJobConfig["description"] = jobConfig.Description
 		}
@@ -255,6 +267,9 @@ func buildSafeOutputInputsConfig(inputs map[string]*InputDefinition) map[string]
 		}
 		if len(inputDef.Options) > 0 {
 			inputConfig["options"] = inputDef.Options
+		}
+		if inputDef.MaxLength != nil {
+			inputConfig["maxLength"] = *inputDef.MaxLength
 		}
 		inputsConfig[inputName] = inputConfig
 	}
@@ -378,6 +393,10 @@ func populateCustomJobToolProperties(properties map[string]any, inputs map[strin
 			property["type"] = "number"
 		default:
 			property["type"] = "string"
+		}
+
+		if inputDef.MaxLength != nil && (inputDef.Type == "" || inputDef.Type == "string") {
+			property["maxLength"] = *inputDef.MaxLength
 		}
 
 		if inputDef.Default != nil {

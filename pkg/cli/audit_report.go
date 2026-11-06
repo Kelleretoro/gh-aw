@@ -73,10 +73,13 @@ type AuditData struct {
 	OutcomeSummary             *OutcomeSummary          `json:"outcome_summary,omitempty"`
 	Experiments                *ExperimentData          `json:"experiments,omitempty"`
 	Graders                    *GradersData             `json:"graders,omitempty"`
+	Evals                      *EvalsSummary            `json:"evals,omitempty"`
 	Ledger                     *LedgerActivity          `json:"ledger,omitempty"`
 	WorkQueue                  *WorkQueueReport         `json:"work_queue,omitempty"`
 	Friction                   *FrictionCostSummary     `json:"friction,omitempty"`
 	EvidenceSearch             *AuditEvidenceSearch     `json:"evidence_search,omitempty"`
+	ModelCatalog               *AuditModelCatalog       `json:"model_catalog,omitempty"`
+	Retries                    *AuditRetrySummary       `json:"retries,omitempty"`
 }
 
 // AuditFinding represents a key insight discovered during audit
@@ -560,17 +563,15 @@ func assembleAuditData(inputs auditDataInputs) AuditData {
 	performanceMetrics := generatePerformanceMetrics(inputs.processedRun, metricsData, inputs.toolUsage)
 	chainMetrics := buildSafeOutputChainMetrics(run.LogsPath)
 	engineConfig := extractEngineConfigWithInferredEngine(run.LogsPath, inputs.inferredEngineID)
-	promptAnalysis := extractPromptAnalysis(run.LogsPath)
 	sessionAnalysis := buildSessionAnalysis(inputs.processedRun, inputs.metrics)
 	safeOutputSummary := buildSafeOutputSummary(inputs.createdItems, chainMetrics)
 	mcpServerHealth := buildMCPServerHealth(inputs.mcpToolUsage, inputs.processedRun.MCPFailures)
 
-	if auditReportLog.Enabled() {
-		auditReportLog.Printf("Built audit data: %d jobs, %d errors, %d tool types, %d findings, %d recommendations", len(inputs.jobs), len(inputs.errors), len(inputs.toolUsage), len(inputs.findings), len(inputs.recommendations))
-	}
+	logAssembledAuditData(inputs)
 
 	return AuditData{
 		SchemaVersion:           auditSchemaVersion,
+		Retries:                 readAuditRetrySummary(run.LogsPath),
 		Overview:                inputs.overview,
 		TaskDomain:              inputs.taskDomain,
 		BehaviorFingerprint:     inputs.behaviorFingerprint,
@@ -584,7 +585,7 @@ func assembleAuditData(inputs auditDataInputs) AuditData {
 		ObservabilityInsights:   inputs.observabilityInsights,
 		PerformanceMetrics:      performanceMetrics,
 		EngineConfig:            engineConfig,
-		PromptAnalysis:          promptAnalysis,
+		PromptAnalysis:          extractPromptAnalysis(run.LogsPath),
 		SessionAnalysis:         sessionAnalysis,
 		SafeOutputSummary:       safeOutputSummary,
 		MCPServerHealth:         mcpServerHealth,
@@ -608,6 +609,13 @@ func assembleAuditData(inputs auditDataInputs) AuditData {
 		CreatedItems:            inputs.createdItems,
 		Experiments:             inputs.expData,
 		Graders:                 extractGradersData(run.LogsPath),
+		Evals:                   buildEvalsSummary(run),
+	}
+}
+
+func logAssembledAuditData(inputs auditDataInputs) {
+	if auditReportLog.Enabled() {
+		auditReportLog.Printf("Built audit data: %d jobs, %d errors, %d tool types, %d findings, %d recommendations", len(inputs.jobs), len(inputs.errors), len(inputs.toolUsage), len(inputs.findings), len(inputs.recommendations))
 	}
 }
 

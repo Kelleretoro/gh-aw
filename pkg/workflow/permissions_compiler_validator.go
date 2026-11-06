@@ -58,7 +58,7 @@ var permissionsCompilerLog = logger.New("workflow:permissions_compiler_validator
 // permissions, GitHub App-only constraints, MCP app write restrictions, workflow_run
 // branch security, GitHub MCP toolset permissions, and the id-token write reminder.
 // It returns the parsed *Permissions for reuse in subsequent validation steps.
-func (c *Compiler) validatePermissions(workflowData *WorkflowData, markdownPath string) (*Permissions, error) {
+func (c *Compiler) validatePermissions(workflowData *WorkflowData, markdownPath string) (*Permissions, error) { //nolint:largefunc // Orchestrates the ordered permission validation pipeline.
 	// Use the cached *Permissions object when available to avoid repeated YAML parsing.
 	// CachedPermissions is populated by applyDefaults after all permission mutations are applied.
 	// Fall back to parsing from the raw string for code paths that bypass applyDefaults
@@ -187,6 +187,12 @@ func (c *Compiler) validatePermissions(workflowData *WorkflowData, markdownPath 
 	if err := validateCodexCopilotAwfVersion(workflowData); err != nil {
 		return nil, formatCompilerError(markdownPath, "error", err.Error(), err)
 	}
+	if err := validateTokenBrokerRequestPermissions(workflowData, workflowPermissions); err != nil {
+		return nil, formatCompilerError(markdownPath, "error", err.Error(), err)
+	}
+	if err := c.validateTokenBrokerInference(workflowData); err != nil {
+		return nil, formatCompilerError(markdownPath, "error", err.Error(), err)
+	}
 
 	workflowLog.Printf("Checking for id-token: write permission")
 	if level, exists := workflowPermissions.Get(PermissionIdToken); exists && level == PermissionWrite {
@@ -195,16 +201,18 @@ OIDC tokens can authenticate to cloud providers (AWS, Azure, GCP).
 Ensure proper audience validation and trust policies are configured.`
 		fmt.Fprintln(os.Stderr, formatCompilerMessage(markdownPath, "info", infoMsg))
 	}
-	if !c.quiet && shouldEmitCopilotRequestsEnableTip(workflowData, workflowPermissions) && !c.repositoryOwnerIsIndividualUser() {
-		if !c.copilotRequestsTipShown[markdownPath] {
-			if c.batchMode {
-				c.copilotTipNeeded = true
-			} else {
-				tipMsg := `Tip: set permissions.copilot-requests: write to use GitHub Actions token-based inference with the Copilot engine instead of a personal access token (COPILOT_GITHUB_TOKEN). This option requires that your organization has centralized Copilot billing enabled and may not be available in all organizations. To suppress this tip when using a PAT, set permissions.copilot-requests: none — see https://github.github.com/gh-aw/reference/billing/ for details.`
-				fmt.Fprintln(os.Stderr, formatCompilerMessage(markdownPath, "info", tipMsg))
-			}
-			c.copilotRequestsTipShown[markdownPath] = true
+	if (!c.quiet || c.batchMode) && shouldEmitCopilotRequestsEnableTip(workflowData, workflowPermissions) && !c.repositoryOwnerIsIndividualUser() {
+		if c.batchMode {
+			c.copilotTipNeeded = true
+		} else {
+			tipMsg := `Tip: set permissions.copilot-requests: write to use GitHub Actions token-based inference with the Copilot engine instead of a personal access token (COPILOT_GITHUB_TOKEN). This option requires that your organization has centralized Copilot billing enabled and may not be available in all organizations. To suppress this tip when using a PAT, set permissions.copilot-requests: none — see https://github.github.com/gh-aw/reference/billing/ for details.`
+			c.emitTipOnce(markdownPath, tipMsg)
 		}
+	}
+	if shouldWarnClaudeCopilotRequestsPermission(workflowData, workflowPermissions) {
+		warnMsg := `Claude engine with model-provider: github uses the COPILOT_GITHUB_TOKEN secret because this workflow does not grant permissions: { copilot-requests: write }. Personal access tokens may be rejected by the Copilot model catalog (401 from /models), which leaves Claude-on-Copilot without models. Set permissions: { copilot-requests: write } to use ${{ github.token }} instead — see https://github.github.com/gh-aw/reference/billing/ for details. To keep using COPILOT_GITHUB_TOKEN and silence this warning, set permissions.copilot-requests: none.`
+		fmt.Fprintln(os.Stderr, formatCompilerMessage(markdownPath, "warning", warnMsg))
+		c.IncrementWarningCount()
 	}
 
 	return workflowPermissions, nil
@@ -252,6 +260,25 @@ func shouldEmitCopilotRequestsEnableTip(workflowData *WorkflowData, workflowPerm
 		return false
 	}
 	if workflowData.EngineConfig == nil || workflowData.EngineConfig.ID != "copilot" {
+		return false
+	}
+	if level, exists := workflowPermissions.GetExplicit(PermissionCopilotRequests); exists && level == PermissionNone {
+		return false
+	}
+	return !workflowPermissions.HasCopilotRequestsWrite()
+}
+
+// shouldWarnClaudeCopilotRequestsPermission reports whether a Claude workflow that
+// resolves to the GitHub/Copilot provider falls back to the COPILOT_GITHUB_TOKEN
+// secret because permissions.copilot-requests: write is not granted.
+func shouldWarnClaudeCopilotRequestsPermission(workflowData *WorkflowData, workflowPermissions *Permissions) bool {
+	if workflowData == nil || workflowPermissions == nil {
+		return false
+	}
+	if ResolveEngineID(workflowData) != "claude" || tokenBrokerRequestEnabled(workflowData) {
+		return false
+	}
+	if NewClaudeEngine().ResolveLLMProvider(workflowData) != LLMProviderGitHub {
 		return false
 	}
 	if level, exists := workflowPermissions.GetExplicit(PermissionCopilotRequests); exists && level == PermissionNone {

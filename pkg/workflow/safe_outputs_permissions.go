@@ -88,14 +88,6 @@ func getPushFallbackAsPullRequest(config *PushToPullRequestBranchConfig) bool {
 	return *config.FallbackAsPullRequest
 }
 
-// getCheckBranchProtection returns the effective check-branch-protection setting (defaults to true).
-func getCheckBranchProtection(config *PushToPullRequestBranchConfig) bool {
-	if config == nil || config.CheckBranchProtection == nil {
-		return true // Default: check is enabled
-	}
-	return *config.CheckBranchProtection
-}
-
 // ComputePermissionsForSafeOutputs computes the minimal required permissions
 // based on the configured safe-outputs. This function is used by both the
 // consolidated safe outputs job and the conclusion job to ensure they only
@@ -159,8 +151,11 @@ func computePermissionsForSafeOutputs(safeOutputs *SafeOutputsConfig, excludePer
 		if handler.PermissionBuilder == nil {
 			continue
 		}
-		if excludePerHandlerApps && handler.StructField != "" && getHandlerGitHubApp(safeOutputs, handler.StructField) != nil {
-			continue
+		if excludePerHandlerApps && handler.StructField != "" {
+			if getHandlerGitHubApp(safeOutputs, handler.StructField) != nil ||
+				getHandlerGitHubToken(safeOutputs, handler.StructField) != "" {
+				continue
+			}
 		}
 		handlerPermissions := computeSafeOutputHandlerPermissions(safeOutputs, handler)
 		if handlerPermissions == nil {
@@ -319,7 +314,11 @@ func computeDispatchRepositoryPermissions(safeOutputs *SafeOutputsConfig, exclud
 		if tool == nil || isHandlerStaged(globalStaged, tool.Staged) {
 			continue
 		}
-		if excludePerToolApps && tool.GitHubApp != nil {
+		// A per-tool github-app or github-token override means the runtime handler
+		// authenticates this dispatch with its own credential (see dispatch_repository.cjs,
+		// which calls createAuthenticatedGitHubClient(toolConfig)), so it must not also
+		// contribute contents: write to the global safe-outputs App mint (GP5b rule 1).
+		if excludePerToolApps && (tool.GitHubApp != nil || tool.GitHubToken != "") {
 			continue
 		}
 		if permissions == nil {

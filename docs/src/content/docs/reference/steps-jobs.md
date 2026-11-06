@@ -38,6 +38,15 @@ Set an explicit `repositories` input and `permission-*` inputs for every `action
 
 Use pre-steps when later checkout or setup must consume outputs from a step in the same job.
 
+For compiler-managed token wiring, give the official
+`actions/create-github-app-token` action the reserved `id: create-token`. The compiler
+recognizes only that action with this ID; third-party and similarly named actions do not
+trigger token wiring or automatic OIDC permissions. It prefers the step's output for
+compiler-owned default GitHub token bindings that run later in the same generated job.
+Authored step environments and explicitly configured credentials are left unchanged. The
+compiler also adds `id-token: write` to the minting job unless `id-token: none` is explicitly
+configured or `safe-outputs.id-token: none` disables automatic grants.
+
 ```yaml wrap
 permissions:
   contents: read
@@ -66,6 +75,8 @@ steps:
 ```
 
 Use custom steps to precompute data, filter triggers, or prepare context for AI agents. Steps can also short-circuit the agent by writing a `noop` entry to `$GH_AW_SAFE_OUTPUTS` — the harness detects this at startup and exits cleanly without incurring any AI inference cost. See [Skip the Agent When It Is Not Needed](/gh-aw/reference/cost-management/#skip-the-agent-when-it-is-not-needed) for details.
+
+See [Checkout and Host Step Order](/gh-aw/reference/checkout/#checkout-and-host-step-order) for checkout ordering, untrusted-ref warnings, and safe handling of fetched refs.
 
 ## Custom Pre-Agent Steps (`pre-agent-steps:`)
 
@@ -117,7 +128,9 @@ jobs:
       - run: echo "${{ needs.agent.result }} ${{ needs.detection.result }} ${{ needs.safe_outputs.outputs.created_issue_number }}"
 ```
 
-The compiler adds `detection` to `needs` if needed and preserves the authored `if`, but rejects the opt-out if the job downloads artifacts, calls an opaque reusable workflow, reads outputs other than those of detection-gated compiler-owned jobs (such as `safe_outputs`), or references `GH_AW_AGENT_OUTPUT` or agent/safe-output files in `env` or `run`. Other custom jobs cannot depend on a job using this option. The `detection-gate` key is compiler-only and is not emitted in the Actions workflow. See [Custom job detection gates](/gh-aw/reference/workflow-linters/#custom-job-detection-gates).
+The compiler adds `detection` to `needs` if needed and preserves the authored `if`. The job may read outputs from detection-gated compiler-owned jobs (such as `safe_outputs`) and authored custom jobs that the dependency graph proves run before `agent`, with no direct or transitive dependency on `agent` or `detection`. This allows a reporter to use pre-agent metadata, such as a validated PR number and head SHA, even when detection fails. Declare each metadata job as a direct dependency in the reporter's `needs`, then pass its outputs through `env`; do not interpolate custom outputs directly into `run` or `actions/github-script` code.
+
+The compiler rejects the opt-out if the job downloads artifacts, calls an opaque reusable workflow, reads other job outputs, or references `GH_AW_AGENT_OUTPUT` or agent/safe-output files in `env` or `run`. Other custom jobs cannot depend on a job using this option. The `detection-gate` key is compiler-only and is not emitted in the Actions workflow. See [Custom job detection gates](/gh-aw/reference/workflow-linters/#custom-job-detection-gates).
 
 ```yaml wrap
 jobs:
@@ -186,6 +199,8 @@ Use this map to see where compiler-inserted steps land for each job type.
 5. `jobs.<job-id>.steps`
 
 Set `jobs.<job-id>.restore-memory: true` to restore any configured `cache-memory`, `repo-memory`, and `comment-memory` stores before deterministic job steps run. This surface is read-only: gh-aw injects restore/clone/prepare steps, but never emits cache save, repo push, or safe-output write-back steps for custom jobs.
+
+Custom jobs can depend on generated post-agent maintenance jobs when the corresponding feature is enabled. For example, with `tools.repo-memory` configured, `needs: [push_repo_memory]` runs a custom job after the agent and the repo-memory push, without listing `agent` explicitly. Other post-agent maintenance job IDs are `update_cache_memory`, `update_drive_memory`, `push_ledger_changes`, and `push_evals_state`. Experiment persistence (`push_experiments_state`) runs after activation rather than after the agent.
 
 ### Built-in jobs
 
@@ -284,7 +299,21 @@ jobs:
 Generate highlights for release ${{ needs.release.outputs.version }}.
 ```
 
-Job outputs must be string values.
+Job outputs must be string values. Quote literals that YAML would otherwise
+interpret as booleans, numbers, or null, and use `''` for an empty string:
+
+```yaml
+outputs:
+  actor_trusted: 'true'
+  count: '42'
+  missing: 'null'
+  empty: ''
+```
+
+The compiler preserves these string values in the generated workflow for custom
+jobs, `pre_activation` (also spelled `pre-activation`), and custom safe-output
+jobs. Expressions such as `${{ steps.get_release.outputs.version }}` retain
+their expression syntax.
 
 ## Learn More
 

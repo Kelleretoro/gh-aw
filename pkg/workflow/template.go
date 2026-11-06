@@ -10,6 +10,7 @@ import (
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
 	"github.com/github/gh-aw/pkg/setutil"
+	"github.com/github/gh-aw/pkg/workflow/actionslanguageservice"
 )
 
 var templateLog = logger.New("workflow:template")
@@ -22,18 +23,13 @@ var inlineSubAgentPattern = regexp.MustCompile("(?m)^##[ \t]+agent:[ \t]+`[a-z][
 func wrapExpressionsInTemplateConditionals(markdown string) string {
 	templateLog.Print("Wrapping expressions in template conditionals")
 
-	// wrapTagExpr applies the wrapping logic to a single extracted expression and
-	// returns the full reconstructed tag. re must be the same regex that produced
-	// match (so FindStringSubmatch reliably extracts capture group 1 = the expression).
-	// prefix is the canonical opening tag text without the expression
-	// (e.g. "{{#if " or "{{#elseif "), used to rebuild the output tag.
-	wrapTagExpr := func(re *regexp.Regexp, match, prefix string) string {
+	wrapTagExpr := func(re conditionalPattern, match, prefix string, codeExample bool) string {
 		submatches := re.FindStringSubmatch(match)
 		if len(submatches) < 2 {
 			return match
 		}
 
-		expr := strings.TrimSpace(submatches[1])
+		expr := strings.TrimSpace(submatches[1]) //nolint:uncheckedsliceindex // The capture count is checked immediately above.
 
 		// Empty expressions are treated as false and wrapped as such
 		if expr == "" {
@@ -58,23 +54,26 @@ func wrapExpressionsInTemplateConditionals(markdown string) string {
 			templateLog.Print("Placeholder reference detected, skipping wrap")
 			return match
 		}
+		if codeExample {
+			if _, err := actionslanguageservice.ParseSyntax(applyContentTransformers(expr, defaultContentTransformers)); err != nil {
+				return match
+			}
+		}
 
 		templateLog.Printf("Wrapping expression: %s", expr)
 		return prefix + "${{ " + expr + " }} }}"
 	}
 
 	// Process {{#if ...}} tags
-	result := TemplateIfPattern.ReplaceAllStringFunc(markdown, func(match string) string {
-		return wrapTagExpr(TemplateIfPattern, match, "{{#if ")
+	ifPattern := conditionalPattern{TemplateIfPattern}
+	elseIfPattern := conditionalPattern{TemplateElseIfPattern}
+	result := replaceConditionalTags(markdown, ifPattern, func(match string, codeExample bool) string {
+		return wrapTagExpr(ifPattern, match, "{{#if ", codeExample)
 	})
 
 	// Process all elseif variant tags — normalise to canonical {{#elseif ...}} form after wrapping
-	result = TemplateElseIfPattern.ReplaceAllStringFunc(result, func(match string) string {
-		submatches := TemplateElseIfPattern.FindStringSubmatch(match)
-		if len(submatches) < 2 {
-			return match
-		}
-		wrapped := wrapTagExpr(TemplateElseIfPattern, match, "{{#elseif ")
+	result = replaceConditionalTags(result, elseIfPattern, func(match string, codeExample bool) string {
+		wrapped := wrapTagExpr(elseIfPattern, match, "{{#elseif ", codeExample)
 		// If the original tag used a non-canonical form (else-if / else_if / without #),
 		// the prefix replacement above already normalises it to {{#elseif ...}}.
 		return wrapped
@@ -123,11 +122,11 @@ func (c *Compiler) generateInterpolationAndTemplateStep(yaml *strings.Builder, e
 		len(expressionMappings), hasTemplatePattern, hasGitHubContext, hasInlineSubAgents, hasRuntimeImports)
 
 	yaml.WriteString("      - name: Interpolate variables and render templates\n")
-	fmt.Fprintf(yaml, "        uses: %s\n", getCachedActionPin("actions/github-script", data))
+	fmt.Fprintf(yaml, "        uses: %s\n", getCachedActionPin("actions/github-script", data)) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 	yaml.WriteString("        env:\n")
-	fmt.Fprintf(yaml, "          GH_AW_PROMPT: %s\n", constants.AwPromptsFileExpr)
+	fmt.Fprintf(yaml, "          GH_AW_PROMPT: %s\n", constants.AwPromptsFileExpr) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 	if data.EngineConfig != nil && data.EngineConfig.ID != "" {
-		fmt.Fprintf(yaml, "          GH_AW_ENGINE_ID: \"%s\"\n", data.EngineConfig.ID)
+		fmt.Fprintf(yaml, "          GH_AW_ENGINE_ID: \"%s\"\n", data.EngineConfig.ID) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 	}
 	engineID := resolveActivationEngineID(data)
 	baseDir := engineConfigBaseDirForRegistry(c.engineRegistry, engineID)
@@ -144,7 +143,7 @@ func (c *Compiler) generateInterpolationAndTemplateStep(yaml *strings.Builder, e
 		}
 		seen[mapping.EnvVar] = struct{}{}
 
-		yaml.WriteString("          " + mapping.EnvVar + ": " + mapping.environmentValue() + "\n")
+		writeYAMLEnv(yaml, "          ", mapping.EnvVar, mapping.environmentValue())
 	}
 
 	yaml.WriteString("        with:\n")
@@ -155,5 +154,9 @@ func (c *Compiler) generateInterpolationAndTemplateStep(yaml *strings.Builder, e
 	yaml.WriteString("            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');\n")
 	yaml.WriteString("            setupGlobals(core, github, context, exec, io, getOctokit);\n")
 	yaml.WriteString("            const { main } = require('${{ runner.temp }}/gh-aw/actions/interpolate_prompt.cjs');\n")
-	yaml.WriteString("            await main();\n")
+	if options := promptInterpolationOptions(expressionMappings); options != "" {
+		yaml.WriteString("            await main({ " + options + " });\n")
+	} else {
+		yaml.WriteString("            await main();\n")
+	}
 }

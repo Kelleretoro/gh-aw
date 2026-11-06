@@ -13,8 +13,11 @@ const { getCurrentBranch } = require("./get_current_branch.cjs");
 const { getBaseBranch } = require("./get_base_branch.cjs");
 const { lookupCheckout } = require("./checkout_manifest.cjs");
 const { generateGitPatch } = require("./generate_git_patch.cjs");
+const { getExcludedFiles, WORKFLOW_COMPILATION_NOTICE } = require("./workflow_file_exclusions.cjs");
 const { generateGitBundle } = require("./generate_git_bundle.cjs");
-const { hasMergeCommitsInRange, execGitSync, ensureSafeDirectoryTrust } = require("./git_helpers.cjs");
+const { createObjectPack, canRecoverPatch, traceObjectPack } = require("./object_pack_transport.cjs");
+const { isStagedMode } = require("./safe_output_helpers.cjs");
+const { hasMergeCommitsInRange, execLocalGitSync: execGitSync, ensureSafeDirectoryTrust, stageRawGitFiles } = require("./git_helpers.cjs");
 const { enforceCommentLimits, MAX_COMMENT_INPUT_LENGTH } = require("./comment_limit_helpers.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { ERR_CONFIG, ERR_PARSE, ERR_SYSTEM, ERR_VALIDATION } = require("./error_codes.cjs");
@@ -22,19 +25,21 @@ const { findRepoCheckout } = require("./find_repo_checkout.cjs");
 const { resolveTargetRepoConfig, resolveAndValidateRepo, isSideRepoTarget, patchWorkspaceTargetsRepo } = require("./repo_helpers.cjs");
 const { generateTemporaryId, getOrGenerateTemporaryId } = require("./temporary_id.cjs");
 const { parseAllowedExtensionsEnv } = require("./allowed_extensions_helpers.cjs");
-const { getStagedPatchDiffSizeBytes } = require("./git_patch_utils.cjs");
+const { buildExcludePathspecs, getStagedPatchDiffSizeBytes } = require("./git_patch_utils.cjs");
 const { sanitizeTitle, applyTitlePrefix } = require("./sanitize_title.cjs");
-const { parseDeduplicateByTitle, normalizeTitleForDedup, findDuplicateByTitle } = require("./issue_title_dedup.cjs");
+const { parseDeduplicateByTitle, normalizeTitleForDedup, normalizeDeduplicationLabels, hasDeduplicationLabels, findDuplicateIssue } = require("./issue_title_dedup.cjs");
+const { sanitizeLabelContent } = require("./sanitize_label_content.cjs");
 const { isProbingNoopMessage, validateCreatePullRequestIntent, validatePushToPullRequestBranchIntent, validateCreateIssueIntent, validateAddCommentIntent } = require("./intent_probe.cjs");
 const { globPatternToRegex } = require("./glob_pattern_helpers.cjs");
 const { resolveInvocationContext } = require("./invocation_context_helpers.cjs");
-const { lstatGuard } = require("./symlink_guard.cjs");
+const { lstatGuard, normalizeGuardedPath, readGuardedFile, writeGuardedFile } = require("./symlink_guard.cjs");
 const { validateValueAgainstSchema } = require("./schema-validation.cjs");
 const { resolveDataSchema } = require("./data_schema_normalizer.cjs");
 const { normalizeBlankOptionalFields } = require("./optional_field_normalizer.cjs");
 const { clearValidationMarker, formatJSONFiles, runCustomMemoryValidation, writeValidationMarker } = require("./memory_custom_validation.cjs");
 const { compileFileGlobPatterns, isMemoryFileEligible } = require("./memory_file_eligibility.cjs");
 const { normalizeRuntimeMessage, readClaimScopeContext, withClaimExecution, currentClaimHandle, claimArtifactPath } = require("./work_queue_claim_scope.cjs");
+const { createSubmissionTracker, isDependencyUnsupportedType } = require("./safe_output_submission.cjs");
 
 function createEligibleMemoryValidationView(memoryDir, isEligibleFile) {
   let validationDir;
@@ -440,6 +445,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
    * @type {Map<string, number>}
    */
   const operationCounts = new Map();
+  const submissions = createSubmissionTracker();
   const uploadedAssetPaths = new Set();
   const scopedKey = value => JSON.stringify([currentClaimHandle() || null, value]);
 
@@ -519,8 +525,36 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     }
     const type = entry?.type;
     if (type) enforcePerTypeMax(type);
-    appendSafeOutput(entry);
+    submissions.append(entry, appendSafeOutput);
     if (type) operationCounts.set(scopedKey(type), (operationCounts.get(scopedKey(type)) || 0) + 1);
+  };
+
+  const queueObjectRecovery = (entry, repo, tip, options, toolConfig) => {
+    const staged = isStagedMode({ ...config, ...toolConfig });
+    traceObjectPack("queue-resolution", { pinned: !!tip, staged, incremental: options.mode === "incremental", eligible: !!tip && !staged });
+    if (!tip || staged) return null;
+    let artifact;
+    try {
+      artifact = createObjectPack(entry.branch, repo, tip, options);
+    } catch {
+      traceObjectPack("queue-failed");
+      return null;
+    }
+    appendSafeOutputCounted(entry);
+    traceObjectPack("queued");
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            result: "queued",
+            recovery: "object-pack",
+            size: artifact.size,
+            details: "Local objects were packaged without fetching. The safe-outputs publisher must recover the trusted baseline and validate all policies before publishing; publication is not yet guaranteed.",
+          }),
+        },
+      ],
+    };
   };
 
   /**
@@ -569,9 +603,13 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     let largeContent = null;
     /** @type {any} */
     let largeFieldName = null;
+    const configuredInputs = getSafeOutputsToolConfig(config, entry.type).inputs || {};
 
     for (const [key, value] of Object.entries(entry)) {
       if (typeof value === "string") {
+        if (typeof configuredInputs[key]?.maxLength === "number") {
+          continue;
+        }
         const tokens = estimateTokens(value);
         if (tokens > TOKEN_THRESHOLD) {
           largeContent = value;
@@ -690,6 +728,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
   };
 
   const createIssueConfig = config.create_issue || {};
+  const deduplicateByLabels = normalizeDeduplicationLabels(createIssueConfig.deduplicate_by_labels);
   let deduplicateByTitle = { enabled: false, maxDistance: 0 };
   try {
     deduplicateByTitle = parseDeduplicateByTitle(createIssueConfig.deduplicate_by_title);
@@ -714,12 +753,16 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     const { path: filePath } = args;
 
     // Validate file path is within allowed directories
-    const absolutePath = path.resolve(filePath);
+    const absolutePath = normalizeGuardedPath(filePath);
     const workspaceDir = process.env.GITHUB_WORKSPACE || process.cwd();
     const tmpDir = "/tmp";
 
-    const isInWorkspace = absolutePath.startsWith(path.resolve(workspaceDir));
-    const isInTmp = absolutePath.startsWith(tmpDir);
+    const isWithin = root => {
+      const relative = path.relative(normalizeGuardedPath(root), absolutePath);
+      return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+    };
+    const isInWorkspace = isWithin(workspaceDir);
+    const isInTmp = isWithin(tmpDir);
 
     if (!isInWorkspace && !isInTmp) {
       throw new Error(`${ERR_CONFIG}: File path must be within workspace directory (${workspaceDir}) or /tmp directory. ` + `Provided path: ${filePath} (resolved to: ${absolutePath})`);
@@ -728,26 +771,8 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       throw new Error(`${ERR_VALIDATION}: Duplicate upload_asset source path is not allowed: ${filePath}`);
     }
 
-    // Validate file exists
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`${ERR_SYSTEM}: File not found: ${filePath}`);
-    }
-
-    // Get file stats
-    let stats;
-    try {
-      stats = fs.statSync(filePath);
-    } catch (err) {
-      throw new Error(`${ERR_SYSTEM}: Failed to inspect file ${filePath}: ${getErrorMessage(err)}`, { cause: err });
-    }
-    const sizeBytes = stats.size;
-    const sizeKB = Math.ceil(sizeBytes / 1024);
-
     // Check file size - read from environment variable if available
-    const maxSizeKB = process.env.GH_AW_ASSETS_MAX_SIZE_KB ? parseInt(process.env.GH_AW_ASSETS_MAX_SIZE_KB, 10) : 10240; // Default 10MB
-    if (sizeKB > maxSizeKB) {
-      throw new Error(`${ERR_VALIDATION}: File size ${sizeKB} KB exceeds maximum allowed size ${maxSizeKB} KB`);
-    }
+    const maxSizeKB = process.env.GH_AW_ASSETS_MAX_SIZE_KB ? Number(process.env.GH_AW_ASSETS_MAX_SIZE_KB) : 10240; // Default 10MB
 
     // Check file extension - read from environment variable if available
     const ext = path.extname(filePath).toLowerCase();
@@ -772,21 +797,16 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     // the artifact-upload step), matching the same pattern used by upload_artifact.
     const assetsRoot = path.join(process.env.RUNNER_TEMP || "/tmp", "gh-aw", "safeoutputs", "assets");
     const assetsDir = currentClaimHandle() ? claimArtifactPath(assetsRoot, currentClaimHandle()) : assetsRoot;
-    if (!fs.existsSync(assetsDir)) {
-      try {
-        fs.mkdirSync(assetsDir, { recursive: true });
-      } catch (err) {
-        throw new Error(`${ERR_SYSTEM}: Failed to create directory ${assetsDir}: ${getErrorMessage(err)}`, { cause: err });
-      }
-    }
-
     // Read file and compute hash
     let fileContent;
     try {
-      fileContent = fs.readFileSync(filePath);
+      fileContent = readGuardedFile(absolutePath, maxSizeKB * 1024);
     } catch (err) {
+      if (err && typeof err === "object" && "code" in err && err.code === ERR_VALIDATION) throw err;
+      if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") throw new Error(`${ERR_SYSTEM}: File not found: ${filePath}`, { cause: err });
       throw new Error(`${ERR_SYSTEM}: Failed to read file ${filePath}: ${getErrorMessage(err)}`, { cause: err });
     }
+    const sizeBytes = fileContent.length;
     const sha = crypto.createHash("sha256").update(fileContent).digest("hex");
 
     // Extract filename and extension
@@ -798,8 +818,9 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     const stagedFileName = `${crypto.createHash("sha256").update(filePath).digest("hex")}${fileExt}`;
     const targetPath = path.join(assetsDir, stagedFileName);
     try {
-      fs.copyFileSync(filePath, targetPath);
+      writeGuardedFile(targetPath, fileContent);
     } catch (err) {
+      if (err && typeof err === "object" && "code" in err && err.code === ERR_VALIDATION) throw err;
       throw new Error(`${ERR_SYSTEM}: Failed to copy file ${filePath} to ${targetPath}: ${getErrorMessage(err)}`, { cause: err });
     }
 
@@ -1096,11 +1117,6 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     if (repoCwd) {
       transportOptions.cwd = repoCwd;
     }
-    // Pass per-handler token so cross-repo PATs are used for git fetch when configured.
-    // Falls back to GITHUB_TOKEN if not set.
-    if (prConfig["github-token"]) {
-      transportOptions.token = prConfig["github-token"];
-    }
 
     // SECURITY: Pin the branch ref to a SHA before generating any transport artifacts.
     // This prevents TOCTOU races where the agent flips the ref between patch and bundle
@@ -1125,21 +1141,24 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     // even when bundle transport is selected for apply-time commit transport.
     server.debug(`Generating patch for create_pull_request with branch: ${entry.branch}${repoCwd ? ` in ${repoCwd} baseBranch: ${baseBranch}` : ""}`);
     /** @type {Record<string, any>} */
-    const patchOptions = { ...transportOptions };
+    const patchOptions = { ...transportOptions, baseBranch };
     if (patchWorkspaceMatchesTargetRepo) {
       patchOptions.workspacePath = patchWorkspacePath;
     }
     // Pass excluded_files so git excludes them via :(exclude) pathspecs at generation time.
-    if (Array.isArray(prConfig.excluded_files) && prConfig.excluded_files.length > 0) {
-      patchOptions.excludedFiles = prConfig.excluded_files;
-    }
+    patchOptions.excludedFiles = getExcludedFiles(prConfig);
     // Pass pinnedSha so patch generation uses the pinned commit, not a potentially-flipped ref
     if (pinnedSha) {
       patchOptions.pinnedSha = pinnedSha;
     }
     const patchResult = await generateGitPatch(entry.branch, baseBranch, patchOptions);
+    traceObjectPack("offline-result", { success: patchResult.success, incremental: false });
 
     if (!patchResult.success) {
+      if (canRecoverPatch(patchResult)) {
+        const queued = queueObjectRecovery(entry, repoResult.repo, pinnedSha, patchOptions, prConfig);
+        if (queued) return queued;
+      }
       // Patch generation failed or patch is empty
       const errorMsg = patchResult.error || "Failed to generate patch";
       server.debug(`Patch generation failed: ${errorMsg}`);
@@ -1174,16 +1193,19 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     if (patchResult.baseCommit) {
       entry.base_commit = patchResult.baseCommit;
     }
+    if (patchResult.excludedWorkflowFiles?.length > 0) {
+      entry.body = `${WORKFLOW_COMPILATION_NOTICE}\n\n${entry.body || ""}`;
+    }
 
     if (useBundle) {
       // Bundle transport: preserves merge commits and per-commit metadata
       server.debug(`Generating bundle for create_pull_request with branch: ${entry.branch}${repoCwd ? ` in ${repoCwd} baseBranch: ${baseBranch}` : ""}`);
-      if (Array.isArray(prConfig.excluded_files) && prConfig.excluded_files.length > 0) {
-        transportOptions.excludedFiles = prConfig.excluded_files;
-      }
+      transportOptions.excludedFiles = getExcludedFiles(prConfig);
       const bundleResult = await generateGitBundle(entry.branch, baseBranch, transportOptions);
 
       if (!bundleResult.success) {
+        const queued = queueObjectRecovery(entry, repoResult.repo, pinnedSha, patchOptions, prConfig);
+        if (queued) return queued;
         const errorMsg = bundleResult.error || "Failed to generate bundle";
         server.debug(`Bundle generation failed: ${errorMsg}`);
         return {
@@ -1501,6 +1523,8 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     }
 
     const prHeadBaseline = resolvePRHeadBaselineForPush(entry.branch, itemRepo, effectivePushPRNumber, server);
+    const pushRecoveryAllowed = context.payload?.pull_request?.number === effectivePushPRNumber && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(context.payload?.pull_request?.head?.sha || "");
+    traceObjectPack("target-resolution", { eligible: pushRecoveryAllowed, incremental: true });
     const incrementalBaseRef = prHeadBaseline?.sha || prHeadBaseline?.ref || `refs/remotes/origin/${entry.branch}`;
     if (prHeadBaseline?.headRepo && prHeadBaseline.headRepo.toLowerCase() !== itemRepo.toLowerCase() && prHeadBaseline.headRepo.toLowerCase() !== configuredHeadRepo.toLowerCase()) {
       return {
@@ -1518,7 +1542,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     }
 
     // Build common options for both patch and bundle generation
-    const pushTransportOptions = { mode: "incremental", repoSlug: repoResult.repo };
+    const pushTransportOptions = { mode: "incremental", repoSlug: repoResult.repo, baseBranch };
     if (prHeadBaseline) {
       if (prHeadBaseline.ref) {
         pushTransportOptions.incrementalBaseRef = prHeadBaseline.ref;
@@ -1529,11 +1553,6 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     }
     if (repoCwd) {
       pushTransportOptions.cwd = repoCwd;
-    }
-    // Pass per-handler token so cross-repo PATs are used for git fetch when configured.
-    // Falls back to GITHUB_TOKEN if not set.
-    if (pushConfig["github-token"]) {
-      pushTransportOptions.token = pushConfig["github-token"];
     }
 
     // Determine transport format: "bundle" (default) uses git bundle (preserves merge topology),
@@ -1620,7 +1639,10 @@ function createHandlers(server, appendSafeOutput, config = {}) {
         if (!pushPinnedSha) {
           server.debug("Incremental allowed-files check skipped: branch SHA not pinned (non-bundle path)");
         } else {
-          const agentFiles = execGitSync(["log", "--ancestry-path", "--name-only", "--pretty=format:", `${incrementalBaseRef}..${pushPinnedSha}`, "--"], { cwd: pushGitCwd })
+          // Use the transport's Git pathspecs so only files actually retained in
+          // the generated changeset are subject to the allowlist.
+          const excludedPathspecs = buildExcludePathspecs(getExcludedFiles(pushConfig));
+          const agentFiles = execGitSync(["log", "--ancestry-path", "--name-only", "--pretty=format:", `${incrementalBaseRef}..${pushPinnedSha}`, "--", ...excludedPathspecs.slice(1)], { cwd: pushGitCwd })
             .toString()
             .split("\n")
             .map(s => s.trim())
@@ -1628,12 +1650,8 @@ function createHandlers(server, appendSafeOutput, config = {}) {
 
           if (agentFiles.length > 0) {
             const allowedPatterns = pushConfig.allowed_files.map(p => globPatternToRegex(p));
-            // Files matching excluded_files are intentionally exempt: they will be stripped
-            // from the patch at generation time via :(exclude) pathspecs, so they won't be
-            // present in the final changeset applied to the branch.
-            const excludedPatterns = Array.isArray(pushConfig.excluded_files) ? pushConfig.excluded_files.map(p => globPatternToRegex(p)) : [];
             const uniqueFiles = [...new Set(agentFiles)];
-            const disallowedFiles = uniqueFiles.filter(f => !allowedPatterns.some(re => re.test(f)) && !excludedPatterns.some(re => re.test(f)));
+            const disallowedFiles = uniqueFiles.filter(f => !allowedPatterns.some(re => re.test(f)));
 
             if (disallowedFiles.length > 0) {
               const sample = disallowedFiles.slice(0, 5);
@@ -1674,16 +1692,19 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       pushPatchOptions.workspacePath = pushPatchWorkspacePath;
     }
     // Pass excluded_files so git excludes them via :(exclude) pathspecs at generation time.
-    if (Array.isArray(pushConfig.excluded_files) && pushConfig.excluded_files.length > 0) {
-      pushPatchOptions.excludedFiles = pushConfig.excluded_files;
-    }
+    pushPatchOptions.excludedFiles = getExcludedFiles(pushConfig);
     // Pass pinnedSha so patch generation uses the pinned commit, not a potentially-flipped ref
     if (pushPinnedSha) {
       pushPatchOptions.pinnedSha = pushPinnedSha;
     }
     const patchResult = await generateGitPatch(entry.branch, baseBranch, pushPatchOptions);
+    traceObjectPack("offline-result", { success: patchResult.success, incremental: true });
 
     if (!patchResult.success) {
+      if (canRecoverPatch(patchResult) && pushRecoveryAllowed) {
+        const queued = queueObjectRecovery(entry, repoResult.repo, pushPinnedSha, pushPatchOptions, pushConfig);
+        if (queued) return queued;
+      }
       // Patch generation failed or patch is empty
       const errorMsg = patchResult.error || "Failed to generate patch";
       server.debug(`Patch generation failed: ${errorMsg}`);
@@ -1716,6 +1737,9 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     if (patchResult.baseCommit) {
       entry.base_commit = patchResult.baseCommit;
     }
+    if (patchResult.excludedWorkflowFiles?.length > 0) {
+      entry.message = `${WORKFLOW_COMPILATION_NOTICE}\n\n${entry.message || ""}`;
+    }
 
     // Store the incremental net diff size so push_to_pull_request_branch can
     // validate `max_patch_size` against the actual incremental change relative
@@ -1730,12 +1754,12 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     if (useBundle) {
       // Bundle transport: preserves merge commits and per-commit metadata
       server.debug(`Generating incremental bundle for push_to_pull_request_branch with branch: ${entry.branch}, baseBranch: ${baseBranch}`);
-      if (Array.isArray(pushConfig.excluded_files) && pushConfig.excluded_files.length > 0) {
-        pushTransportOptions.excludedFiles = pushConfig.excluded_files;
-      }
+      pushTransportOptions.excludedFiles = getExcludedFiles(pushConfig);
       const bundleResult = await generateGitBundle(entry.branch, baseBranch, pushTransportOptions);
 
       if (!bundleResult.success) {
+        const queued = pushRecoveryAllowed ? queueObjectRecovery(entry, repoResult.repo, pushPinnedSha, pushPatchOptions, pushConfig) : null;
+        if (queued) return queued;
         const errorMsg = bundleResult.error || "Failed to generate bundle";
         server.debug(`Bundle generation failed: ${errorMsg}`);
         return {
@@ -1989,17 +2013,17 @@ function createHandlers(server, appendSafeOutput, config = {}) {
         const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
         if (entry.isDirectory()) {
           scanDir(fullPath, relPath);
-        } else if (entry.isFile()) {
+        } else if (entry.isFile() || entry.isSymbolicLink()) {
           if (!isEligibleFile(relPath)) {
             continue;
           }
           let stats;
           try {
-            stats = fs.statSync(fullPath);
+            stats = fs.lstatSync(fullPath);
           } catch (err) {
             throw new Error(`${ERR_SYSTEM}: Failed to inspect file ${fullPath}: ${getErrorMessage(err)}`, { cause: err });
           }
-          files.push({ relativePath: relPath.replace(/\\/g, "/"), size: stats.size });
+          files.push({ relativePath: relPath, size: stats.size });
         }
       }
     }
@@ -2069,7 +2093,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       const trackedFiles = execGitSync(["ls-files", "-z"], { cwd: memoryDir, stdio: "pipe" }).split("\0").filter(Boolean).filter(isEligibleFile);
       const filesToStage = [...new Set([...files.map(file => file.relativePath), ...trackedFiles])];
       if (filesToStage.length > 0) {
-        execGitSync(["add", "--sparse", "--all", "--", ...filesToStage.map(file => `:(literal)${file}`)], { cwd: memoryDir, stdio: "pipe" });
+        stageRawGitFiles(filesToStage, { cwd: memoryDir, stdio: "pipe" });
       }
       const filesToMeasure = [...new Set([...stagedFiles, ...filesToStage])].map(file => `:(literal)${file}`);
       patchSizeBytes = getStagedPatchDiffSizeBytes({ execGitSyncFn: execGitSync, cwd: memoryDir, pathspecs: filesToMeasure });
@@ -2233,10 +2257,10 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     }
     resolvedTitle = applyTitlePrefix(sanitizeTitle(resolvedTitle, createIssueTitlePrefix), createIssueTitlePrefix);
 
-    if (deduplicateByTitle.enabled) {
+    if (deduplicateByTitle.enabled || deduplicateByLabels.length > 0) {
       const normalizedTitle = normalizeTitleForDedup(resolvedTitle);
       const seenTitles = seenIssueTitlesByRepo.get(scopedKey(resolvedRepo)) || [];
-      const duplicate = findDuplicateByTitle(normalizedTitle, seenTitles, deduplicateByTitle.maxDistance);
+      const duplicate = findDuplicateIssue(normalizedTitle, seenTitles, deduplicateByTitle);
       if (duplicate) {
         const droppedEntry = {
           ...entry,
@@ -2261,8 +2285,15 @@ function createHandlers(server, appendSafeOutput, config = {}) {
           ],
         };
       }
-      seenTitles.push({ title: resolvedTitle, normalizedTitle });
-      seenIssueTitlesByRepo.set(scopedKey(resolvedRepo), seenTitles);
+      const defaultLabels = Array.isArray(createIssueConfig.labels) ? createIssueConfig.labels : (createIssueConfig.labels || "").split(",");
+      const labels = [...defaultLabels, ...(Array.isArray(entry.labels) ? entry.labels : [])]
+        .filter(Boolean)
+        .map(label => sanitizeLabelContent(String(label).trim()).slice(0, 64))
+        .filter(Boolean);
+      if (hasDeduplicationLabels(labels, deduplicateByLabels)) {
+        seenTitles.push({ title: resolvedTitle, normalizedTitle });
+        seenIssueTitlesByRepo.set(scopedKey(resolvedRepo), seenTitles);
+      }
     }
 
     const largeContentResponse = maybeHandleLargeContent(entry);
@@ -3041,7 +3072,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       content: [
         {
           type: "text",
-          text: JSON.stringify({ result: "success" }),
+          text: JSON.stringify({ result: "success", delegated: true }),
         },
       ],
     };
@@ -3471,8 +3502,12 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     Object.entries(handlers).map(([name, handler]) => [
       name,
       ["defaultHandler", "ledgerBuiltinHandler"].includes(name)
-        ? (...args) => scopedHandler(Reflect.apply(handler, undefined, args), name === "defaultHandler" ? args[0] : "ledger_append")
-        : scopedHandler(handler, name === "ledgerAgentAppendHandler" ? "ledger_append" : undefined),
+        ? (...args) =>
+            submissions.wrap(
+              scopedHandler(Reflect.apply(handler, undefined, args), name === "defaultHandler" ? args[0] : "ledger_append"),
+              name !== "defaultHandler" || (!isDependencyUnsupportedType(args[0]) && getSafeOutputsToolConfig(config, args[0]).supports_dependencies !== false)
+            )
+        : submissions.wrap(scopedHandler(handler, name === "ledgerAgentAppendHandler" ? "ledger_append" : undefined), !["uploadAssetHandler", "pushRepoMemoryHandler"].includes(name)),
     ])
   );
 }
