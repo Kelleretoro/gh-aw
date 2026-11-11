@@ -1564,6 +1564,20 @@ describe("handle_agent_failure", () => {
       ).toBe(false);
     });
 
+    it.each([
+      { existingCategories: ["missing_tool", "report_incomplete"], currentCategories: ["report_incomplete"] },
+      { existingCategories: ["report_incomplete"], currentCategories: ["missing_tool", "report_incomplete"] },
+      { existingCategories: ["report_incomplete"], currentCategories: ["missing_data", "report_incomplete"] },
+      { existingCategories: ["missing_tool", "report_incomplete"], currentCategories: ["missing_data", "report_incomplete"] },
+    ])("reuses incomplete reports when supplemental diagnostics differ: %j", ({ existingCategories, currentCategories }) => {
+      const { isReusableFailureIssue } = require("./handle_agent_failure.cjs");
+      const body = buildExistingIssueBody({ categories: existingCategories });
+      expect(isReusableFailureIssue(body, { workflowId: "test-workflow", failureCategories: currentCategories })).toBe(true);
+      expect(isReusableFailureIssue(body, { workflowId: "other-workflow", failureCategories: currentCategories })).toBe(false);
+      expect(isReusableFailureIssue(body, { workflowId: "test-workflow", failureCategories: [...currentCategories, "mcp_policy_error"].sort() })).toBe(false);
+      expect(isReusableFailureIssue(body, { workflowId: "test-workflow", failureCategories: ["missing_tool"] })).toBe(false);
+    });
+
     beforeEach(() => {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aw-handle-agent-failure-match-"));
       promptsDir = path.join(tmpDir, "gh-aw", "prompts");
@@ -1688,7 +1702,7 @@ describe("handle_agent_failure", () => {
     it.each([
       ["crash", "TypeError: private-driver-payload\n", "process.exit(139)", 139, "driver_crash", "engine driver crashed"],
       ["outage", "CAPIError: 503 Service Unavailable\n", "process.exit(1)", 1, "engine_outage", "experienced an engine outage"],
-    ])("publishes exit details and final error summaries for a simulated driver %s", async (_kind, finalError, termination, exitCode, failureCause, titleSuffix) => {
+    ])("publishes driver exit and classified stderr diagnostics for a simulated %s", async (_kind, finalError, termination, exitCode, failureCause, titleSuffix) => {
       syncRuntimePromptTemplates(import.meta.url);
       const { runProcess } = require("./process_runner.cjs");
       const { buildEmptyOutputOutcome } = require("./empty_output_outcome.cjs");
@@ -1740,6 +1754,9 @@ describe("handle_agent_failure", () => {
         expect(body).toContain(`Driver exit code: ${exitCode}`);
         expect(body).toContain("Last engine error lines (summarized");
         expect(body).toContain("Provider server error (HTTP 5xx)");
+        expect(body).toContain(
+          failureCause === "driver_crash" ? "Last driver stderr summary: Driver execution failed (unhandled JavaScript exception)" : "Last driver stderr summary: Engine error: Provider server error (HTTP 5xx) (capi_server_error)"
+        );
         if (failureCause === "driver_crash") {
           expect(body).toContain("Driver exit signal (inferred from exit code): SIGSEGV");
           expect(body).toContain("Driver exit meaning: Terminated by SIGSEGV");
@@ -2297,7 +2314,7 @@ describe("handle_agent_failure", () => {
       }
     });
 
-    it.each([false, true, "disabled"])("reports declared reasons and runtime classification in the issue and conclusion (existing issue: %s)", async existingIssue => {
+    it.each([false, true, "disabled"])("deduplicates missing-output notices by workflow and reports the cause (existing issue: %s)", async existingIssue => {
       const template = "{report_incomplete_context}{missing_data_context}{missing_tool_context}{permission_denied_context}{engine_failure_context}";
       fs.writeFileSync(path.join(promptsDir, "agent_failure_issue.md"), template);
       fs.writeFileSync(path.join(promptsDir, "agent_failure_comment.md"), template);
@@ -2365,11 +2382,53 @@ describe("handle_agent_failure", () => {
         expect(body).not.toContain("engine_outage");
         expect(body).toContain("Driver exit code: 0");
         expect(body).toContain("Last tool call status: failed");
+        expect(body).not.toContain("Last agent action: tool call failed");
         expect(body).toContain("Last tool exit code: 2");
         expect(body).not.toContain("private-");
         expect(body).not.toContain("Driver exit code: 255");
       } finally {
         vi.unstubAllEnvs();
+      }
+    });
+
+    it("creates one report_incomplete issue across clean-exit runs with changing diagnostics", async () => {
+      syncRuntimePromptTemplates(import.meta.url);
+      fs.writeFileSync(path.join(tmpDir, "agent_execution_exit_code.txt"), "0");
+      const outputPath = path.join(tmpDir, "agent_output.json");
+      vi.stubEnv("GH_AW_AGENT_OUTPUT", outputPath);
+      let existingBody;
+      const create = vi.fn(async ({ body }) => {
+        existingBody = body;
+        return { data: { number: 99, html_url: "https://github.com/owner/repo/issues/99" } };
+      });
+      const createComment = vi.fn(async () => ({ data: { id: 1001 } }));
+      global.github = {
+        rest: {
+          search: {
+            issuesAndPullRequests: vi.fn(async ({ q }) => ({
+              data: { total_count: 0, items: existingBody && q.includes('"workflow_id: test-workflow"') ? [{ number: 99, body: existingBody }] : [] },
+            })),
+          },
+          issues: { create, createComment },
+          pulls: { get: vi.fn() },
+        },
+        graphql: vi.fn(),
+      };
+      for (const diagnostic of [
+        { type: "report_missing_tool", tool: "unavailable_tool", reason: "Tool unavailable" },
+        { type: "report_missing_data", data_type: "unavailable_data", reason: "Data unavailable" },
+      ]) {
+        const incomplete = { type: "report_incomplete", reason: "Required data could not be read" };
+        fs.writeFileSync(outputPath, JSON.stringify({ items: [diagnostic, incomplete] }));
+        await main();
+        vi.stubEnv("GITHUB_HEAD_REF", "feature/another-run");
+      }
+      expect(create).toHaveBeenCalledOnce();
+      expect(createComment).toHaveBeenCalledOnce();
+      expect(createComment).toHaveBeenCalledWith(expect.objectContaining({ issue_number: 99 }));
+      expect(create.mock.calls[0][0].title).toContain("reported incomplete result");
+      for (const body of [create.mock.calls[0][0].body, createComment.mock.calls[0][0].body]) {
+        expect(body).toContain("Required data could not be read");
       }
     });
 
@@ -6435,7 +6494,7 @@ describe("handle_agent_failure", () => {
       }
     });
 
-    it("explains collector-generated incompletion without assuming a prompt or infrastructure failure", () => {
+    it("distinguishes a missing terminal signal from incomplete work", () => {
       const { buildEmptyOutputOutcome } = require("./empty_output_outcome.cjs");
       const { mkdtempSync, rmSync, writeFileSync } = require("fs");
       const { tmpdir } = require("os");
@@ -6445,8 +6504,9 @@ describe("handle_agent_failure", () => {
         writeFileSync(join(rootDir, "agent-session.jsonl"), JSON.stringify({ type: "tool.execution_start", data: { toolName: "read", toolCallId: "last", input: { path: "private-path" } } }));
         const outcome = buildEmptyOutputOutcome([], rootDir);
         const result = buildReportIncompleteContext([outcome], { collectorEmptyOutputCause: outcome.reason, rootDir });
-        expect(result).toContain("The workflow recorded a `report_incomplete` signal");
-        expect(result).toContain("completion could not be confirmed");
+        expect(result).toContain("Completion Signal Missing");
+        expect(result).toContain("whether the requested work finished is unknown");
+        expect(result).not.toContain("Task Could Not Be Completed");
         expect(result).toContain("missing_terminal_safe_output");
         expect(result).toContain("Failure classification: missing_terminal_safe_output");
         expect(result).not.toContain("Reported reason (agent-declared, unverified)");

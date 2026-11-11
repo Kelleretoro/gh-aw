@@ -185,6 +185,9 @@ done
 for file in "${JS_SOURCE_DIR}"/*.json; do
   if [ -f "$file" ]; then
     filename=$(basename "$file")
+    if [[ "${filename}" == "package.json" || "${filename}" == "package-lock.json" ]]; then
+      continue
+    fi
     cp "$file" "${DESTINATION}/${filename}"
     debug_log "Copied: ${filename}"
     FILE_COUNT=$((FILE_COUNT + 1))
@@ -248,6 +251,12 @@ MCP_SCRIPTS_FILES=(
   "mcp_scripts_mcp_server_http.cjs"
   "mcp_scripts_tool_factory.cjs"
   "mcp_server_core.cjs"
+  "connector_runtime.cjs"
+  "connector_regex.cjs"
+  "connector_effect_bindings.cjs"
+  "connector_file.cjs"
+  "event_predicate.cjs"
+  "symlink_guard.cjs"
   "levenshtein_distance.cjs"
   "safe_output_names.cjs"
   "mcp_dependencies_manager.cjs"
@@ -286,6 +295,7 @@ MCP_SCRIPTS_FILES=(
   "aw_context.cjs"
   "webhook_context.cjs"
   "webhook_resource.cjs"
+  "connector_webhook.cjs"
   "gateway_command_webhook.cjs"
   "github_notification_webhook.cjs"
   "github_notification_webhooks.json"
@@ -321,6 +331,7 @@ MCP_SCRIPTS_FILES=(
   "work_queue_claim_adapters.cjs"
   "work_queue_claim_scope.cjs"
   "work_queue_codec.cjs"
+  "lock_file_headers.cjs"
   "work_queue_control_receipts.cjs"
   "work_queue_declared_verification.cjs"
   "work_queue_delivery.cjs"
@@ -360,7 +371,6 @@ MCP_SCRIPTS_FILES=(
   "work_queue_telemetry.cjs"
   "work_queue_summary_renderer.cjs"
   "work_queue_host.cjs"
-  "work_queue_yaml.cjs"
 )
 
 MCP_SCRIPTS_COUNT=0
@@ -395,6 +405,14 @@ create_dir "${SAFE_OUTPUTS_DEST}"
 create_dir "${SAFE_OUTPUTS_DEST}/work-queue"
 
 SAFE_OUTPUTS_FILES=(
+  "connector_runtime.cjs"
+  "connector_regex.cjs"
+  "connector_effect_bindings.cjs"
+  "connector_file.cjs"
+  "event_predicate.cjs"
+  "connector_content.cjs"
+  "workflow_metadata_helpers.cjs"
+  "templatable.cjs"
   "safe_outputs_mcp_server.cjs"
   "safe_outputs_mcp_server_http.cjs"
   "safe_outputs_mcp_arguments.cjs"
@@ -406,6 +424,7 @@ SAFE_OUTPUTS_FILES=(
   "safe_output_redaction.cjs"
   "safe_outputs_config_redact.cjs"
   "safe_outputs_handlers.cjs"
+  "issue_artifacts.cjs"
   "safe_output_submission.cjs"
   "ledger_append.cjs"
   "ledger_transactions.cjs"
@@ -440,6 +459,7 @@ SAFE_OUTPUTS_FILES=(
   "diagnostic_sanitization.cjs"
   "ephemerals.cjs"
   "safe_output_manifest.cjs"
+  "safe_output_type_validator.cjs"
   "safe_output_outcomes.cjs"
   "safe_outputs_status.cjs"
   "project_timezone.cjs"
@@ -503,12 +523,14 @@ SAFE_OUTPUTS_FILES=(
   "issue_title_dedup.cjs"
   "levenshtein_distance.cjs"
   "markdown_code_region_balancer.cjs"
+  "markdown_unfencing.cjs"
   "temporary_id.cjs"
   "invocation_context_helpers.cjs"
   "data_schema_normalizer.cjs"
   "aw_context.cjs"
   "webhook_context.cjs"
   "webhook_resource.cjs"
+  "connector_webhook.cjs"
   "gateway_command_webhook.cjs"
   "github_notification_webhook.cjs"
   "github_notification_webhooks.json"
@@ -534,6 +556,7 @@ SAFE_OUTPUTS_FILES=(
   "work_queue_claim_adapters.cjs"
   "work_queue_claim_scope.cjs"
   "work_queue_codec.cjs"
+  "lock_file_headers.cjs"
   "work_queue_control_receipts.cjs"
   "work_queue_declared_verification.cjs"
   "work_queue_delivery.cjs"
@@ -573,7 +596,6 @@ SAFE_OUTPUTS_FILES=(
   "work_queue_store.cjs"
   "work_queue_telemetry.cjs"
   "work_queue_summary_renderer.cjs"
-  "work_queue_yaml.cjs"
 )
 
 SAFE_OUTPUTS_COUNT=0

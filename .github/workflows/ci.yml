@@ -24,6 +24,8 @@ on:
       - '.github/aw/compat.json'
       - '.github/aw/compat.schema.json'
       - 'install-gh-aw.sh'
+      - 'specs/github-mcp-access-control-compliance/**'
+      - 'scratchpad/github-mcp-access-control-specification.md'
   schedule:
   - cron: 0 * * * *
   workflow_dispatch: {}
@@ -173,6 +175,33 @@ jobs:
         fi
 
         echo "validated $checked_images container pins across $checked_files workflow lock files"
+  validate-mcp-access-control-spec-pin:
+    name: Validate GitHub MCP access-control spec pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Compare pinned specification commit
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        pinned="e5113cd9c697c9443ed269ba3b83e457765da1df"
+        current="$(git log -n1 --format=%H -- scratchpad/github-mcp-access-control-specification.md)"
+        if [ -z "$current" ]; then
+          echo "No commit found for scratchpad/github-mcp-access-control-specification.md"
+          exit 1
+        fi
+        if [ "$current" != "$pinned" ]; then
+          echo "Spec pin drift: README pin=$pinned current=$current"
+          exit 1
+        fi
   test-race:
     name: Race detector
     if: ${{ github.event_name == 'schedule' && needs.changes.outputs.has_changes == 'true' }}
@@ -195,7 +224,14 @@ jobs:
         go-version-file: go.mod
         cache: true
 
+    - name: Set up Python 3.12 for mini-SWE-agent lock tests
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.12"
+
     - name: Run race detector
+      env:
+        GH_AW_REQUIRE_MINI_PY312: "1"
       run: make test-race
   shellcheck-setup-sh:
     name: ShellCheck actions/setup/sh
@@ -604,14 +640,14 @@ jobs:
         path: gh-aw
         retention-days: 1
 
-    - name: Test update command (dry-run)
+    - name: Test upstream update command
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
         echo "Testing update command to ensure it runs successfully..."
-        # Run update with verbose flag to check for and apply workflow updates from source repositories
-        # The command may modify workflow files if upstream updates are available
-        ./gh-aw update --verbose
+        # Refresh the disposable CI checkout without merging downstream customizations.
+        # Merge behavior is covered by the update tests, not floating upstream changes.
+        ./gh-aw update --verbose --no-merge
         echo "✅ Update command executed successfully" >> $GITHUB_STEP_SUMMARY
 
   compile-cli-workflows:

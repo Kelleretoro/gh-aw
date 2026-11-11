@@ -35,6 +35,7 @@ const { getErrorMessage } = require("./error_helpers.cjs");
 const { normalizeSafeOutputName } = require("./safe_output_names.cjs");
 const { buildAddLabelsObjectOnlyFieldDesc } = require("./add_labels_schema.cjs");
 const { addDependencySchema } = require("./safe_output_submission.cjs");
+const { writeFile } = require("./create_files.cjs");
 const normalizeToolName = name => normalizeSafeOutputName(String(name).replace(/-/g, "_").toLowerCase());
 const ADD_COMMENT_DEFAULT_DISCUSSIONS_NOTE =
   "NOTE: By default, this tool does not require discussions:write permission. Set 'discussions: true' in the workflow's safe-outputs.add-comment configuration to enable discussion comments and request this permission.";
@@ -247,7 +248,7 @@ async function main() {
   // Write JSON payloads from env vars if provided (replaces heredoc-based file writing)
   if (process.env.GH_AW_TOOLS_META_JSON) {
     try {
-      fs.writeFileSync(toolsMetaPath, resolveEnvStringPlaceholders(process.env.GH_AW_TOOLS_META_JSON));
+      writeFile(toolsMetaPath, resolveEnvStringPlaceholders(process.env.GH_AW_TOOLS_META_JSON));
     } catch (err) {
       throw new Error(`${ERR_SYSTEM}: Failed to write file ${toolsMetaPath}: ${getErrorMessage(err)}`, { cause: err });
     }
@@ -255,7 +256,7 @@ async function main() {
   if (process.env.GH_AW_VALIDATION_JSON) {
     const validationPath = path.join(path.dirname(configPath), "validation.json");
     try {
-      fs.writeFileSync(validationPath, process.env.GH_AW_VALIDATION_JSON);
+      writeFile(validationPath, process.env.GH_AW_VALIDATION_JSON);
     } catch (err) {
       throw new Error(`${ERR_SYSTEM}: Failed to write file ${validationPath}: ${getErrorMessage(err)}`, { cause: err });
     }
@@ -429,20 +430,6 @@ async function main() {
         enhancedTool.description = updateAddCommentDescription(enhancedTool.description, config.add_comment);
       }
 
-      if (tool.name === "linear_update_issue") {
-        const linearUpdateConfig = config.linear_update_issue;
-        const properties = enhancedTool.inputSchema?.properties;
-        if (properties && linearUpdateConfig && typeof linearUpdateConfig === "object") {
-          if (!("allow_title" in linearUpdateConfig) || linearUpdateConfig.allow_title !== true) {
-            delete properties.title;
-          }
-          if (!("allow_body" in linearUpdateConfig) || linearUpdateConfig.allow_body !== true) {
-            delete properties.body;
-          }
-          enhancedTool.inputSchema.anyOf = Object.keys(properties).map(field => ({ required: [field] }));
-        }
-      }
-
       // Add repo parameter to inputSchema if configured
       const repoParam = toolsMeta.repo_params?.[tool.name];
       if (repoParam) {
@@ -536,7 +523,7 @@ async function main() {
 
   // Write the result to the output path
   try {
-    fs.writeFileSync(outputPath, JSON.stringify(allFilteredTools, null, 2));
+    writeFile(outputPath, JSON.stringify(allFilteredTools, null, 2));
   } catch (err) {
     throw new Error(`${ERR_SYSTEM}: Failed to write file ${outputPath}: ${getErrorMessage(err)}`, { cause: err });
   }

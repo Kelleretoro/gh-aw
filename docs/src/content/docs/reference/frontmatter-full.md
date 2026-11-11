@@ -18,6 +18,23 @@ JSON Schema for validating agentic workflow frontmatter configuration
 
 ```yaml wrap
 ---
+# Experimental. Declare third-party endpoints, credential secret names, resource
+# grants and capability definitions directly in AW Markdown. Import normally and
+# select capabilities from the main workflow.
+# (optional)
+connectors:
+  {}
+
+# Experimental. Up to 64 advisory skip questions evaluated inside AWF before each
+# eligible agent invocation. Nonempty lists emit a compile-time experimental
+# warning; configuration and behavior may change without deprecation. Any deny
+# skips; allow or all unknown preserves deterministic harness eligibility. Runtime
+# @file references use sandbox filesystem restrictions. Nonempty lists cannot be
+# combined with declarative protected-session-capture.
+# (optional)
+skip-if-decision: []
+  # Array of strings
+
 # Experimental. Select independent Copilot capabilities to authenticate through
 # the OIDC token broker. Using this field emits a compile-time warning.
 # Configuration and behavior may change without deprecation.
@@ -177,6 +194,7 @@ ambient-folders: []
 # Workflow triggers that define when the agentic workflow should run. Supports
 # standard GitHub Actions trigger events plus special command triggers for
 # /commands (required)
+# (optional)
 # Accepted formats:
 
 # Format 1: Simple trigger event name (e.g., 'push', 'issues', 'pull_request',
@@ -214,12 +232,6 @@ on:
   # (optional)
   jira-issue: null
 
-  # (optional)
-  linear-issue: null
-
-  # (optional)
-  azure-devops-issue: null
-
   # Experimental exclusive trigger. Every nested key and value must be literal;
   # GitHub Actions expressions are not supported anywhere in this section. No other
   # triggers may coexist with gateway-dispatch; non-trigger on settings such as
@@ -230,6 +242,9 @@ on:
   # gateway-dispatch: true and does not grant gateway authority.
   # (optional)
   gateway-dispatch:
+    # (optional)
+    connectors: null
+
     # Experimental. GitHub notification subscription filtered by the approved gateway
     # before minimal canonical URL/type/matching-filter projection. A null trigger or
     # omitted types selects every catalog action; no original bodies or native Actions
@@ -602,241 +617,6 @@ on:
 
         # (optional)
         repos: null
-
-    # Experimental. Jira Cloud issue lifecycle and label activities normalized from
-    # native issue webhooks. Requires nested on.gateway-dispatch, the repository
-    # gateway-dispatch opt-in, and an approved provider bridge; does not register
-    # webhooks or grant source access.
-    # (optional)
-    jira-issue:
-      # Experimental. GitHub-style normalized activities, not provider-native action
-      # names. Missing transition evidence never matches lifecycle or label activities.
-      # (optional)
-      types: []
-        # Array of strings
-
-      # Experimental. Required Jira project key or nonempty list of keys; sibling of
-      # types.
-      # Accepted formats:
-
-      # Format 1: string
-      project: "example-value"
-
-      # Format 2: array
-      project: []
-        # Array items: string
-
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      issue_id: "example-value"
-
-      # Format 2: array
-      issue_id: []
-        # Array items: string
-
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      issue_key: "example-value"
-
-      # Format 2: array
-      issue_key: []
-        # Array items: string
-
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      labels: "example-value"
-
-      # Format 2: array
-      labels: []
-        # Array items: string
-
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      status: "example-value"
-
-      # Format 2: array
-      status: []
-        # Array items: string
-
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      resolution: "example-value"
-
-      # Format 2: array
-      resolution: []
-        # Array items: string
-
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      sender: "example-value"
-
-      # Format 2: array
-      sender: []
-        # Array items: string
-
-    # Experimental. Linear Issue create/update/remove webhooks with payload-derived
-    # lifecycle and label activities. Requires nested on.gateway-dispatch, the
-    # repository gateway-dispatch opt-in, and an approved provider bridge; does not
-    # register webhooks or grant source access.
-    # (optional)
-    linear-issue:
-      # Experimental. GitHub-style normalized activities, not provider-native action
-      # names. Missing transition evidence never matches lifecycle or label activities.
-      # (optional)
-      types: []
-        # Array of strings
-
-      # Experimental. Required literal Linear organization ID or nonempty list of IDs;
-      # sibling of types.
-      # Accepted formats:
-
-      # Format 1: string
-      organization-id: "example-value"
-
-      # Format 2: array
-      organization-id: []
-        # Array items: string
-
-      # Experimental. Optional literal Linear team model ID or nonempty list of IDs.
-      # Matches delivered data.teamId without API resolution.
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      team-id: "example-value"
-
-      # Format 2: array
-      team-id: []
-        # Array items: string
-
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      issue_id: "example-value"
-
-      # Format 2: array
-      issue_id: []
-        # Array items: string
-
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      labels: "example-value"
-
-      # Format 2: array
-      labels: []
-        # Array items: string
-
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      sender: "example-value"
-
-      # Format 2: array
-      sender: []
-        # Array items: string
-
-    # Experimental. Azure DevOps work item webhooks with payload-derived lifecycle and
-    # tag activities. Closed/reopened require explicit closed-states. Requires nested
-    # on.gateway-dispatch, the repository gateway-dispatch opt-in, and an approved
-    # provider bridge.
-    # (optional)
-    azure-devops-issue:
-      # Experimental. Required Azure DevOps project ID or nonempty list of IDs; sibling
-      # of types.
-      # Accepted formats:
-
-      # Format 1: string
-      project_id: "example-value"
-
-      # Format 2: array
-      project_id: []
-        # Array items: string
-
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      collection_id: "example-value"
-
-      # Format 2: array
-      collection_id: []
-        # Array items: string
-
-      # (optional)
-      types: []
-        # Array of strings
-
-      # Literal terminal state name or nonempty list from the project's work item
-      # process. Required for closed/reopened; no state names are assumed.
-      # (optional)
-      # Accepted formats:
-
-      # Format 1: string
-      closed-states: "example-value"
-
-      # Format 2: array
-      closed-states: []
-        # Array items: string
-
-      # (optional)
-      state:
-        # (optional)
-        # Accepted formats:
-
-        # Format 1: string
-        from: "example-value"
-
-        # Format 2: array
-        from: []
-          # Array items: string
-
-        # (optional)
-        # Accepted formats:
-
-        # Format 1: string
-        to: "example-value"
-
-        # Format 2: array
-        to: []
-          # Array items: string
-
-      # (optional)
-      tags:
-        # (optional)
-        # Accepted formats:
-
-        # Format 1: string
-        from: "example-value"
-
-        # Format 2: array
-        from: []
-          # Array items: string
-
-        # (optional)
-        # Accepted formats:
-
-        # Format 1: string
-        to: "example-value"
-
-        # Format 2: array
-        to: []
-          # Array items: string
 
   # Special slash command trigger for /command workflows (e.g., '/my-bot' in issue
   # comments). Creates conditions to match slash commands automatically. Note: Can
@@ -2061,6 +1841,11 @@ on:
       # (optional)
       secret-scanning-alerts: "read"
 
+      # Repository security advisories permission. GitHub App-only; forwarded as
+      # permission-repository-advisories when minting a token.
+      # (optional)
+      repository-advisories: "read"
+
       # Permission level for repository webhooks (read/none; "write" is rejected by the
       # compiler). GitHub App-only permission.
       # (optional)
@@ -2534,11 +2319,9 @@ runs-on-slim:
   labels: []
     # Array of strings
 
-# Runner topology configuration. Tells gh-aw and AWF what kind of runner
-# environment the workflow targets, so they can activate topology-specific
-# behaviors automatically (split-filesystem handling, network isolation, sysroot
-# images, tool cache redirection). The runner.topology key is the single stable
-# contract between gh-aw and AWF for runner environment detection.
+# Runner configuration. Installation privilege is independent of runner topology.
+# The runner.topology key tells gh-aw and AWF to activate topology-specific
+# behaviors (split-filesystem handling, sysroot images, tool cache redirection).
 # (optional)
 runner:
   # Runner execution topology. When set to 'arc-dind', gh-aw emits the topology in
@@ -2547,6 +2330,14 @@ runner:
   # network isolation, sysroot image staging, and DinD pre-staging automatically.
   # (optional)
   topology: "arc-dind"
+
+  # Installation privilege for Copilot CLI and threat-detect in the agent and
+  # detection jobs. Rootless installs to ~/.local/bin without sudo. Defaults to
+  # rootless for arc-dind and privileged (/usr/local/bin via sudo) otherwise.
+  # Privileged is not supported with arc-dind. Does not change AWF runtime
+  # privileges or enable split-filesystem handling.
+  # (optional)
+  installation: "rootless"
 
 # Agentic execution step timeout in minutes. Defaults to 20 minutes for agentic
 # workflows, or the GH_AW_DEFAULT_TIMEOUT_MINUTES GitHub Actions variable. The
@@ -3474,9 +3265,13 @@ engine:
   # Experimental per-run model and reasoning-effort selection from the task text for
   # Copilot, Claude, Codex, and pi engines, on GitHub Copilot or, for Claude and
   # Codex, natively on Anthropic or OpenAI; requires the AWF firewall and ignores
-  # fixed model and effort settings. See
-  # https://github.github.com/gh-aw/reference/model-routing/.
+  # fixed model and effort settings. Eligible workflows that choose no model or
+  # routing on GitHub Copilot inference default to goal cost and mode auto; set
+  # false to opt out. See https://github.github.com/gh-aw/reference/model-routing/.
   # (optional)
+  # Accepted formats:
+
+  # Format 1: object
   model-routing:
     # Routing objective: cost prefers the cheapest model and effort that meet the
     # mode's target; cost-speed prefers the fastest model and effort that meet it.
@@ -3501,6 +3296,10 @@ engine:
     # (optional)
     allowed-models: []
       # Array of strings
+
+  # Format 2: Disable the implicit cost/auto model-routing default without pinning a
+  # model; the existing model variables and fallback model apply.
+  model-routing: true
 
   # Optional model context window metadata for engines that need to register
   # explicit model catalog entries. Supported by the Pi engine when generating its
@@ -3672,9 +3471,9 @@ engine:
     azure-cloud: "example-value"
 
     # Optional WIF provider discriminator. Recognized values are 'azure', 'anthropic',
-    # and 'gcp'.
+    # 'gcp', and 'openai'.
     # (optional)
-    provider: "example-value"
+    provider: "azure"
 
     # Anthropic WIF federation rule ID (e.g., fdrl_...).
     # (optional)
@@ -3684,7 +3483,8 @@ engine:
     # (optional)
     organization-id: "example-value"
 
-    # Anthropic WIF service account ID (e.g., svac_...).
+    # Provider service account ID (Anthropic e.g., svac_...; OpenAI as configured in
+    # the OpenAI admin console).
     # (optional)
     service-account-id: "example-value"
 
@@ -3710,6 +3510,10 @@ engine:
     # us-central1 when omitted.
     # (optional)
     location: "example-value"
+
+    # OpenAI Workload Identity Provider ID configured in the OpenAI admin console.
+    # (optional)
+    identity-provider-id: "example-value"
 
   # Additional engine configuration text. Codex accepts TOML structurally merged
   # into config.toml. Pi accepts a JSON object with settings, model metadata
@@ -3803,6 +3607,19 @@ engine:
     # Inline Java driver source written to a generated .java file.
     # (optional)
     java: "example-value"
+
+  # Experimental. Persist engine-declared session files in GitHub Actions artifacts.
+  # Using this field emits a compile-time warning. Configuration and behavior may
+  # change without deprecation. Copilot, Claude, Codex, and Pi resume the exact
+  # native session with the current workflow prompt; other session-based engines
+  # receive a continuation prompt. Starts fresh when no prior history exists. No
+  # memory tool is required.
+  # (optional)
+  durable:
+    # Number of days to retain durable checkpoint artifacts, subject to repository and
+    # organization artifact retention policy.
+    # (optional)
+    retention-days: 1
 
   # Engine-specific plugin names to install before launching the engine. Currently
   # used by the Pi engine: each entry is passed to `pi install <extension>`.
@@ -3942,6 +3759,19 @@ engine:
   # (optional)
   mcp: true
 
+  # Experimental. Persist engine-declared session files in GitHub Actions artifacts.
+  # Using this field emits a compile-time warning. Configuration and behavior may
+  # change without deprecation. Copilot, Claude, Codex, and Pi resume the exact
+  # native session with the current workflow prompt; other session-based engines
+  # receive a continuation prompt. Starts fresh when no prior history exists. No
+  # memory tool is required.
+  # (optional)
+  durable:
+    # Number of days to retain durable checkpoint artifacts, subject to repository and
+    # organization artifact retention policy.
+    # (optional)
+    retention-days: 1
+
   # Runtime adapter identifier. Maps to the CodingAgentEngine registered in the
   # engine registry. Defaults to id when omitted.
   # (optional)
@@ -4039,6 +3869,69 @@ engine:
   # engine from frontmatter.
   # (optional)
   behaviors:
+    # Experimental native durability or session-file continuation. Declares persisted
+    # files and the continuation invocation; pinned dependency installation is
+    # optional. Enabling engine.durable emits a compile-time warning. The harness
+    # receives GH_AW_DURABLE_RESUMED and GH_AW_DURABLE_PARENT_RUN_ID.
+    # (optional)
+    durable:
+      # Explicit files or directories under /tmp/gh-aw/agent/ to persist.
+      # $GH_AW_DURABLE_CHECKPOINT refers to the compiler-managed native checkpoint file.
+      # Globs and overlapping paths are unsupported.
+      files: []
+        # Array of strings
+
+      # (optional)
+      installation: []
+
+      execution:
+        # (optional)
+        command-name: "example-value"
+
+        # (optional)
+        args: []
+          # Array of strings
+
+        # (optional)
+        step-name: "example-value"
+
+        # (optional)
+        model-env-var: "example-value"
+
+        # (optional)
+        model-env-provider-prefix: "example-value"
+
+        # (optional)
+        model-flag: "example-value"
+
+        # (optional)
+        mcp-config-env-var: "example-value"
+
+        # (optional)
+        mcp-config-flag: "example-value"
+
+        # (optional)
+        write-timestamp: true
+
+        # (optional)
+        provider-env-mode: "example-value"
+
+        # Parse only the final stderr attempt from native AWF protected command output
+        # (v0.28.67+, non-TTY Docker only). Requires an isolated recorder and verifying
+        # log parser; raw streams remain private and incomplete capture or structural
+        # redaction collisions fail publication.
+        # (optional)
+        protected-session-capture: true
+
+        # Additional static environment variables injected into the execution step. Values
+        # are rendered verbatim and must not contain secrets.
+        # (optional)
+        env:
+          {}
+
+      # (optional)
+      harness-script: "example-value"
+
     # Secret resolution mode for the engine (for example 'universal-llm-consumer').
     # (optional)
     secret-strategy: "example-value"
@@ -4046,6 +3939,14 @@ engine:
     # Secret or env var keys the engine accepts through engine.env.
     # (optional)
     supported-env-var-keys: []
+      # Array of strings
+
+    # Untrusted diagnostic files retained in the unified agent artifact after secret
+    # redaction and recovery-envelope validation, including failed executions. Paths
+    # must be literal files under /tmp/gh-aw/agent/ without traversal or wildcards and
+    # have a secret-redactable extension. Does not enable structured session parsing.
+    # (optional)
+    output-files: []
       # Array of strings
 
     # (optional)
@@ -4284,6 +4185,182 @@ engine:
   # the default engine when engine.id is not specified. Overrides the top-level
   # 'model' field.
   model: "example-value"
+
+# Format 7: Pi engine options, including optional durable execution.
+engine:
+  pi:
+    # Experimental. Persist engine-declared session files in GitHub Actions artifacts.
+    # Using this field emits a compile-time warning. Configuration and behavior may
+    # change without deprecation. Copilot, Claude, Codex, and Pi resume the exact
+    # native session with the current workflow prompt; other session-based engines
+    # receive a continuation prompt. Starts fresh when no prior history exists. No
+    # memory tool is required.
+    # (optional)
+    durable:
+      # Number of days to retain durable checkpoint artifacts, subject to repository and
+      # organization artifact retention policy.
+      # (optional)
+      retention-days: 1
+
+    # Model for this engine, overriding the top-level model. Has sensible defaults and
+    # can typically be omitted. Supports full model IDs (e.g.,
+    # 'claude-3-5-sonnet-20241022', 'gpt-4'), which is useful when a nested engine
+    # (e.g. safe-outputs.threat-detection.engine) needs a different model than the
+    # main agent engine.
+    # (optional)
+    model: "example-value"
+
+    # Optional version of the AI engine action (e.g., 'beta', 'stable', 20). Has
+    # sensible defaults and can typically be omitted. Numeric values are automatically
+    # converted to strings at runtime. GitHub Actions expressions (e.g., '${{
+    # inputs.engine-version }}') are accepted and compiled with injection-safe env var
+    # handling.
+    # (optional)
+    version: null
+
+    # Additional engine configuration text. Codex accepts TOML structurally merged
+    # into config.toml. Pi accepts a JSON object with settings, model metadata
+    # overrides, MCP exposure settings, and session persistence options.
+    # (optional)
+    config: "example-value"
+
+    # Custom environment variables to pass to the AI engine, including secret
+    # overrides (e.g., OPENAI_API_KEY: ${{ secrets.CUSTOM_KEY }})
+    # (optional)
+    env:
+      {}
+
+    # Optional array of command-line arguments to pass to the AI engine CLI. These
+    # arguments are injected after all other args but before the prompt.
+    # (optional)
+    args: []
+      # Array of strings
+
+    # Engine-level MCP gateway configuration. Settings here apply to the MCP gateway
+    # used by this engine.
+    # (optional)
+    mcp:
+      # Session timeout for MCP gateway sessions as a Go duration string (e.g. "30m",
+      # "4h", "24h"). Must be at least 5m (no upper bound). Omitted or empty uses the
+      # effective gateway default (precedence: this field > MCP_GATEWAY_SESSION_TIMEOUT
+      # env var > built-in default 6h). Longer timeouts benefit multi-hour workflows
+      # such as large-scale migrations; shorter values free gateway resources sooner.
+      # (optional)
+      session-timeout: "example-value"
+
+      # Timeout for individual MCP tool calls as a Go duration string (e.g. "30s", "2m",
+      # "10m"). Must be between 10s and 600s inclusive. Omitted or empty uses the
+      # gateway built-in default (60s). Use a higher value for slow MCP backends such as
+      # full-text search over large indexes.
+      # (optional)
+      tool-timeout: "example-value"
+
+    # Custom driver script, command, or inline source for the engine. String values
+    # accept a workspace-relative path or bare name. Inline object values are
+    # supported for the Copilot engine and materialize runtime files before execution.
+    # Supported inline runtimes are node, python, go, and java.
+    # (optional)
+    # Accepted formats:
+
+    # Format 1: Workspace-relative driver path or bare command name. The copilot
+    # engine accepts .js, .cjs, .mjs, .py, .ts, .mts, and .rb drivers; other engines
+    # accept .js, .cjs, and .mjs. Bare names without an extension are treated as
+    # built-in drivers or executables in PATH.
+    driver: "example-value"
+
+    # Format 2: Inline Copilot SDK driver source. Provide exactly one runtime key.
+    driver:
+      # Inline Node.js driver source written to a generated .cjs file.
+      # (optional)
+      node: "example-value"
+
+      # Inline Python driver source written to a generated .py file.
+      # (optional)
+      python: "example-value"
+
+      # Inline Go driver source written to a generated .go file.
+      # (optional)
+      go: "example-value"
+
+      # Inline Java driver source written to a generated .java file.
+      # (optional)
+      java: "example-value"
+
+    # Engine-specific plugin names to install before launching the engine. Currently
+    # used by the Pi engine: each entry is passed to `pi install <extension>`.
+    # (optional)
+    extensions: []
+      # Array of strings
+
+    # Custom executable path for the AI engine CLI. When specified, the workflow will
+    # skip the standard installation steps and use this command instead. The command
+    # should be the full path to the executable or a command available in PATH.
+    # (optional)
+    command: "example-value"
+
+    # When true, disables automatic loading of context and custom instructions where
+    # supported. Copilot uses --no-custom-instructions, Claude uses --bare, and Pi
+    # disables context-file, skill, prompt-template, extension, and theme discovery
+    # while retaining explicit workflow infrastructure extensions. Codex and Gemini do
+    # not support this option and emit a warning. Defaults to false.
+    # (optional)
+    bare: true
+
+    # Minimum release age in days for compiler-managed engine installs. Zero disables
+    # the cooldown only outside strict mode.
+    # (optional)
+    cooldown: 1
+
+    # Override the working directory for the engine's spawned process. Accepts a
+    # literal path or a GitHub Actions expression (e.g. `${{ github.workspace
+    # }}/subdir`). When set, passed as GH_AW_ENGINE_CWD to the engine execution
+    # environment.
+    # (optional)
+    cwd: "example-value"
+
+    # Experimental per-run model and reasoning-effort selection from the task text for
+    # Copilot, Claude, Codex, and pi engines, on GitHub Copilot or, for Claude and
+    # Codex, natively on Anthropic or OpenAI; requires the AWF firewall and ignores
+    # fixed model and effort settings. Eligible workflows that choose no model or
+    # routing on GitHub Copilot inference default to goal cost and mode auto; set
+    # false to opt out. See https://github.github.com/gh-aw/reference/model-routing/.
+    # (optional)
+    # Accepted formats:
+
+    # Format 1: object
+    model-routing:
+      # Routing objective: cost prefers the cheapest model and effort that meet the
+      # mode's target; cost-speed prefers the fastest model and effort that meet it.
+      goal: "cost"
+
+      # Routing quality profile: economy, balanced, and robust set increasing quality
+      # bars, generally with increasing cost; auto lets the classifier recommend one of
+      # these profiles per task.
+      mode: "economy"
+
+      # Optional exact model names of the routing provider or gh-aw model aliases (such
+      # as small or sonnet) that narrow the router's choice for the main agent only.
+      # Aliases expand to their model patterns for the routing provider (GitHub Copilot,
+      # or Anthropic or OpenAI for native Claude and Codex routing), limited to the
+      # engine's model family for Claude and Codex. This is not a request policy; put
+      # patterns such as gpt-* in models.allowed or models.blocked. When omitted, the
+      # router chooses from the models that policy allows (Claude and Codex only from
+      # their own model family). Among workflows that enable routing for the same
+      # engine, if any omits allowed-models, the router has no shortlist; otherwise,
+      # their lists are combined. GitHub Actions expressions are allowed only when
+      # neither models.allowed nor models.blocked is set.
+      # (optional)
+      allowed-models: []
+        # Array of strings
+
+    # Format 2: Disable the implicit cost/auto model-routing default without pinning a
+    # model; the existing model variables and fallback model apply.
+    model-routing: true
+
+    # Optional inference provider override for this engine. Defaults to the engine's
+    # native provider (copilot: github, claude: anthropic, codex: openai, pi: github).
+    # (optional)
+    model-provider: "github"
 
 # AWF turn cap (`max_turns`) applied consistently across all agentic engines.
 # Supports GitHub Actions expressions (e.g. '${{ inputs.max-turns }}') for
@@ -4543,6 +4620,11 @@ max-daily-ai-credits:
       # permission-secret-scanning-alerts input for actions/create-github-app-token.
       # (optional)
       secret-scanning-alerts: "read"
+
+      # Repository security advisories permission. GitHub App-only; forwarded as
+      # permission-repository-advisories when minting a token.
+      # (optional)
+      repository-advisories: "read"
 
       # Permission level for repository webhooks (read/none; "write" is rejected by the
       # compiler). GitHub App-only permission.
@@ -4962,6 +5044,11 @@ tools:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -5013,86 +5100,6 @@ tools:
     # empty string to disable all feature flags.
     # (optional)
     features: "example-value"
-
-  # Linear tools provided by Linear's official hosted MCP server
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: Enable Linear using the well-known LINEAR_API_KEY secret
-  linear: null
-
-  # Format 2: object
-  linear:
-    # Optional Linear API key or OAuth access token secret reference. Defaults to ${{
-    # secrets.LINEAR_API_KEY }}.
-    # (optional)
-    token: "example-value"
-
-    # Linear MCP toolset name(s) to enable. Toolsets are expanded to gateway-enforced
-    # allowed tools.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: A Linear MCP toolset name that enables a related group of read-only
-    # Linear tools.
-    toolsets: "all"
-
-    # Format 2: Array of Linear MCP toolset names
-    toolsets: ["issues","projects"]
-      # Array items: A Linear MCP toolset name that enables a related group of read-only
-      # Linear tools.
-
-    # List of allowed Linear MCP tool names or wildcard patterns. When toolsets are
-    # set, every pattern must match a tool in those toolsets.
-    # (optional)
-    allowed: []
-      # Array of strings
-
-    # Whether failure to connect to Linear should fail MCP gateway startup. Defaults
-    # to true.
-    # (optional)
-    required: true
-
-  # Jira tools provided by Atlassian's remote Rovo MCP service. This integration
-  # supports non-interactive CI/CD authentication only.
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: Disable the Jira integration, including a Jira configuration inherited
-  # from an import.
-  jira: false
-
-  # Format 2: object
-  jira:
-    # Atlassian Rovo MCP endpoint. Defaults to the official hosted endpoint.
-    # (optional)
-    url: "example-value"
-
-    # Approved read-only Jira MCP tools the agent may call. Required; write-capable
-    # tools are not supported. "*" expands to all approved read-only tools; the full,
-    # unrestricted MCP tool set can never be enabled.
-    allowed: []
-      # Array of strings
-
-    # Non-interactive authentication for GitHub Actions.
-    # Accepted formats:
-
-    # Format 1: object
-    auth:
-      type: null
-
-      # Atlassian service account API key, sent with the HTTP bearer scheme.
-      token: "example-value"
-
-    # Format 2: object
-    auth:
-      type: null
-
-      # Atlassian account email stored as a GitHub Actions secret.
-      email: "example-value"
-
-      # Atlassian API token stored as a GitHub Actions secret.
-      token: "example-value"
 
   # Bash shell command execution tool. Supports wildcards: '*' (all commands),
   # 'command *' (command with any args, e.g., 'date *', 'echo *'). Default safe
@@ -5588,6 +5595,110 @@ tools:
 
   # Format 3: Repo-memory configuration object
   repo-memory:
+    # GitHub App credentials for repo-memory. Push tokens request only contents:
+    # write; cross-repository clone tokens request only contents: read.
+    # (optional)
+    github-app:
+      # GitHub App client ID (e.g., '${{ vars.APP_ID }}'). Required to mint a GitHub App
+      # token.
+      # (optional)
+      client-id: "example-value"
+
+      # Deprecated alias for client-id. GitHub App ID/client ID (e.g., '${{ vars.APP_ID
+      # }}').
+      # (optional)
+      app-id: "example-value"
+
+      # GitHub App private key (e.g., '${{ secrets.APP_PRIVATE_KEY }}'). Required to
+      # mint a GitHub App token.
+      # (optional)
+      private-key: "example-value"
+
+      # Optional owner of the GitHub App installation (defaults to current repository
+      # owner if not specified)
+      # (optional)
+      owner: "example-value"
+
+      # Optional list of repositories to grant access to (defaults to current repository
+      # if not specified)
+      # (optional)
+      repositories: []
+        # Array of strings
+
+      # If true, skip token minting when client-id/private-key resolve to empty strings
+      # at runtime. Defaults to false.
+      # (optional)
+      ignore-if-missing: true
+
+    # GitHub App for memory restores and daily-credit ledger clones. Overrides
+    # github-app for reads only.
+    # (optional)
+    github-app-read:
+      # GitHub App client ID (e.g., '${{ vars.APP_ID }}'). Required to mint a GitHub App
+      # token.
+      # (optional)
+      client-id: "example-value"
+
+      # Deprecated alias for client-id. GitHub App ID/client ID (e.g., '${{ vars.APP_ID
+      # }}').
+      # (optional)
+      app-id: "example-value"
+
+      # GitHub App private key (e.g., '${{ secrets.APP_PRIVATE_KEY }}'). Required to
+      # mint a GitHub App token.
+      # (optional)
+      private-key: "example-value"
+
+      # Optional owner of the GitHub App installation (defaults to current repository
+      # owner if not specified)
+      # (optional)
+      owner: "example-value"
+
+      # Optional list of repositories to grant access to (defaults to current repository
+      # if not specified)
+      # (optional)
+      repositories: []
+        # Array of strings
+
+      # If true, skip token minting when client-id/private-key resolve to empty strings
+      # at runtime. Defaults to false.
+      # (optional)
+      ignore-if-missing: true
+
+    # GitHub App for memory pushes. Overrides github-app for writes only.
+    # (optional)
+    github-app-write:
+      # GitHub App client ID (e.g., '${{ vars.APP_ID }}'). Required to mint a GitHub App
+      # token.
+      # (optional)
+      client-id: "example-value"
+
+      # Deprecated alias for client-id. GitHub App ID/client ID (e.g., '${{ vars.APP_ID
+      # }}').
+      # (optional)
+      app-id: "example-value"
+
+      # GitHub App private key (e.g., '${{ secrets.APP_PRIVATE_KEY }}'). Required to
+      # mint a GitHub App token.
+      # (optional)
+      private-key: "example-value"
+
+      # Optional owner of the GitHub App installation (defaults to current repository
+      # owner if not specified)
+      # (optional)
+      owner: "example-value"
+
+      # Optional list of repositories to grant access to (defaults to current repository
+      # if not specified)
+      # (optional)
+      repositories: []
+        # Array of strings
+
+      # If true, skip token minting when client-id/private-key resolve to empty strings
+      # at runtime. Defaults to false.
+      # (optional)
+      ignore-if-missing: true
+
     # Branch prefix for memory storage (default: 'memory'). Must be 4-32 characters,
     # alphanumeric with hyphens/underscores, and cannot be 'copilot'. Branch will be
     # named {branch-prefix}/{id}
@@ -5846,6 +5957,19 @@ safe-outputs:
     allowed-fields: []
       # Array of strings
 
+    # Maximum number of artifacts attached per created issue (default: 10). Zero or a
+    # negative value disables issue artifacts.
+    # (optional)
+    max-issue-artifacts: 1
+
+    # Maximum UTF-8 size of each issue artifact body (default: 1mb = 1048576 bytes).
+    # Accepts positive integer bytes or a human-friendly size such as 512kb, 1mb, or
+    # 1.5mb. Units B, K/KB/KiB, M/MB/MiB, G/GB/GiB, and T/TB/TiB are case-insensitive
+    # and use multiples of 1024. The size must resolve to a positive whole byte count.
+    # Oversized bodies are rejected, not truncated.
+    # (optional)
+    max-issue-artifact-size: null
+
     # GitHub usernames to assign the created issue to. Can be a single username string
     # or array of usernames. Use 'copilot' to assign to GitHub Copilot.
     # (optional)
@@ -5881,10 +6005,11 @@ safe-outputs:
     # (optional)
     deduplicate-by-title: null
 
-    # Deduplicate against issues with all listed labels. With deduplicate-by-title,
-    # both the title and all labels must match (AND). Applies within-run and against
-    # open/recently-closed repository issues. Omitted or empty lists disable label
-    # filtering. Literal strings only; does not change labels applied at creation.
+    # Deduplicate against issues with all listed labels. When deduplicate-by-title is
+    # also enabled, both the title and all labels must match (AND). Applies within-run
+    # and against open/recently-closed repository issues. Omitted or empty lists
+    # disable label filtering. Labels must be literal strings, not GitHub Actions
+    # expressions. Does not change labels applied at creation.
     # (optional)
     deduplicate-by-labels: []
       # Array of strings
@@ -6170,6 +6295,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -6451,6 +6581,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -6723,6 +6858,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -7058,6 +7198,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -7374,6 +7519,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -7640,6 +7790,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -7995,6 +8150,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -8248,6 +8408,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -8573,6 +8738,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -8824,6 +8994,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -9152,6 +9327,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -9430,6 +9610,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -9725,6 +9910,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -9754,252 +9944,6 @@ safe-outputs:
   # Format 2: Enable workflow run approval with default configuration
   approve-workflow-run: null
 
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: Configuration for creating Jira Cloud issues through the privileged
-  # safe-output execution path.
-  jira-create-issue:
-    # Maximum number of Jira issues to create (default: 1).
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: string
-    max: "example-value"
-
-    # Preview Jira issue creation without sending an HTTP mutation.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: string
-    staged: "example-value"
-
-  # Format 2: Enable Jira issue creation with default configuration.
-  jira-create-issue: null
-
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: Configuration for updating Jira Cloud issue summaries or descriptions
-  # through the privileged safe-output execution path.
-  jira-update-issue:
-    # Maximum number of Jira issues to update (default: 1).
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: string
-    max: "example-value"
-
-    # Preview Jira issue updates without sending an HTTP mutation.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: string
-    staged: "example-value"
-
-  # Format 2: Enable Jira issue updates with default configuration.
-  jira-update-issue: null
-
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: Configuration for commenting on Jira Cloud issues through the
-  # privileged safe-output execution path.
-  jira-add-comment:
-    # Maximum number of Jira comments to add (default: 1).
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: string
-    max: "example-value"
-
-    # Preview Jira comments without sending an HTTP mutation.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: string
-    staged: "example-value"
-
-  # Format 2: Enable Jira comments with default configuration.
-  jira-add-comment: null
-
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: Configuration for adding labels to Jira Cloud issues through the
-  # privileged safe-output execution path.
-  jira-add-label:
-    # Maximum number of Jira labels to add (default: 1).
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: string
-    max: "example-value"
-
-    # Preview Jira label additions without sending an HTTP mutation.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: string
-    staged: "example-value"
-
-  # Format 2: Enable Jira label additions with default configuration.
-  jira-add-label: null
-
-  # Experimental. Create Linear issues through the isolated safe_outputs job.
-  # (optional)
-  linear-create-issue:
-    # Optional trusted Linear team model UUID, key, name, or GitHub Actions
-    # expression. Defaults to LINEAR_TEAM_ID.
-    # (optional)
-    team-id: "example-value"
-
-    # Optional trusted Linear project identifier from a project URL or model UUID.
-    # (optional)
-    project-id: "example-value"
-
-    # Maximum number of Linear issues to create (default: 1).
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: string
-    max: "example-value"
-
-    # A boolean value that may also be specified as a GitHub Actions expression string
-    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
-    staged: "example-value"
-
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: array
-    samples: []
-      # Array items: object
-
-    # Format 2: object
-    samples:
-      {}
-
-  # Experimental. Add comments to one trusted Linear issue through the isolated
-  # safe_outputs job.
-  # (optional)
-  linear-add-comment:
-    # Trusted Linear issue UUID or shorthand identifier such as ENG-123.
-    target: "example-value"
-
-    # Maximum number of Linear comments to add (default: 1).
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: string
-    max: "example-value"
-
-    # A boolean value that may also be specified as a GitHub Actions expression string
-    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
-    staged: "example-value"
-
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: array
-    samples: []
-      # Array items: object
-
-    # Format 2: object
-    samples:
-      {}
-
-  # Experimental. Update explicitly enabled fields on one trusted Linear issue
-  # through the isolated safe_outputs job.
-  # (optional)
-  linear-update-issue:
-    # Trusted Linear issue UUID or shorthand identifier such as ENG-123.
-    target: "example-value"
-
-    # Allow the agent to update the Linear issue title.
-    # (optional)
-    title: null
-
-    # Allow the agent to replace the Linear issue description.
-    # (optional)
-    body: null
-
-    # Maximum number of updates to apply (default: 1).
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: string
-    max: "example-value"
-
-    # A boolean value that may also be specified as a GitHub Actions expression string
-    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
-    staged: "example-value"
-
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: array
-    samples: []
-      # Array items: object
-
-    # Format 2: object
-    samples:
-      {}
-
   # Enable AI agents to add comments to GitHub issues, pull requests, or
   # discussions. Supports templating, cross-repository commenting, and automatic
   # mentions.
@@ -10009,6 +9953,12 @@ safe-outputs:
   # Format 1: Configuration for automatically creating GitHub issue or pull request
   # comments from AI workflow output. The main job does not need write permissions.
   add-comment:
+    # Render safe-output data in a collapsed Structured data details block. Default:
+    # false (visible fenced JSON). Requires safe-outputs.data to accept structured
+    # data.
+    # (optional)
+    collapse-data: true
+
     # Maximum number of http/https URL occurrences in agent-provided comment content
     # (default: 50). Generated footer and metadata links are excluded.
     # (optional)
@@ -10358,6 +10308,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -10732,6 +10687,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -10774,7 +10734,12 @@ safe-outputs:
     # Enable auto-merge for the pull request. Accepts true/false, an explicit merge
     # method (squash, merge, rebase), or a GitHub Actions expression resolving to any
     # of those values. When enabled, the PR will be automatically merged once all
-    # required checks pass and required approvals are met. Defaults to false.
+    # required checks pass and required approvals are met. Auto-merge is withheld and
+    # independent review is required when protected-file changes trigger the
+    # request-review policy, detection produces a caution (including detection engine
+    # errors), or a required review fails (including when the bot authored the PR).
+    # Configured reviewers or a successful REQUEST_CHANGES review do not bypass these
+    # gates. Defaults to false.
     # (optional)
     # Accepted formats:
 
@@ -11227,6 +11192,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -11519,6 +11489,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -11844,6 +11819,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -12123,6 +12103,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -12404,6 +12389,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -12684,6 +12674,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -12973,6 +12968,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -13250,6 +13250,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -13504,6 +13509,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -13533,446 +13543,6 @@ safe-outputs:
   # Format 2: Enable code scanning autofix creation with default configuration (max:
   # 10)
   autofix-code-scanning-alert: null
-
-  # Experimental. Create Azure DevOps work items through a trusted safe-output
-  # handler. Using this field emits a compile-time warning.
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: object
-  ado-create-work-item:
-    # (optional)
-    work-item-type: "example-value"
-
-    # (optional)
-    description-field: "example-value"
-
-    # (optional)
-    area-path: "example-value"
-
-    # (optional)
-    iteration-path: "example-value"
-
-    # (optional)
-    assignee: "example-value"
-
-    # (optional)
-    tags: []
-      # Array of strings
-
-    # (optional)
-    allowed-tags: []
-      # Array of strings
-
-    # (optional)
-    custom-fields:
-      {}
-
-    # (optional)
-    artifact-link:
-      # (optional)
-      enabled: true
-
-      # (optional)
-      repository: "example-value"
-
-      # (optional)
-      branch: "example-value"
-
-    # A positive integer value that may also be specified as a GitHub Actions
-    # expression string that resolves to an integer at runtime (e.g. '${{
-    # inputs.max-runs }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: GitHub Actions expression that resolves to an integer at runtime
-    max: "example-value"
-
-    # A boolean value that may also be specified as a GitHub Actions expression string
-    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
-    staged: "example-value"
-
-    # Internal hidden feature. Optional declarative sample payloads for deterministic
-    # safe-output replay.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: array
-    samples: []
-      # Array items: object
-
-    # Format 2: object
-    samples:
-      {}
-
-  # Format 2: null
-  ado-create-work-item: null
-
-  # Experimental. Update explicitly scoped Azure DevOps work items and explicitly
-  # enabled fields. Using this field emits a compile-time warning.
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: object
-  ado-update-work-item:
-    # Accepted formats:
-
-    # Format 1: integer
-    target: 1
-
-    # Format 3: array
-    target: []
-      # Array items: integer
-
-    # Format 4: string
-    target: "example-value"
-
-    # (optional)
-    status: true
-
-    # (optional)
-    title: true
-
-    # (optional)
-    body: true
-
-    # (optional)
-    markdown-body: true
-
-    # (optional)
-    title-prefix: "example-value"
-
-    # (optional)
-    tag-prefix: "example-value"
-
-    # (optional)
-    area-path: true
-
-    # (optional)
-    iteration-path: true
-
-    # (optional)
-    assignee: true
-
-    # (optional)
-    tags: true
-
-    # (optional)
-    allowed-tags: []
-      # Array of strings
-
-    # (optional)
-    allowed-area-prefixes: []
-      # Array of strings
-
-    # (optional)
-    allowed-iteration-prefixes: []
-      # Array of strings
-
-    # A positive integer value that may also be specified as a GitHub Actions
-    # expression string that resolves to an integer at runtime (e.g. '${{
-    # inputs.max-runs }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: GitHub Actions expression that resolves to an integer at runtime
-    max: "example-value"
-
-    # A boolean value that may also be specified as a GitHub Actions expression string
-    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
-    staged: "example-value"
-
-    # Internal hidden feature. Optional declarative sample payloads for deterministic
-    # safe-output replay.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: array
-    samples: []
-      # Array items: object
-
-    # Format 2: object
-    samples:
-      {}
-
-  # Format 2: null
-  ado-update-work-item: null
-
-  # Experimental. Comment on explicitly scoped Azure DevOps work items. Using this
-  # field emits a compile-time warning.
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: object
-  ado-comment-on-work-item:
-    # Accepted formats:
-
-    # Format 1: integer
-    target: 1
-
-    # Format 3: array
-    target: []
-      # Array items: integer
-
-    # Format 4: string
-    target: "example-value"
-
-    # A positive integer value that may also be specified as a GitHub Actions
-    # expression string that resolves to an integer at runtime (e.g. '${{
-    # inputs.max-runs }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: GitHub Actions expression that resolves to an integer at runtime
-    max: "example-value"
-
-    # A boolean value that may also be specified as a GitHub Actions expression string
-    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
-    staged: "example-value"
-
-    # Internal hidden feature. Optional declarative sample payloads for deterministic
-    # safe-output replay.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: array
-    samples: []
-      # Array items: object
-
-    # Format 2: object
-    samples:
-      {}
-
-  # Format 2: null
-  ado-comment-on-work-item: null
-
-  # Experimental. Assign an Azure DevOps identity to a work item. Using this field
-  # emits a compile-time warning.
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: object
-  ado-assign-work-item:
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    target: 1
-
-    # Format 3: array
-    target: []
-      # Array items: integer
-
-    # Format 4: string
-    target: "example-value"
-
-    # (optional)
-    allowed: []
-      # Array of strings
-
-    # (optional)
-    blocked: []
-      # Array of strings
-
-    # A positive integer value that may also be specified as a GitHub Actions
-    # expression string that resolves to an integer at runtime (e.g. '${{
-    # inputs.max-runs }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: GitHub Actions expression that resolves to an integer at runtime
-    max: "example-value"
-
-    # A boolean value that may also be specified as a GitHub Actions expression string
-    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
-    staged: "example-value"
-
-    # Internal hidden feature. Optional declarative sample payloads for deterministic
-    # safe-output replay.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: array
-    samples: []
-      # Array items: object
-
-    # Format 2: object
-    samples:
-      {}
-
-  # Format 2: null
-  ado-assign-work-item: null
-
-  # Experimental. Link explicitly scoped Azure DevOps work items. Using this field
-  # emits a compile-time warning.
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: object
-  ado-link-work-items:
-    # Accepted formats:
-
-    # Format 1: integer
-    target: 1
-
-    # Format 3: array
-    target: []
-      # Array items: integer
-
-    # Format 4: string
-    target: "example-value"
-
-    # (optional)
-    allowed-link-types: []
-      # Array of strings
-
-    # A positive integer value that may also be specified as a GitHub Actions
-    # expression string that resolves to an integer at runtime (e.g. '${{
-    # inputs.max-runs }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: GitHub Actions expression that resolves to an integer at runtime
-    max: "example-value"
-
-    # A boolean value that may also be specified as a GitHub Actions expression string
-    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
-    staged: "example-value"
-
-    # Internal hidden feature. Optional declarative sample payloads for deterministic
-    # safe-output replay.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: array
-    samples: []
-      # Array items: object
-
-    # Format 2: object
-    samples:
-      {}
-
-  # Format 2: null
-  ado-link-work-items: null
-
-  # Experimental. Upload a staged workspace file to an Azure DevOps work item. Using
-  # this field emits a compile-time warning.
-  # (optional)
-  # Accepted formats:
-
-  # Format 1: object
-  ado-upload-workitem-attachment:
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    target: 1
-
-    # Format 3: array
-    target: []
-      # Array items: integer
-
-    # Format 4: string
-    target: "example-value"
-
-    # (optional)
-    max-file-size: 1
-
-    # (optional)
-    allowed-extensions: []
-      # Array of strings
-
-    # (optional)
-    comment-prefix: "example-value"
-
-    # A positive integer value that may also be specified as a GitHub Actions
-    # expression string that resolves to an integer at runtime (e.g. '${{
-    # inputs.max-runs }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: integer
-    max: 1
-
-    # Format 2: GitHub Actions expression that resolves to an integer at runtime
-    max: "example-value"
-
-    # A boolean value that may also be specified as a GitHub Actions expression string
-    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: boolean
-    staged: true
-
-    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
-    staged: "example-value"
-
-    # Internal hidden feature. Optional declarative sample payloads for deterministic
-    # safe-output replay.
-    # (optional)
-    # Accepted formats:
-
-    # Format 1: array
-    samples: []
-      # Array items: object
-
-    # Format 2: object
-    samples:
-      {}
-
-  # Format 2: null
-  ado-upload-workitem-attachment: null
 
   # Enable AI agents to create GitHub Check Runs that surface analysis results in
   # the PR checks UI. Requires checks: write permission.
@@ -14209,6 +13779,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -14564,6 +14139,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -14871,6 +14451,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -15170,6 +14755,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -15460,6 +15050,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -15805,6 +15400,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -16109,6 +15709,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -16402,6 +16007,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -16700,6 +16310,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -16733,6 +16348,19 @@ safe-outputs:
 
   # Format 1: Configuration for updating GitHub issues from agentic workflow output
   update-issue:
+    # Maximum number of artifacts attached per updated issue (default: 10). Zero or a
+    # negative value disables issue artifacts.
+    # (optional)
+    max-issue-artifacts: 1
+
+    # Maximum UTF-8 size of each issue artifact body (default: 1mb = 1048576 bytes).
+    # Accepts positive integer bytes or a human-friendly size such as 512kb, 1mb, or
+    # 1.5mb. Units B, K/KB/KiB, M/MB/MiB, G/GB/GiB, and T/TB/TiB are case-insensitive
+    # and use multiples of 1024. The size must resolve to a positive whole byte count.
+    # Oversized bodies are rejected, not truncated.
+    # (optional)
+    max-issue-artifact-size: null
+
     # Allow updating issue status (open/closed) - presence of key indicates field can
     # be updated
     # (optional)
@@ -17003,6 +16631,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -17314,6 +16947,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -17344,7 +16982,11 @@ safe-outputs:
   # body updates enabled)
   update-pull-request: null
 
-  # Enable AI agents to merge pull requests under configured policy gates.
+  # Enable AI agents to merge pull requests under configured policy gates. Merging
+  # is blocked by detection, protected-file, or other caution notices in the live PR
+  # or review bodies, or by current detection warnings or failures, even when
+  # approvals and checks pass. Independent manual review and manual merge are
+  # required in these cases.
   # (optional)
   # Accepted formats:
 
@@ -17354,6 +16996,38 @@ safe-outputs:
   # Format 2: Experimental configuration for controlled pull request merges. The
   # merge is blocked unless all configured gates pass.
   merge-pull-request:
+    # Block merges modifying protected files by default, using create-pull-request's
+    # protected set and exclusions. allowed explicitly disables this file gate, not
+    # other merge gates. Creation-specific request-review and fallback-to-issue
+    # policies are not supported.
+    # (optional)
+    # Accepted formats:
+
+    # Format 1: string
+    protected-files: "blocked"
+
+    # Format 2: GitHub Actions expression resolving to blocked or allowed.
+    # Unrecognized resolved values block protected-file changes.
+    protected-files: "example-value"
+
+    # Format 3: object
+    protected-files:
+      # (optional)
+      # Accepted formats:
+
+      # Format 1: string
+      policy: "blocked"
+
+      # Format 2: string
+      policy: "example-value"
+
+      # Same exclusions as create-pull-request: basenames or protected directory
+      # prefixes, or repository-root globs with a leading /. Each pattern must contain a
+      # letter, digit, underscore, or hyphen and no whitespace.
+      # (optional)
+      exclude: []
+        # Array of strings
+
     # Maximum number of pull request merges to perform per run (default: 1). Supports
     # integer or GitHub Actions expression (e.g. '${{ inputs.max }}').
     # (optional)
@@ -17623,6 +17297,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -17980,6 +17659,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -18316,6 +18000,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -18696,6 +18385,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -18988,6 +18682,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -19285,6 +18984,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -19570,6 +19274,11 @@ safe-outputs:
           # (optional)
           secret-scanning-alerts: "read"
 
+          # Repository security advisories permission. GitHub App-only; forwarded as
+          # permission-repository-advisories when minting a token.
+          # (optional)
+          repository-advisories: "read"
+
           # Permission level for repository webhooks (read/none; "write" is rejected by the
           # compiler). GitHub App-only permission.
           # (optional)
@@ -19846,6 +19555,11 @@ safe-outputs:
           # (optional)
           secret-scanning-alerts: "read"
 
+          # Repository security advisories permission. GitHub App-only; forwarded as
+          # permission-repository-advisories when minting a token.
+          # (optional)
+          repository-advisories: "read"
+
           # Permission level for repository webhooks (read/none; "write" is rejected by the
           # compiler). GitHub App-only permission.
           # (optional)
@@ -20103,6 +19817,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -20380,6 +20099,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -20662,6 +20386,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -20924,6 +20653,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -21194,6 +20928,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -21479,6 +21218,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -21750,6 +21494,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -21778,6 +21527,524 @@ safe-outputs:
 
   # Format 2: Enable code coverage report uploads with default configuration
   upload-code-coverage: null
+
+  # Experimental. Add comments to repository security advisories. Requires an
+  # external token or GitHub App with Repository security advisories write
+  # permission; GITHUB_TOKEN is not supported.
+  # (optional)
+  # Accepted formats:
+
+  # Format 1: object
+  add-security-advisory-comment:
+    # Maximum number of advisory comments per run (default: 1).
+    # (optional)
+    # Accepted formats:
+
+    # Format 1: integer
+    max: 1
+
+    # Format 2: string
+    max: "example-value"
+
+    # GitHub token expression for same-job contexts. Accepts a secrets expression
+    # (e.g., `${{ secrets.NAME }}` or `${{ secrets.NAME1 || secrets.NAME2 }}`), a
+    # cross-job output expression (e.g., `${{ needs.auth.outputs.token }}`), or a
+    # same-job step output expression with optional secret fallbacks (e.g., `${{
+    # steps.fetch-token.outputs.my-token || secrets.GITHUB_TOKEN }}`). Pattern
+    # details: secret names and job IDs match `[A-Za-z_][A-Za-z0-9_]*`; same-job step
+    # IDs and output names match `[A-Za-z_][A-Za-z0-9_-]*`.
+    # (optional)
+    github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+    # GitHub App credentials for minting installation access tokens.
+    # (optional)
+    github-app:
+      # Deprecated alias for client-id. GitHub App ID/client ID (e.g., '${{ vars.APP_ID
+      # }}').
+      # (optional)
+      app-id: "example-value"
+
+      # GitHub App client ID (e.g., '${{ vars.APP_ID }}'). Required to mint a GitHub App
+      # token.
+      # (optional)
+      client-id: "example-value"
+
+      # GitHub App private key (e.g., '${{ secrets.APP_PRIVATE_KEY }}'). Required to
+      # mint a GitHub App token.
+      # (optional)
+      private-key: "example-value"
+
+      # If true, skip token minting when client-id/private-key resolve to empty strings
+      # at runtime. Defaults to false.
+      # (optional)
+      ignore-if-missing: true
+
+      # Optional owner of the GitHub App installation (defaults to current repository
+      # owner if not specified)
+      # (optional)
+      owner: "example-value"
+
+      # Optional list of repositories to grant access to (defaults to current repository
+      # if not specified)
+      # (optional)
+      repositories: []
+        # Array of strings
+
+      # Optional extra GitHub App-only permissions to merge into the minted token. Takes
+      # effect for tools.github.github-app and safe-outputs.github-app; ignored in
+      # on.github-app and the top-level github-app fallback. Use to add GitHub App-only
+      # scopes (e.g. members, organization-administration) not expressible via standard
+      # handler declarations.
+      # (optional)
+      permissions:
+        # Permission level for repository administration (read/none; "write" is rejected
+        # by the compiler). GitHub App-only permission for repository administration.
+        # (optional)
+        administration: "read"
+
+        # Permission level for Codespaces (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        codespaces: "read"
+
+        # Permission level for Codespaces lifecycle administration (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        codespaces-lifecycle-admin: "read"
+
+        # Permission level for Codespaces metadata (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        codespaces-metadata: "read"
+
+        # Permission level for user email addresses (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        email-addresses: "read"
+
+        # Permission level for repository environments (read/none; "write" is rejected by
+        # the compiler). GitHub App-only permission.
+        # (optional)
+        environments: "read"
+
+        # Permission level for git signing (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        git-signing: "read"
+
+        # Permission level for organization members (read/none; "write" is rejected by the
+        # compiler). Required for org team membership API calls.
+        # (optional)
+        members: "read"
+
+        # Permission level for organization administration (read/none; "write" is rejected
+        # by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-administration: "read"
+
+        # Permission level for organization announcement banners (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-announcement-banners: "read"
+
+        # Permission level for organization Codespaces (read/none; "write" is rejected by
+        # the compiler). GitHub App-only permission.
+        # (optional)
+        organization-codespaces: "read"
+
+        # Permission level for organization Copilot (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        organization-copilot: "read"
+
+        # Permission level for organization custom org roles (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-custom-org-roles: "read"
+
+        # Permission level for organization custom properties (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-custom-properties: "read"
+
+        # Permission level for organization custom repository roles (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-custom-repository-roles: "read"
+
+        # Permission level for organization events (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        organization-events: "read"
+
+        # Permission level for organization webhooks (read/none; "write" is rejected by
+        # the compiler). GitHub App-only permission.
+        # (optional)
+        organization-hooks: "read"
+
+        # Permission level for organization members management (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-members: "read"
+
+        # Permission level for organization packages (read/none; "write" is rejected by
+        # the compiler). GitHub App-only permission.
+        # (optional)
+        organization-packages: "read"
+
+        # Permission level for organization personal access token requests (read/none;
+        # "write" is rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-personal-access-token-requests: "read"
+
+        # Permission level for organization personal access tokens (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-personal-access-tokens: "read"
+
+        # Permission level for organization plan (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        organization-plan: "read"
+
+        # Permission level for organization self-hosted runners (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-self-hosted-runners: "read"
+
+        # Permission level for organization user blocking (read/none; "write" is rejected
+        # by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-user-blocking: "read"
+
+        # Permission level for repository custom properties (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        repository-custom-properties: "read"
+
+        # Permission level for secret scanning alerts (read/none). Forwarded as
+        # permission-secret-scanning-alerts input for actions/create-github-app-token.
+        # (optional)
+        secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
+        # Permission level for repository webhooks (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        repository-hooks: "read"
+
+        # Permission level for single file access (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        single-file: "read"
+
+        # Permission level for team discussions (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        team-discussions: "read"
+
+        # Permission level for Dependabot vulnerability alerts (read/none; "write" is
+        # rejected by the compiler). Also available as a GITHUB_TOKEN scope. When used
+        # with a GitHub App, forwarded as permission-vulnerability-alerts input.
+        # (optional)
+        vulnerability-alerts: "read"
+
+        # Permission level for GitHub Actions workflow files (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        workflows: "read"
+
+    # Include the standard AI-generated attribution footer (default: true).
+    # (optional)
+    footer: true
+
+    # A boolean value that may also be specified as a GitHub Actions expression string
+    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
+    # (optional)
+    # Accepted formats:
+
+    # Format 1: boolean
+    staged: true
+
+    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
+    staged: "example-value"
+
+    # Internal hidden feature. Declarative tool argument samples for deterministic
+    # safe-outputs replay through --use-samples or features.samples.
+    # (optional)
+    # Accepted formats:
+
+    # Format 1: array
+    samples: []
+      # Array items: object
+
+    # Format 2: object
+    samples:
+      {}
+
+  # Format 2: null
+  add-security-advisory-comment: null
+
+  # Experimental. Create draft repository security advisories only. Requires an
+  # external token or GitHub App with Repository security advisories write
+  # permission; GITHUB_TOKEN is not supported.
+  # (optional)
+  # Accepted formats:
+
+  # Format 1: object
+  create-security-advisory:
+    # Maximum number of draft advisories per run (default: 1).
+    # (optional)
+    # Accepted formats:
+
+    # Format 1: integer
+    max: 1
+
+    # Format 2: string
+    max: "example-value"
+
+    # GitHub token expression for same-job contexts. Accepts a secrets expression
+    # (e.g., `${{ secrets.NAME }}` or `${{ secrets.NAME1 || secrets.NAME2 }}`), a
+    # cross-job output expression (e.g., `${{ needs.auth.outputs.token }}`), or a
+    # same-job step output expression with optional secret fallbacks (e.g., `${{
+    # steps.fetch-token.outputs.my-token || secrets.GITHUB_TOKEN }}`). Pattern
+    # details: secret names and job IDs match `[A-Za-z_][A-Za-z0-9_]*`; same-job step
+    # IDs and output names match `[A-Za-z_][A-Za-z0-9_-]*`.
+    # (optional)
+    github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+    # GitHub App credentials for minting installation access tokens.
+    # (optional)
+    github-app:
+      # Deprecated alias for client-id. GitHub App ID/client ID (e.g., '${{ vars.APP_ID
+      # }}').
+      # (optional)
+      app-id: "example-value"
+
+      # GitHub App client ID (e.g., '${{ vars.APP_ID }}'). Required to mint a GitHub App
+      # token.
+      # (optional)
+      client-id: "example-value"
+
+      # GitHub App private key (e.g., '${{ secrets.APP_PRIVATE_KEY }}'). Required to
+      # mint a GitHub App token.
+      # (optional)
+      private-key: "example-value"
+
+      # If true, skip token minting when client-id/private-key resolve to empty strings
+      # at runtime. Defaults to false.
+      # (optional)
+      ignore-if-missing: true
+
+      # Optional owner of the GitHub App installation (defaults to current repository
+      # owner if not specified)
+      # (optional)
+      owner: "example-value"
+
+      # Optional list of repositories to grant access to (defaults to current repository
+      # if not specified)
+      # (optional)
+      repositories: []
+        # Array of strings
+
+      # Optional extra GitHub App-only permissions to merge into the minted token. Takes
+      # effect for tools.github.github-app and safe-outputs.github-app; ignored in
+      # on.github-app and the top-level github-app fallback. Use to add GitHub App-only
+      # scopes (e.g. members, organization-administration) not expressible via standard
+      # handler declarations.
+      # (optional)
+      permissions:
+        # Permission level for repository administration (read/none; "write" is rejected
+        # by the compiler). GitHub App-only permission for repository administration.
+        # (optional)
+        administration: "read"
+
+        # Permission level for Codespaces (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        codespaces: "read"
+
+        # Permission level for Codespaces lifecycle administration (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        codespaces-lifecycle-admin: "read"
+
+        # Permission level for Codespaces metadata (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        codespaces-metadata: "read"
+
+        # Permission level for user email addresses (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        email-addresses: "read"
+
+        # Permission level for repository environments (read/none; "write" is rejected by
+        # the compiler). GitHub App-only permission.
+        # (optional)
+        environments: "read"
+
+        # Permission level for git signing (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        git-signing: "read"
+
+        # Permission level for organization members (read/none; "write" is rejected by the
+        # compiler). Required for org team membership API calls.
+        # (optional)
+        members: "read"
+
+        # Permission level for organization administration (read/none; "write" is rejected
+        # by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-administration: "read"
+
+        # Permission level for organization announcement banners (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-announcement-banners: "read"
+
+        # Permission level for organization Codespaces (read/none; "write" is rejected by
+        # the compiler). GitHub App-only permission.
+        # (optional)
+        organization-codespaces: "read"
+
+        # Permission level for organization Copilot (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        organization-copilot: "read"
+
+        # Permission level for organization custom org roles (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-custom-org-roles: "read"
+
+        # Permission level for organization custom properties (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-custom-properties: "read"
+
+        # Permission level for organization custom repository roles (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-custom-repository-roles: "read"
+
+        # Permission level for organization events (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        organization-events: "read"
+
+        # Permission level for organization webhooks (read/none; "write" is rejected by
+        # the compiler). GitHub App-only permission.
+        # (optional)
+        organization-hooks: "read"
+
+        # Permission level for organization members management (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-members: "read"
+
+        # Permission level for organization packages (read/none; "write" is rejected by
+        # the compiler). GitHub App-only permission.
+        # (optional)
+        organization-packages: "read"
+
+        # Permission level for organization personal access token requests (read/none;
+        # "write" is rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-personal-access-token-requests: "read"
+
+        # Permission level for organization personal access tokens (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-personal-access-tokens: "read"
+
+        # Permission level for organization plan (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        organization-plan: "read"
+
+        # Permission level for organization self-hosted runners (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-self-hosted-runners: "read"
+
+        # Permission level for organization user blocking (read/none; "write" is rejected
+        # by the compiler). GitHub App-only permission.
+        # (optional)
+        organization-user-blocking: "read"
+
+        # Permission level for repository custom properties (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        repository-custom-properties: "read"
+
+        # Permission level for secret scanning alerts (read/none). Forwarded as
+        # permission-secret-scanning-alerts input for actions/create-github-app-token.
+        # (optional)
+        secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
+        # Permission level for repository webhooks (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        repository-hooks: "read"
+
+        # Permission level for single file access (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        single-file: "read"
+
+        # Permission level for team discussions (read/none; "write" is rejected by the
+        # compiler). GitHub App-only permission.
+        # (optional)
+        team-discussions: "read"
+
+        # Permission level for Dependabot vulnerability alerts (read/none; "write" is
+        # rejected by the compiler). Also available as a GITHUB_TOKEN scope. When used
+        # with a GitHub App, forwarded as permission-vulnerability-alerts input.
+        # (optional)
+        vulnerability-alerts: "read"
+
+        # Permission level for GitHub Actions workflow files (read/none; "write" is
+        # rejected by the compiler). GitHub App-only permission.
+        # (optional)
+        workflows: "read"
+
+    # A boolean value that may also be specified as a GitHub Actions expression string
+    # that resolves to a boolean at runtime (e.g. '${{ inputs.my-flag }}').
+    # (optional)
+    # Accepted formats:
+
+    # Format 1: boolean
+    staged: true
+
+    # Format 2: GitHub Actions expression that resolves to a boolean at runtime
+    staged: "example-value"
+
+    # Internal hidden feature. Declarative tool argument samples for deterministic
+    # safe-outputs replay through --use-samples or features.samples.
+    # (optional)
+    # Accepted formats:
+
+    # Format 1: array
+    samples: []
+      # Array items: object
+
+    # Format 2: object
+    samples:
+      {}
+
+  # Format 2: null
+  create-security-advisory: null
 
   # Enable AI agents to edit and update GitHub release content, including release
   # notes, assets, and metadata.
@@ -21859,10 +22126,6 @@ safe-outputs:
   # secrets.GITHUB_TOKEN }} or ${{ secrets.CUSTOM_PAT }}
   # (optional)
   github-token: "${{ secrets.GITHUB_TOKEN }}"
-
-  # Linear personal API key expression used only by the trusted safe_outputs job.
-  # (optional)
-  linear-token: "example-value"
 
   # GitHub App credentials for minting installation access tokens. When configured,
   # a token will be generated using the app credentials and used for all safe output
@@ -22037,6 +22300,11 @@ safe-outputs:
       # (optional)
       secret-scanning-alerts: "read"
 
+      # Repository security advisories permission. GitHub App-only; forwarded as
+      # permission-repository-advisories when minting a token.
+      # (optional)
+      repository-advisories: "read"
+
       # Permission level for repository webhooks (read/none; "write" is rejected by the
       # compiler). GitHub App-only permission.
       # (optional)
@@ -22170,9 +22438,13 @@ safe-outputs:
       # Experimental per-run model and reasoning-effort selection from the task text for
       # Copilot, Claude, Codex, and pi engines, on GitHub Copilot or, for Claude and
       # Codex, natively on Anthropic or OpenAI; requires the AWF firewall and ignores
-      # fixed model and effort settings. See
-      # https://github.github.com/gh-aw/reference/model-routing/.
+      # fixed model and effort settings. Eligible workflows that choose no model or
+      # routing on GitHub Copilot inference default to goal cost and mode auto; set
+      # false to opt out. See https://github.github.com/gh-aw/reference/model-routing/.
       # (optional)
+      # Accepted formats:
+
+      # Format 1: object
       model-routing:
         # Routing objective: cost prefers the cheapest model and effort that meet the
         # mode's target; cost-speed prefers the fastest model and effort that meet it.
@@ -22197,6 +22469,10 @@ safe-outputs:
         # (optional)
         allowed-models: []
           # Array of strings
+
+      # Format 2: Disable the implicit cost/auto model-routing default without pinning a
+      # model; the existing model variables and fallback model apply.
+      model-routing: true
 
       # Optional model context window metadata for engines that need to register
       # explicit model catalog entries. Supported by the Pi engine when generating its
@@ -22368,9 +22644,9 @@ safe-outputs:
         azure-cloud: "example-value"
 
         # Optional WIF provider discriminator. Recognized values are 'azure', 'anthropic',
-        # and 'gcp'.
+        # 'gcp', and 'openai'.
         # (optional)
-        provider: "example-value"
+        provider: "azure"
 
         # Anthropic WIF federation rule ID (e.g., fdrl_...).
         # (optional)
@@ -22380,7 +22656,8 @@ safe-outputs:
         # (optional)
         organization-id: "example-value"
 
-        # Anthropic WIF service account ID (e.g., svac_...).
+        # Provider service account ID (Anthropic e.g., svac_...; OpenAI as configured in
+        # the OpenAI admin console).
         # (optional)
         service-account-id: "example-value"
 
@@ -22406,6 +22683,10 @@ safe-outputs:
         # us-central1 when omitted.
         # (optional)
         location: "example-value"
+
+        # OpenAI Workload Identity Provider ID configured in the OpenAI admin console.
+        # (optional)
+        identity-provider-id: "example-value"
 
       # Additional engine configuration text. Codex accepts TOML structurally merged
       # into config.toml. Pi accepts a JSON object with settings, model metadata
@@ -22499,6 +22780,19 @@ safe-outputs:
         # Inline Java driver source written to a generated .java file.
         # (optional)
         java: "example-value"
+
+      # Experimental. Persist engine-declared session files in GitHub Actions artifacts.
+      # Using this field emits a compile-time warning. Configuration and behavior may
+      # change without deprecation. Copilot, Claude, Codex, and Pi resume the exact
+      # native session with the current workflow prompt; other session-based engines
+      # receive a continuation prompt. Starts fresh when no prior history exists. No
+      # memory tool is required.
+      # (optional)
+      durable:
+        # Number of days to retain durable checkpoint artifacts, subject to repository and
+        # organization artifact retention policy.
+        # (optional)
+        retention-days: 1
 
       # Engine-specific plugin names to install before launching the engine. Currently
       # used by the Pi engine: each entry is passed to `pi install <extension>`.
@@ -22638,6 +22932,19 @@ safe-outputs:
       # (optional)
       mcp: true
 
+      # Experimental. Persist engine-declared session files in GitHub Actions artifacts.
+      # Using this field emits a compile-time warning. Configuration and behavior may
+      # change without deprecation. Copilot, Claude, Codex, and Pi resume the exact
+      # native session with the current workflow prompt; other session-based engines
+      # receive a continuation prompt. Starts fresh when no prior history exists. No
+      # memory tool is required.
+      # (optional)
+      durable:
+        # Number of days to retain durable checkpoint artifacts, subject to repository and
+        # organization artifact retention policy.
+        # (optional)
+        retention-days: 1
+
       # Runtime adapter identifier. Maps to the CodingAgentEngine registered in the
       # engine registry. Defaults to id when omitted.
       # (optional)
@@ -22735,6 +23042,69 @@ safe-outputs:
       # engine from frontmatter.
       # (optional)
       behaviors:
+        # Experimental native durability or session-file continuation. Declares persisted
+        # files and the continuation invocation; pinned dependency installation is
+        # optional. Enabling engine.durable emits a compile-time warning. The harness
+        # receives GH_AW_DURABLE_RESUMED and GH_AW_DURABLE_PARENT_RUN_ID.
+        # (optional)
+        durable:
+          # Explicit files or directories under /tmp/gh-aw/agent/ to persist.
+          # $GH_AW_DURABLE_CHECKPOINT refers to the compiler-managed native checkpoint file.
+          # Globs and overlapping paths are unsupported.
+          files: []
+            # Array of strings
+
+          # (optional)
+          installation: []
+
+          execution:
+            # (optional)
+            command-name: "example-value"
+
+            # (optional)
+            args: []
+              # Array of strings
+
+            # (optional)
+            step-name: "example-value"
+
+            # (optional)
+            model-env-var: "example-value"
+
+            # (optional)
+            model-env-provider-prefix: "example-value"
+
+            # (optional)
+            model-flag: "example-value"
+
+            # (optional)
+            mcp-config-env-var: "example-value"
+
+            # (optional)
+            mcp-config-flag: "example-value"
+
+            # (optional)
+            write-timestamp: true
+
+            # (optional)
+            provider-env-mode: "example-value"
+
+            # Parse only the final stderr attempt from native AWF protected command output
+            # (v0.28.67+, non-TTY Docker only). Requires an isolated recorder and verifying
+            # log parser; raw streams remain private and incomplete capture or structural
+            # redaction collisions fail publication.
+            # (optional)
+            protected-session-capture: true
+
+            # Additional static environment variables injected into the execution step. Values
+            # are rendered verbatim and must not contain secrets.
+            # (optional)
+            env:
+              {}
+
+          # (optional)
+          harness-script: "example-value"
+
         # Secret resolution mode for the engine (for example 'universal-llm-consumer').
         # (optional)
         secret-strategy: "example-value"
@@ -22742,6 +23112,14 @@ safe-outputs:
         # Secret or env var keys the engine accepts through engine.env.
         # (optional)
         supported-env-var-keys: []
+          # Array of strings
+
+        # Untrusted diagnostic files retained in the unified agent artifact after secret
+        # redaction and recovery-envelope validation, including failed executions. Paths
+        # must be literal files under /tmp/gh-aw/agent/ without traversal or wildcards and
+        # have a secret-redactable extension. Does not enable structured session parsing.
+        # (optional)
+        output-files: []
           # Array of strings
 
         # (optional)
@@ -22980,6 +23358,182 @@ safe-outputs:
       # the default engine when engine.id is not specified. Overrides the top-level
       # 'model' field.
       model: "example-value"
+
+    # Format 7: Pi engine options, including optional durable execution.
+    engine-config:
+      pi:
+        # Experimental. Persist engine-declared session files in GitHub Actions artifacts.
+        # Using this field emits a compile-time warning. Configuration and behavior may
+        # change without deprecation. Copilot, Claude, Codex, and Pi resume the exact
+        # native session with the current workflow prompt; other session-based engines
+        # receive a continuation prompt. Starts fresh when no prior history exists. No
+        # memory tool is required.
+        # (optional)
+        durable:
+          # Number of days to retain durable checkpoint artifacts, subject to repository and
+          # organization artifact retention policy.
+          # (optional)
+          retention-days: 1
+
+        # Model for this engine, overriding the top-level model. Has sensible defaults and
+        # can typically be omitted. Supports full model IDs (e.g.,
+        # 'claude-3-5-sonnet-20241022', 'gpt-4'), which is useful when a nested engine
+        # (e.g. safe-outputs.threat-detection.engine) needs a different model than the
+        # main agent engine.
+        # (optional)
+        model: "example-value"
+
+        # Optional version of the AI engine action (e.g., 'beta', 'stable', 20). Has
+        # sensible defaults and can typically be omitted. Numeric values are automatically
+        # converted to strings at runtime. GitHub Actions expressions (e.g., '${{
+        # inputs.engine-version }}') are accepted and compiled with injection-safe env var
+        # handling.
+        # (optional)
+        version: null
+
+        # Additional engine configuration text. Codex accepts TOML structurally merged
+        # into config.toml. Pi accepts a JSON object with settings, model metadata
+        # overrides, MCP exposure settings, and session persistence options.
+        # (optional)
+        config: "example-value"
+
+        # Custom environment variables to pass to the AI engine, including secret
+        # overrides (e.g., OPENAI_API_KEY: ${{ secrets.CUSTOM_KEY }})
+        # (optional)
+        env:
+          {}
+
+        # Optional array of command-line arguments to pass to the AI engine CLI. These
+        # arguments are injected after all other args but before the prompt.
+        # (optional)
+        args: []
+          # Array of strings
+
+        # Engine-level MCP gateway configuration. Settings here apply to the MCP gateway
+        # used by this engine.
+        # (optional)
+        mcp:
+          # Session timeout for MCP gateway sessions as a Go duration string (e.g. "30m",
+          # "4h", "24h"). Must be at least 5m (no upper bound). Omitted or empty uses the
+          # effective gateway default (precedence: this field > MCP_GATEWAY_SESSION_TIMEOUT
+          # env var > built-in default 6h). Longer timeouts benefit multi-hour workflows
+          # such as large-scale migrations; shorter values free gateway resources sooner.
+          # (optional)
+          session-timeout: "example-value"
+
+          # Timeout for individual MCP tool calls as a Go duration string (e.g. "30s", "2m",
+          # "10m"). Must be between 10s and 600s inclusive. Omitted or empty uses the
+          # gateway built-in default (60s). Use a higher value for slow MCP backends such as
+          # full-text search over large indexes.
+          # (optional)
+          tool-timeout: "example-value"
+
+        # Custom driver script, command, or inline source for the engine. String values
+        # accept a workspace-relative path or bare name. Inline object values are
+        # supported for the Copilot engine and materialize runtime files before execution.
+        # Supported inline runtimes are node, python, go, and java.
+        # (optional)
+        # Accepted formats:
+
+        # Format 1: Workspace-relative driver path or bare command name. The copilot
+        # engine accepts .js, .cjs, .mjs, .py, .ts, .mts, and .rb drivers; other engines
+        # accept .js, .cjs, and .mjs. Bare names without an extension are treated as
+        # built-in drivers or executables in PATH.
+        driver: "example-value"
+
+        # Format 2: Inline Copilot SDK driver source. Provide exactly one runtime key.
+        driver:
+          # Inline Node.js driver source written to a generated .cjs file.
+          # (optional)
+          node: "example-value"
+
+          # Inline Python driver source written to a generated .py file.
+          # (optional)
+          python: "example-value"
+
+          # Inline Go driver source written to a generated .go file.
+          # (optional)
+          go: "example-value"
+
+          # Inline Java driver source written to a generated .java file.
+          # (optional)
+          java: "example-value"
+
+        # Engine-specific plugin names to install before launching the engine. Currently
+        # used by the Pi engine: each entry is passed to `pi install <extension>`.
+        # (optional)
+        extensions: []
+          # Array of strings
+
+        # Custom executable path for the AI engine CLI. When specified, the workflow will
+        # skip the standard installation steps and use this command instead. The command
+        # should be the full path to the executable or a command available in PATH.
+        # (optional)
+        command: "example-value"
+
+        # When true, disables automatic loading of context and custom instructions where
+        # supported. Copilot uses --no-custom-instructions, Claude uses --bare, and Pi
+        # disables context-file, skill, prompt-template, extension, and theme discovery
+        # while retaining explicit workflow infrastructure extensions. Codex and Gemini do
+        # not support this option and emit a warning. Defaults to false.
+        # (optional)
+        bare: true
+
+        # Minimum release age in days for compiler-managed engine installs. Zero disables
+        # the cooldown only outside strict mode.
+        # (optional)
+        cooldown: 1
+
+        # Override the working directory for the engine's spawned process. Accepts a
+        # literal path or a GitHub Actions expression (e.g. `${{ github.workspace
+        # }}/subdir`). When set, passed as GH_AW_ENGINE_CWD to the engine execution
+        # environment.
+        # (optional)
+        cwd: "example-value"
+
+        # Experimental per-run model and reasoning-effort selection from the task text for
+        # Copilot, Claude, Codex, and pi engines, on GitHub Copilot or, for Claude and
+        # Codex, natively on Anthropic or OpenAI; requires the AWF firewall and ignores
+        # fixed model and effort settings. Eligible workflows that choose no model or
+        # routing on GitHub Copilot inference default to goal cost and mode auto; set
+        # false to opt out. See https://github.github.com/gh-aw/reference/model-routing/.
+        # (optional)
+        # Accepted formats:
+
+        # Format 1: object
+        model-routing:
+          # Routing objective: cost prefers the cheapest model and effort that meet the
+          # mode's target; cost-speed prefers the fastest model and effort that meet it.
+          goal: "cost"
+
+          # Routing quality profile: economy, balanced, and robust set increasing quality
+          # bars, generally with increasing cost; auto lets the classifier recommend one of
+          # these profiles per task.
+          mode: "economy"
+
+          # Optional exact model names of the routing provider or gh-aw model aliases (such
+          # as small or sonnet) that narrow the router's choice for the main agent only.
+          # Aliases expand to their model patterns for the routing provider (GitHub Copilot,
+          # or Anthropic or OpenAI for native Claude and Codex routing), limited to the
+          # engine's model family for Claude and Codex. This is not a request policy; put
+          # patterns such as gpt-* in models.allowed or models.blocked. When omitted, the
+          # router chooses from the models that policy allows (Claude and Codex only from
+          # their own model family). Among workflows that enable routing for the same
+          # engine, if any omits allowed-models, the router has no shortlist; otherwise,
+          # their lists are combined. GitHub Actions expressions are allowed only when
+          # neither models.allowed nor models.blocked is set.
+          # (optional)
+          allowed-models: []
+            # Array of strings
+
+        # Format 2: Disable the implicit cost/auto model-routing default without pinning a
+        # model; the existing model variables and fallback model apply.
+        model-routing: true
+
+        # Optional inference provider override for this engine. Defaults to the engine's
+        # native provider (copilot: github, claude: anthropic, codex: openai, pi: github).
+        # (optional)
+        model-provider: "github"
 
     # Model override for threat detection engine execution.
     # (optional)
@@ -23448,6 +24002,11 @@ safe-outputs:
         # permission-secret-scanning-alerts input for actions/create-github-app-token.
         # (optional)
         secret-scanning-alerts: "read"
+
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
 
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
@@ -23946,6 +24505,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -24267,6 +24831,11 @@ safe-outputs:
         # (optional)
         secret-scanning-alerts: "read"
 
+        # Repository security advisories permission. GitHub App-only; forwarded as
+        # permission-repository-advisories when minting a token.
+        # (optional)
+        repository-advisories: "read"
+
         # Permission level for repository webhooks (read/none; "write" is rejected by the
         # compiler). GitHub App-only permission.
         # (optional)
@@ -24574,6 +25143,14 @@ runtimes:
 
 # Format 1: Single checkout configuration for the default workspace
 checkout:
+  # Acknowledge that host steps consume a separate checkout only as data, not
+  # executable scripts, hooks, or configuration. Suppresses only that checkout's
+  # checkout-ref warning; does not suppress the default workspace checkout warning,
+  # enforce isolation, or change runtime behavior. Every merged request for the same
+  # checkout target must opt in. Requires a literal boolean.
+  # (optional)
+  data-only: true
+
   # Explicitly enable runtime repository-list expansion and its allowlist,
   # visibility, path, and secondary-fetch restrictions. Requires allowed-repos.
   # Otherwise repository/repo must resolve to exactly one owner/repo slug and
@@ -24864,6 +25441,11 @@ checkout:
       # (optional)
       secret-scanning-alerts: "read"
 
+      # Repository security advisories permission. GitHub App-only; forwarded as
+      # permission-repository-advisories when minting a token.
+      # (optional)
+      repository-advisories: "read"
+
       # Permission level for repository webhooks (read/none; "write" is rejected by the
       # compiler). GitHub App-only permission.
       # (optional)
@@ -25062,6 +25644,11 @@ checkout:
       # permission-secret-scanning-alerts input for actions/create-github-app-token.
       # (optional)
       secret-scanning-alerts: "read"
+
+      # Repository security advisories permission. GitHub App-only; forwarded as
+      # permission-repository-advisories when minting a token.
+      # (optional)
+      repository-advisories: "read"
 
       # Permission level for repository webhooks (read/none; "write" is rejected by the
       # compiler). GitHub App-only permission.
@@ -25303,6 +25890,11 @@ github-app:
     # permission-secret-scanning-alerts input for actions/create-github-app-token.
     # (optional)
     secret-scanning-alerts: "read"
+
+    # Repository security advisories permission. GitHub App-only; forwarded as
+    # permission-repository-advisories when minting a token.
+    # (optional)
+    repository-advisories: "read"
 
     # Permission level for repository webhooks (read/none; "write" is rejected by the
     # compiler). GitHub App-only permission.

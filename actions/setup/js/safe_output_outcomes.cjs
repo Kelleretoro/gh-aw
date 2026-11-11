@@ -35,14 +35,17 @@ function canonicalSafeOutputUrl(value) {
     if (url.protocol !== "https:" || url.username || url.password) return undefined;
     const githubOrigin = new URL(process.env.GITHUB_SERVER_URL || "https://github.com").origin;
     if (url.origin !== "https://github.com" && url.origin !== githubOrigin) return undefined;
+    const advisory = /^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/security\/advisories\/GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}\/?$/.test(url.pathname);
     if (
+      !advisory &&
       !/^\/(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:(?:issues|pull|discussions|runs|check-runs|actions\/artifacts|security\/code-scanning)\/[0-9]+|actions\/runs\/[0-9]+(?:\/(?:artifacts|job)\/[0-9]+)?|commit\/[a-fA-F0-9]{40,64})|(?:users|orgs)\/[A-Za-z0-9_.-]+\/projects\/[0-9]+)\/?$/.test(
         url.pathname
       )
     )
       return undefined;
     url.search = "";
-    if (!/^#(?:issuecomment-|discussioncomment-|pullrequestreview-|discussion_r)[0-9]+$/.test(url.hash)) url.hash = "";
+    const fragment = advisory ? /^#advisory-comment-[1-9][0-9]*$/ : /^#(?:issuecomment-|discussioncomment-|pullrequestreview-|discussion_r)[0-9]+$/;
+    if (!fragment.test(url.hash)) url.hash = "";
     return url.toString();
   } catch {
     return undefined;
@@ -85,8 +88,7 @@ function buildSafeOutputOutcomes(results, staged = false) {
     const items = fanout ? (record.result.length ? record.result : [undefined]) : [record.result];
     return items.map(result => {
       const item = fanout ? { ...record, result, success: record.success === false ? false : (result?.success ?? record.success), ...(record.result.length ? {} : { skipped: true }) } : record;
-      let status = classifySafeOutputResult(item);
-      if (status === "success" && pickOutcomeField(item, "deferred_manifest")) status = "deferred";
+      const status = classifySafeOutputResult(item);
       const isStaged = staged || pickOutcomeField(item, "staged") === true;
       const url = !isStaged && (status === "success" || status === "warning") ? RESULT_URL_FIELDS.map(field => canonicalSafeOutputUrl(result?.[field])).find(Boolean) : undefined;
       return {
@@ -129,6 +131,7 @@ function finalizeBufferedReviewOutcomes(results, repo, prNumber, review) {
       if (index >= 0) {
         const [comment] = comments.splice(index, 1);
         result.deferred_manifest = false;
+        result.buffered = false;
         result.url = comment.url || review.review_url;
       } else if (completeComments) {
         record.skipped = true;

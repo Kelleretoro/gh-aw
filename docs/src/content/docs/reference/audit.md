@@ -35,6 +35,14 @@ Top-level fields in `--json` output are stable; nested sub-fields may be extende
 
 By default a single-run audit renders a Comparison section against an earlier run of the same workflow. Use `--no-baseline` when that baseline is unrepresentative or to avoid the extra downloads. A `--no-baseline` result is never written to the audit cache, so it cannot suppress the Comparison section of a later default audit.
 
+### Durable session continuation
+
+For durable workflows, `durable_session` separates checkpoint restoration from observed native startup. It reports `status`, `started`, engine, storage, available parent-run, artifact and native session IDs, and the unified-session evidence path. `resumed` requires matching restoration and native-start records from the audited run and attempt. `restored` without `started` confirms only restoration; `restore_failed` records a restoration error. Missing events, unsupported or invalid session files, and mismatched lineage report `unavailable` with a reason, never a successful continuation.
+
+The `info,usage` artifact selection contains the required evidence. Cached audits re-read it, and `health --logs-dir` reuses the same raw session evidence for its current-revision sample. These records do not establish restored workspace edits, exactly-once effects, or agent task completion.
+
+Health exposes `durable_sessions` with `resumed_runs`, `fresh_runs`, `restored_runs`, `restore_failed_runs`, `unavailable_runs`, and per-run `session` reports. Fresh runs count only observed native starts; restoration without a start is reported separately. Missing or budget-skipped cached evidence stays unavailable, including when every known-durable sample is unavailable. This is a cached evidence inventory, not a continuation rate, and does not change workflow health classifications or download artifacts.
+
 ### Retry history
 
 When unified-session retry evidence is available, `--json` includes a `retries`
@@ -56,6 +64,45 @@ continuations as retries. See the
 for `harness.attempt` records and
 [Harness Retry Policy](/gh-aw/reference/engines/#harness-retry-and-post-result-watchdog-policy)
 for execution behavior.
+
+### Invocation skip decisions
+
+Invocation skip decisions appear in `retries.decisions` and as searchable `harness.decision` unified-session events. Each records the proposed attempt, question outcomes, sanitized errors, latency, and whether an invocation was avoided. `retries.avoided_invocations` counts denied invocations separately from executed attempts and retries; a skip does not count as an agent retry.
+
+The Actions step summary shows a collapsible `skip-if-decision` section before the unified-session trace, including skipped invocation totals and a per-check table of outcomes, question counts, latency, and sanitized errors. It also appears when the initial invocation is skipped and no agent conversation exists. The section is omitted when no decision events were recorded and respects the existing summary byte limit.
+
+For example, this `--json` excerpt records a denied initial invocation. Question
+1 abstained because its referenced file could not be read, but question 2 was
+evaluated and denied, so no attempt executed:
+
+```json
+{
+  "retries": {
+    "agent_retries": 0,
+    "detection_retries": 0,
+    "attempts": [],
+    "engine_retries": 0,
+    "detection_engine_retries": 0,
+    "decisions": [
+      {
+        "proposedAttempt": 1,
+        "outcome": "deny",
+        "questions": [
+          { "question": 1, "outcome": "unknown", "error": "file_reference_failed" },
+          { "question": 2, "outcome": "deny" }
+        ],
+        "latencyMs": 20,
+        "timestamp": 1794096000000,
+        "avoidedInvocation": true,
+        "phase": "agent",
+        "path": "agent/harness_retry.json",
+        "index": 1
+      }
+    ],
+    "avoided_invocations": 1
+  }
+}
+```
 
 ### Searching session evidence
 

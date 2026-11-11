@@ -40,64 +40,20 @@ See **[GitHub Tools Reference](/gh-aw/reference/github-tools/)** for complete co
 
 ### Linear Tools (`linear:`)
 
-Connect to [Linear's official hosted MCP server](https://linear.app/docs/mcp) with the `LINEAR_API_KEY` GitHub Actions secret:
+Linear is configured through an imported Markdown connector, not a built-in
+toolset. Import `.github/workflows/connectors/linear.md`, configure exact resource grants,
+and select `tools.linear: [get-issue]` or the reviewed hosted MCP registration.
+Personal GraphQL API keys and hosted MCP bearer tokens are separate credentials.
+See [Connectors](/gh-aw/reference/connectors/#linear) for the single configuration
+reference and migration limitations.
 
-```yaml wrap
-tools:
-  linear: {}
-```
+### Jira connector
 
-Set `token` to use a different secret, `toolsets` to enable groups such as `issues` and `projects`, `allowed` to further restrict tool names, and `required: false` to make connectivity best-effort:
-
-```yaml wrap
-tools:
-  linear:
-    token: ${{ secrets.CUSTOM_LINEAR_TOKEN }}
-    toolsets: [issues, projects]
-    allowed: ["*"]
-    required: true
-```
-
-Supported toolsets are `all`, `attachments`, `comments`, `customers`, `cycles`, `diffs`, `documentation`, `documents`, `initiatives`, `issues`, `milestones`, `projects`, `status_updates`, `teams`, and `users`. The compiler expands toolsets into the gateway's allowed-tool list, and any `allowed` names or wildcards must match a tool in the selected toolsets.
-
-Linear always uses Linear's server-enforced read-only endpoint. The credential is passed to the gateway as an environment variable and sent as an `Authorization: Bearer` header, not embedded in MCP configuration. Like other remote MCP servers, Linear also works with `tools.cli-proxy: true`.
-
-### Jira Tools (`jira:`)
-
-Connect to Atlassian's official remote Rovo MCP endpoint from non-interactive GitHub Actions workloads. Browser OAuth, device login, and user-consent flows are not supported.
-
-Use an Atlassian service account API key:
-
-```yaml wrap
-tools:
-  jira:
-    auth:
-      type: service-account
-      token: ${{ secrets.ATLASSIAN_SERVICE_ACCOUNT_API_KEY }}
-    allowed:
-      - getJiraIssue
-      - searchJiraIssuesUsingJql
-```
-
-Or use an Atlassian account email and API token:
-
-```yaml wrap
-tools:
-  jira:
-    auth:
-      type: api-token
-      email: ${{ secrets.ATLASSIAN_EMAIL }}
-      token: ${{ secrets.ATLASSIAN_API_TOKEN }}
-    allowed:
-      - getJiraIssue
-      - searchJiraIssuesUsingJql
-```
-
-The `allowed` list is required and accepts only these read-only Jira tools: `getIssueLinkTypes`, `getJiraIssue`, `getJiraIssueRemoteIssueLinks`, `getJiraIssueTypeMetaWithFields`, `getJiraProjectIssueTypesMetadata`, `getTransitionsForJiraIssue`, `getVisibleJiraProjects`, `lookupJiraAccountId`, and `searchJiraIssuesUsingJql`.
-
-`allowed: ["*"]` is shorthand for enabling that fixed list at compile time; it never grants access to the full, unrestricted MCP tool set. Omitting `allowed` or naming a write-capable tool is rejected.
-
-The endpoint defaults to `https://mcp.atlassian.com/v1/mcp`. Set `url` only when your organization uses another HTTPS Atlassian MCP endpoint. Credentials must be direct GitHub Actions secret expressions; service account keys use the HTTP bearer scheme while API tokens use HTTP Basic authentication generated at runtime.
+Import `".github/workflows/connectors/jira.md"` and select `tools.jira: [personal]` or
+`[service-account]` with explicit cloud, issue, and query grants. The former
+`auth`/`allowed` built-in configuration is no longer supported. See the
+[Jira connector reference](/gh-aw/reference/connectors/#jira) for inputs,
+credentials, supported methods, and migration limitations.
 
 ### Bash Tool (`bash:`)
 
@@ -174,18 +130,11 @@ tools:
 
 See **[Repo Memory Reference](/gh-aw/reference/repo-memory/)** for complete configuration options and usage examples.
 
-### QMD Documentation Search (`qmd:`) — Experimental
+### QMD Documentation Search — Experimental
 
-Build a local vector search index over documentation files and expose it as an MCP search tool. The index is built in a dedicated indexing job (no `contents: read` needed in the agent job):
+Import a shared agentic workflow file to configure [QMD Documentation Search](/gh-aw/experimental/qmd/), including its custom MCP server, indexing job, and cache-memory.
 
-```yaml wrap
-tools:
-  qmd:
-    checkouts:
-      - pattern: "docs/**/*.md"
-```
-
-See **[QMD Documentation Search](/gh-aw/experimental/qmd/)** for complete configuration options, checkout support, GitHub search integration, and cache key usage.
+The index/search pattern restores cache-memory in a separate deterministic job, incrementally updates documents and embeddings, and passes the fresh index to the agent through an artifact. The agent searches a working copy without checking out the source, then gh-aw persists the snapshot for subsequent runs. See the [example shared workflow](/gh-aw/experimental/qmd/#example-shared-workflow).
 
 ### Introspection on Agentic Workflows (`agentic-workflows:`)
 

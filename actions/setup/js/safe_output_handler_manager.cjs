@@ -48,7 +48,7 @@ const { emitSafeOutputActionOutputs } = require("./safe_outputs_action_outputs.c
 const { listCommentMemoryFiles, COMMENT_MEMORY_DIR } = require("./comment_memory_helpers.cjs");
 const { checkRateLimitHeadroom } = require("./rate_limit_helpers.cjs");
 const { redactSensitiveConfig } = require("./safe_outputs_config_redact.cjs");
-const { getEffectiveDetectionConclusion } = require("./threat_detection_warning.cjs");
+const { getEffectiveDetectionConclusion, getDetectionReasonText } = require("./threat_detection_warning.cjs");
 const nodePath = require("path");
 const fs = require("fs");
 const {
@@ -65,7 +65,8 @@ const {
 } = require("./work_queue_claim_scope.cjs");
 const { withClaimEffectClients, wrapClaimEffectClient } = require("./work_queue_effect_client.cjs");
 const { readClaimControlMessages } = require("./work_queue_control_delivery.cjs");
-const { readDeliveryControlInventory, inspectClaimDelivery, createClaimDeliveryVerifier, verifyBuiltinDeliveryOutput } = require("./work_queue_delivery.cjs");
+const { readDeliveryControlInventory, inspectClaimDelivery, createClaimDeliveryVerifier, verifyBuiltinDeliveryOutput, validateDeliveryContract, NO_WRITE_TYPES } = require("./work_queue_delivery.cjs");
+const { normalizeSafeOutputName } = require("./safe_output_names.cjs");
 const { createClaimAdapterHandler, verifyClaimAdapterOutput, preparedAdapterPath, createDeclaredAdapterVerifier, wrapDeclaredBuiltinHandler } = require("./work_queue_claim_adapters.cjs");
 const GITHUB_TOKEN_CONFIG_KEY = "github-token";
 
@@ -74,14 +75,9 @@ const GITHUB_TOKEN_CONFIG_KEY = "github-token";
  * Maps safe output types to their handler module file paths
  */
 const HANDLER_MAP = {
-  linear_create_issue: "./linear_create_issue.cjs",
-  linear_add_comment: "./linear_add_comment.cjs",
-  linear_update_issue: "./linear_update_issue.cjs",
+  add_security_advisory_comment: "./add_security_advisory_comment.cjs",
+  create_security_advisory: "./create_security_advisory.cjs",
   create_issue: "./create_issue.cjs",
-  jira_create_issue: "./jira_create_issue.cjs",
-  jira_update_issue: "./jira_update_issue.cjs",
-  jira_add_comment: "./jira_add_comment.cjs",
-  jira_add_label: "./jira_add_label.cjs",
   add_comment: "./add_comment.cjs",
   comment_memory: "./comment_memory.cjs",
   create_discussion: "./create_discussion.cjs",
@@ -132,12 +128,6 @@ const HANDLER_MAP = {
   report_incomplete: "./report_incomplete_handler.cjs",
   create_report_incomplete_issue: "./create_report_incomplete_issue.cjs",
   create_project: "./create_project.cjs",
-  ado_create_work_item: "./create_work_item.cjs",
-  ado_update_work_item: "./update_work_item.cjs",
-  ado_comment_on_work_item: "./comment_on_work_item.cjs",
-  ado_assign_work_item: "./assign_work_item.cjs",
-  ado_link_work_items: "./link_work_items.cjs",
-  ado_upload_workitem_attachment: "./upload_workitem_attachment.cjs",
   create_project_status_update: "./create_project_status_update.cjs",
   update_project: "./update_project.cjs",
   upload_artifact: "./upload_artifact.cjs",
@@ -181,12 +171,9 @@ const WTD3_REQUIREMENT_ID = "WTD3";
  * @type {Set<string>}
  */
 const THREAT_WARNING_REVIEWABLE_TYPES = new Set([
-  "linear_create_issue",
-  "linear_add_comment",
+  "add_security_advisory_comment",
+  "create_security_advisory",
   "create_issue",
-  "jira_create_issue",
-  "jira_update_issue",
-  "jira_add_comment",
   "add_comment",
   "create_pull_request",
   "comment_memory",
@@ -210,8 +197,6 @@ const THREAT_WARNING_REVIEWABLE_TYPES = new Set([
   "ledger_mutation",
   "create_report_incomplete_issue",
   "report_incomplete",
-  "ado_create_work_item",
-  "ado_comment_on_work_item",
 ]);
 
 /**
@@ -230,7 +215,6 @@ const THREAT_WARNING_CONVERTIBLE_TYPES = new Map([["push_to_pull_request_branch"
  * @type {Set<string>}
  */
 const THREAT_WARNING_ABORT_TYPES = new Set([
-  "linear_update_issue",
   "noop",
   "close_issue",
   "link_sub_issue",
@@ -242,7 +226,6 @@ const THREAT_WARNING_ABORT_TYPES = new Set([
   "resolve_pull_request_review_thread",
   "dismiss_pull_request_review",
   "add_labels",
-  "jira_add_label",
   "remove_labels",
   "replace_label",
   "add_reviewer",
@@ -264,19 +247,16 @@ const THREAT_WARNING_ABORT_TYPES = new Set([
   "call_workflow",
   "autofix_code_scanning_alert",
   "create_agent_session",
-  "ado_update_work_item",
-  "ado_assign_work_item",
-  "ado_link_work_items",
-  "ado_upload_workitem_attachment",
 ]);
 
 /**
  * Resolve threat warning policy for a safe output type.
  * @param {string} messageType
+ * @param {Map<string, Function>} messageHandlers
  * @returns {{policy: "reviewable" | "convertible" | "abort" | "none", mappedType?: string}}
  */
-function getThreatWarningPolicy(messageType) {
-  if (THREAT_WARNING_ABORT_TYPES.has(messageType)) {
+function getThreatWarningPolicy(messageType, messageHandlers) {
+  if (THREAT_WARNING_ABORT_TYPES.has(messageType) || handlerThreatWarningAbortTypes.get(messageHandlers)?.has(messageType)) {
     return { policy: "abort" };
   }
   const mappedType = THREAT_WARNING_CONVERTIBLE_TYPES.get(messageType);
@@ -374,6 +354,15 @@ const PR_REVIEW_HANDLER_TYPES = new Set(["create_pull_request_review_comment", "
  */
 const handlerLoadErrorsByHandlerMap = new WeakMap();
 
+/** @type {WeakMap<Map<string, Function>, Set<string>>} Compiler-owned warning policies, never message payloads. */
+const handlerThreatWarningAbortTypes = new WeakMap();
+
+/** @type {WeakMap<Map<string, Function>, Map<string, {max: number, attempted: number}>>} Trusted connector proposal budgets, scoped to a handler factory. */
+const connectorBudgetsByHandlerMap = new WeakMap();
+
+/** @type {WeakSet<Function>} Only built-in local diagnostics may bypass publication checks. */
+const localDiagnosticHandlers = new WeakSet();
+
 /**
  * Wrap a handler so project-safe-output execution can temporarily bind global.github
  * to the handler-specific authenticated client.
@@ -454,6 +443,16 @@ function bindHandlerToFactoryScope(handler) {
 async function loadHandlers(config, prReviewBufferRegistry, resolvedAllowedMentionAliases, activationCommentLinks = []) {
   config = normalizeSafeOutputConfig(config);
   const messageHandlers = new Map();
+  handlerThreatWarningAbortTypes.set(messageHandlers, new Set(Object.keys(config).filter(type => config[type]?.threat_warning_policy === "abort")));
+  const connectorBudgets = new Map();
+  for (const [type, options] of Object.entries(config)) {
+    if (options?.connector_operation !== true) continue;
+    if (!Number.isSafeInteger(options.max) || options.max < 1 || options.max > 100) {
+      throw new Error(`Invalid trusted connector budget for "${type}": max must be an integer from 1 to 100`);
+    }
+    connectorBudgets.set(type, { max: options.max, attempted: 0 });
+  }
+  connectorBudgetsByHandlerMap.set(messageHandlers, connectorBudgets);
 
   /** @type {Map<string, string>} */
   const handlerLoadErrors = new Map();
@@ -539,7 +538,9 @@ async function loadHandlers(config, prReviewBufferRegistry, resolvedAllowedMenti
                   : value;
             }
           }
-          messageHandlers.set(type, factoryClaim ? authorizedHandler : bindHandlerToFactoryScope(executable));
+          const loadedHandler = factoryClaim ? authorizedHandler : bindHandlerToFactoryScope(executable);
+          if (type === "report_incomplete") localDiagnosticHandlers.add(loadedHandler);
+          messageHandlers.set(type, loadedHandler);
           core.info(`✓ Loaded and initialized handler for: ${type}`);
         } else {
           handlerLoadErrors.set(type, "handler module does not export a main function");
@@ -836,7 +837,7 @@ function rollbackReviewResultsForPR(results, repo, prNumber, errorMessage) {
  * the skip must be back-propagated here so the Processing Summary reflects the actual
  * outcome (skipped) rather than a misleading success count.
  *
- * @param {Array<{type: string, success: boolean, skipped?: boolean, skipReason?: string}>} results - Processing results to mutate
+ * @param {Array<{type: string, success: boolean, skipped?: boolean, skipReason?: string, deferred_manifest?: boolean, result?: {deferred_manifest?: boolean}}>} results - Processing results to mutate
  * @param {string} skipReason - Human-readable reason for the skip
  */
 function skipReviewResults(results, skipReason) {
@@ -844,6 +845,8 @@ function skipReviewResults(results, skipReason) {
     if ((r.type === "submit_pull_request_review" || r.type === "create_pull_request_review_comment") && r.success === true) {
       r.skipped = true;
       r.skipReason = skipReason;
+      r.deferred_manifest = false;
+      if (r.result) r.result.deferred_manifest = false;
     }
   }
 }
@@ -851,7 +854,7 @@ function skipReviewResults(results, skipReason) {
 /**
  * Mark buffered review results for a specific PR as skipped.
  *
- * @param {Array<{type: string, success: boolean, skipped?: boolean, skipReason?: string, repo?: string, pull_request_number?: number, result?: {repo?: string, pull_request_number?: number}}>} results
+ * @param {Array<{type: string, success: boolean, skipped?: boolean, skipReason?: string, deferred_manifest?: boolean, repo?: string, pull_request_number?: number, result?: {repo?: string, pull_request_number?: number, deferred_manifest?: boolean}}>} results
  * @param {string} repo - Repository slug (owner/repo)
  * @param {number} prNumber - Pull request number
  * @param {string} skipReason - Human-readable reason for the skip
@@ -864,6 +867,8 @@ function skipReviewResultsForPR(results, repo, prNumber, skipReason) {
     if ((r.type === "submit_pull_request_review" || r.type === "create_pull_request_review_comment") && r.success === true && (r.result?.repo ?? r.repo) === repo && (r.result?.pull_request_number ?? r.pull_request_number) === prNumber) {
       r.skipped = true;
       r.skipReason = skipReason;
+      r.deferred_manifest = false;
+      if (r.result) r.result.deferred_manifest = false;
     }
   }
 }
@@ -994,9 +999,10 @@ function sortMessagesByTemporaryIdDependencies(messages) {
  * @param {Map<string, Function>} messageHandlers - Map of message handler functions
  * @param {Array<Object>} messages - Array of safe output messages
  * @param {((item: {type: string, url?: string, number?: number, repo?: string, temporaryId?: string}) => void)|null} [onItemCreated] - Optional callback invoked after each successful create operation (for manifest logging)
+ * @param {((results: Array<any>) => Promise<void>)|null} [finalizeBufferedOutputs] - Finalize buffered effects before resolving waiting dependencies
  * @returns {Promise<{success: boolean, results: Array<any>, temporaryIdMap: Object, artifactUrlMap: Map<string, string>, outputsWithUnresolvedIds: Array<any>, missings: Object, codePushFailures: Array<{type: string, error: string}>}>}
  */
-async function processMessages(messageHandlers, messages, onItemCreated = null) {
+async function processMessages(messageHandlers, messages, onItemCreated = null, finalizeBufferedOutputs = null) {
   if (readClaimScopeContext() && !currentClaimHandle()) {
     throw new Error("Queue safe outputs must execute in a trusted per-Claim handler context; use the scoped manager");
   }
@@ -1104,7 +1110,7 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
       const errorCode = detectionConclusionMissing ? "threat_detection_conclusion_missing" : "threat_detection_failure_blocked";
       const error = detectionConclusionMissing
         ? `Threat detection was required but reported no conclusion; "${messageType}" was not applied.`
-        : `Threat detection concluded failure (reason: ${process.env.GH_AW_DETECTION_REASON || "unknown"}); "${messageType}" was not applied.`;
+        : `Threat detection concluded failure. ${getDetectionReasonText(process.env.GH_AW_DETECTION_REASON)} "${messageType}" was not applied.`;
       core.warning(`🚫 ${error}`);
       results.push({
         type: messageType,
@@ -1119,7 +1125,7 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
     }
 
     if (detectionConclusion === "warning") {
-      const threatPolicy = getThreatWarningPolicy(messageType);
+      const threatPolicy = getThreatWarningPolicy(messageType, messageHandlers);
       if (threatPolicy.policy === "abort") {
         const errorCode = "threat_detected_abort_policy";
         const error = `Threat-detection warn policy aborted "${messageType}" (Requirement ${WTD3_REQUIREMENT_ID}): non-reviewable outputs must not be applied when detection conclusion is warning.`;
@@ -1219,6 +1225,22 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
     }
 
     try {
+      const budget = connectorBudgetsByHandlerMap.get(messageHandlers)?.get(messageType);
+      if (budget) {
+        if (budget.attempted >= budget.max) {
+          results.push({
+            type: messageType,
+            messageIndex: i,
+            success: false,
+            errorCode: "connector_budget_exceeded",
+            error: `Connector operation "${messageType}" exceeded its max of ${budget.max} attempted invocation(s)`,
+          });
+          return;
+        }
+        // Reserve synchronously before invoking the credentialed handler. Failed
+        // proposals consume budget too; HTTP retries stay inside that invocation.
+        budget.attempted++;
+      }
       core.info(`Processing message ${i + 1}/${messages.length}: ${messageType}`);
 
       // Convert Map to plain object for handler
@@ -1306,7 +1328,8 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
 
       // Call the message handler with the individual message and resolved temp IDs
       await assertClaimAuthorized(effectiveMessage);
-      const stalePRReason = await getStalePullRequestReason(global.github, global.context);
+      // Incomplete signals only record local diagnostics; they do not publish to the PR.
+      const stalePRReason = localDiagnosticHandlers.has(messageHandler) ? null : await getStalePullRequestReason(global.github, global.context);
       if (stalePRReason) {
         core.info(stalePRReason);
         results.push(buildSkippedResult(messageType, i, { skipped: true, reason: stalePRReason }));
@@ -1516,7 +1539,7 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
     core.info(`\n=== Retrying Deferred Messages ===`);
     core.info(`Found ${deferredMessages.length} deferred message(s) to retry`);
 
-    let pending = [...deferredMessages];
+    let pending = deferredMessages.filter(deferred => results.some(result => result.messageIndex === deferred.messageIndex && result.deferred));
     for (let round = 0; pending.length > 0 && round <= messages.length; round++) {
       const roundStartTemporaryIdCount = temporaryIdMap.size;
       const attempted = new Set(pending.map(deferred => deferred.messageIndex));
@@ -1533,7 +1556,7 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
 
           // Call the handler again with updated temp ID map
           await assertClaimAuthorized(deferred.message);
-          const stalePRReason = await getStalePullRequestReason(global.github, global.context);
+          const stalePRReason = localDiagnosticHandlers.has(deferred.handler) ? null : await getStalePullRequestReason(global.github, global.context);
           const result = stalePRReason ? { skipped: true, reason: stalePRReason } : recordMergeDecision(deferred.type, await deferred.handler(deferred.message, resolvedTemporaryIds, temporaryIdMap), deferred.messageIndex);
 
           if (result && result.skipped === true && !result.deferred) {
@@ -1656,6 +1679,21 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
   }
 
   await retryDeferredMessages();
+  if (finalizeBufferedOutputs) {
+    for (let pass = 0; pass <= messages.length; pass++) {
+      const pendingPublications = results.filter(record => record.success && !record.skipped && record.result?.deferred_manifest);
+      const pendingResults = new Set(pendingPublications.map(record => record.result));
+      const temporaryIdCount = temporaryIdMap.size;
+      const deferredCount = deferredMessages.length;
+      await finalizeBufferedOutputs(results);
+      const publicationProgress = pendingPublications.some(record => classifySafeOutputResult(record) !== "deferred");
+      await drainWaitingMessages();
+      if (publicationProgress || temporaryIdMap.size !== temporaryIdCount || deferredMessages.length !== deferredCount) {
+        await retryDeferredMessages();
+      }
+      if (!results.some(record => record.success && !record.skipped && record.result?.deferred_manifest && !pendingResults.has(record.result))) break;
+    }
+  }
   for (const i of waitingMessages) {
     await processMessage(i, false);
   }
@@ -2113,6 +2151,19 @@ async function main(options = {}) {
             );
           },
         };
+        try {
+          const contract = validateDeliveryContract(scope.assignment.claims.find(claim => claim.handle === handle).work.effect_contract);
+          const known = new Set(contract.outputs.map(output => normalizeSafeOutputName(output.type)));
+          const undeclared = [...new Set(scopedMessages.map(message => normalizeSafeOutputName(message.type)).filter(type => !known.has(type) && !(contract.no_writes === true && NO_WRITE_TYPES.has(type))))];
+          if (undeclared.length > 0 && !isStagedMode()) {
+            core.warning(`Claim ${handle}: refusing ${scopedMessages.length} scoped output(s); undeclared type(s): ${undeclared.join(", ")}`);
+            const delivery = await withClaimExecution({ ...scope, claim_handle: handle, authorize, effects }, () => settleClaimDelivery(scope, scopedMessages, [], claimOptions));
+            settlements.push({ claim_handle: handle, success: false, error: `Undeclared output type(s) in immutable effect_contract: ${undeclared.join(", ")}`, delivery });
+            continue;
+          }
+        } catch {
+          // Delivery settlement reports invalid immutable contracts.
+        }
         const settlement = await withClaimExecution({ ...scope, claim_handle: handle, authorize, effects }, () =>
           withClaimEffectClients({ claim_handle: handle, authorize, authorizeGithub: unscopedGithub, context }, async () => {
             try {
@@ -2167,6 +2218,8 @@ async function main(options = {}) {
     if (!isStagedMode()) {
       for (const settlement of settlements) {
         const result = finalized?.claims?.[settlement.claim_handle];
+        const delivery = settlement.delivery;
+        const attestationRefused = delivery?.verification === "verified" && delivery.attestation?.recorded === false;
         if (["result", "cancelled"].includes(result?.state)) continue;
         await withClaimExecution({ ...scope, claim_handle: settlement.claim_handle, authorize: options.authorize }, () =>
           recordSafeOutputFailure(
@@ -2177,7 +2230,16 @@ async function main(options = {}) {
                 {
                   type: "claim_delivery",
                   errorCode: result?.reason || (result?.state === "delivery_failed" ? "delivery_failed" : "verification_unresolved"),
-                  error: settlement.delivery?.reason || settlement.error || "Independent delivery verification is unavailable",
+                  error:
+                    delivery?.reason ||
+                    settlement.error ||
+                    (attestationRefused
+                      ? "Verified settlement receipt was not attested"
+                      : delivery?.verification === "verified"
+                        ? "Verified settlement was not re-verified by the trusted finalizer"
+                        : "Independent delivery verification is unavailable"),
+                  ...(delivery?.diagnostics ? { diagnostics: delivery.diagnostics } : attestationRefused ? { diagnostics: { event: "delivery.receipt.not_recorded", ...delivery.attestation } } : {}),
+                  ...(result?.verifier ? { verifier: result.verifier } : {}),
                 },
               ],
             },
@@ -2289,63 +2351,69 @@ async function main(options = {}) {
     // even if no individual write fails.  The check is best-effort – failures are non-fatal.
     await checkRateLimitHeadroom(github, "safe_outputs_pre_check");
 
-    // Process all messages in order of appearance
-    const processingResult = await processMessages(messageHandlers, allMessages, logCreatedItem);
-    outcomeResults = processingResult.results;
-    await finalizeLedgerAppend(config, messageHandlers);
-
-    // Finalize buffered PR reviews — one review submission per distinct PR
-    const registryEntries = prReviewBufferRegistry.getAllEntries();
-    for (const { repo: reviewRepo, prNumber: reviewPrNum, buffer: reviewBuffer } of registryEntries) {
-      if (reviewBuffer.hasBufferedComments() || reviewBuffer.hasReviewMetadata()) {
-        core.info(`\n=== Finalizing PR Review for ${reviewRepo}#${reviewPrNum} ===`);
-        const bufferedCount = reviewBuffer.getBufferedCount();
-        if (bufferedCount > 0) {
-          core.info(`Submitting ${bufferedCount} buffered review comment(s) for ${reviewRepo}#${reviewPrNum}`);
-        } else {
-          core.info(`Submitting PR review for ${reviewRepo}#${reviewPrNum} (body-only, no inline comments)`);
-        }
-        /** @type {any} */
-        let reviewFailureError = null;
-        try {
-          await assertClaimAuthorized({ type: "submit_pull_request_review", claim_handle: currentClaimHandle(), repo: reviewRepo, pull_request_number: reviewPrNum });
-          const stalePRReason = await getStalePullRequestReason(github, context);
-          if (stalePRReason) {
-            core.info(stalePRReason);
-            skipReviewResultsForPR(processingResult.results, reviewRepo, reviewPrNum, stalePRReason);
-            continue;
+    // Finalize buffered PR reviews before releasing their dependent outputs.
+    const finalizedReviewResults = new Set();
+    /** @param {Array<any>} results */
+    async function finalizeBufferedReviews(results) {
+      const reviewResults = results.filter(record => record.result?.deferred_manifest && !finalizedReviewResults.has(record));
+      for (const record of reviewResults) finalizedReviewResults.add(record);
+      const registryEntries = prReviewBufferRegistry.drainEntries();
+      for (const { repo: reviewRepo, prNumber: reviewPrNum, buffer: reviewBuffer } of registryEntries) {
+        if (reviewBuffer.hasBufferedComments() || reviewBuffer.hasReviewMetadata()) {
+          core.info(`\n=== Finalizing PR Review for ${reviewRepo}#${reviewPrNum} ===`);
+          const bufferedCount = reviewBuffer.getBufferedCount();
+          if (bufferedCount > 0) {
+            core.info(`Submitting ${bufferedCount} buffered review comment(s) for ${reviewRepo}#${reviewPrNum}`);
+          } else {
+            core.info(`Submitting PR review for ${reviewRepo}#${reviewPrNum} (body-only, no inline comments)`);
           }
-          const reviewResult = await reviewBuffer.submitReview();
-          if (reviewResult.success && !reviewResult.skipped) {
-            finalizeBufferedReviewOutcomes(processingResult.results, reviewRepo, reviewPrNum, reviewResult);
-            logCreatedItemFromResult(logCreatedItem, "submit_pull_request_review", reviewResult);
-            logCreatedItemFromResult(
-              logCreatedItem,
-              "create_pull_request_review_comment",
-              reviewResult.review_comments?.map(comment => (comment && typeof comment === "object" ? { ...comment, success: true } : comment))
-            );
-            core.info(`✓ PR review submitted for ${reviewRepo}#${reviewPrNum}: ${reviewResult.review_url}`);
-          } else if (reviewResult.success && reviewResult.skipped) {
-            const skipReason = reviewResult.reason || `PR review for ${reviewRepo}#${reviewPrNum} skipped`;
-            core.warning(`⚠ ${skipReason}`);
-            if (reviewResult.pr_locked) {
-              core.setOutput("pr_locked", "true");
+          /** @type {any} */
+          let reviewFailureError = null;
+          try {
+            await assertClaimAuthorized({ type: "submit_pull_request_review", claim_handle: currentClaimHandle(), repo: reviewRepo, pull_request_number: reviewPrNum });
+            const stalePRReason = await getStalePullRequestReason(github, context);
+            if (stalePRReason) {
+              core.info(stalePRReason);
+              skipReviewResultsForPR(reviewResults, reviewRepo, reviewPrNum, stalePRReason);
+              continue;
             }
-            skipReviewResultsForPR(processingResult.results, reviewRepo, reviewPrNum, skipReason);
-          } else if (!reviewResult.success) {
-            reviewFailureError = reviewResult.error || `PR review finalization failed for ${reviewRepo}#${reviewPrNum}`;
-            core.error(`✗ Failed to submit PR review for ${reviewRepo}#${reviewPrNum}: ${reviewFailureError}`);
+            const reviewResult = await reviewBuffer.submitReview();
+            if (reviewResult.success && !reviewResult.skipped) {
+              finalizeBufferedReviewOutcomes(reviewResults, reviewRepo, reviewPrNum, reviewResult);
+              logCreatedItemFromResult(logCreatedItem, "submit_pull_request_review", reviewResult);
+              logCreatedItemFromResult(
+                logCreatedItem,
+                "create_pull_request_review_comment",
+                reviewResult.review_comments?.map(comment => (comment && typeof comment === "object" ? { ...comment, success: true } : comment))
+              );
+              core.info(`✓ PR review submitted for ${reviewRepo}#${reviewPrNum}: ${reviewResult.review_url}`);
+            } else if (reviewResult.success && reviewResult.skipped) {
+              const skipReason = reviewResult.reason || `PR review for ${reviewRepo}#${reviewPrNum} skipped`;
+              core.warning(`⚠ ${skipReason}`);
+              if (reviewResult.pr_locked) {
+                core.setOutput("pr_locked", "true");
+              }
+              skipReviewResultsForPR(reviewResults, reviewRepo, reviewPrNum, skipReason);
+            } else if (!reviewResult.success) {
+              reviewFailureError = reviewResult.error || `PR review finalization failed for ${reviewRepo}#${reviewPrNum}`;
+              core.error(`✗ Failed to submit PR review for ${reviewRepo}#${reviewPrNum}: ${reviewFailureError}`);
+            }
+          } catch (reviewError) {
+            reviewFailureError = getErrorMessage(reviewError);
+            core.error(`✗ Exception while submitting PR review for ${reviewRepo}#${reviewPrNum}: ${reviewFailureError}`);
           }
-        } catch (reviewError) {
-          reviewFailureError = getErrorMessage(reviewError);
-          core.error(`✗ Exception while submitting PR review for ${reviewRepo}#${reviewPrNum}: ${reviewFailureError}`);
-        }
 
-        if (reviewFailureError !== null) {
-          rollbackReviewResultsForPR(processingResult.results, reviewRepo, reviewPrNum, reviewFailureError);
+          if (reviewFailureError !== null) {
+            rollbackReviewResultsForPR(reviewResults, reviewRepo, reviewPrNum, reviewFailureError);
+          }
         }
       }
     }
+
+    // Process all messages in order of appearance
+    const processingResult = await processMessages(messageHandlers, allMessages, logCreatedItem, finalizeBufferedReviews);
+    outcomeResults = processingResult.results;
+    await finalizeLedgerAppend(config, messageHandlers);
 
     // Store collected missings in helper module for handlers to access
     if (processingResult.missings) {

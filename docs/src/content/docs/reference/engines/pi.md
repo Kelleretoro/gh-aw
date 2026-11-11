@@ -16,6 +16,8 @@ For first-time setup, see [Using Pi](/gh-aw/engines/pi/). Shared options are in 
 
 The default Pi version is `1.3.0`. Copilot defaults to `copilot/auto` with the gateway; native execution without the gateway retains `copilot/gpt-5.4`. `auto` delegates selection to the gateway and need not appear in its concrete-model inventory. OpenAI/Codex routes use the Responses API, not Chat Completions.
 
+Without a `model`, `engine.model`, or `engine.model-routing`, Pi on GitHub Copilot inference uses [model routing](/gh-aw/reference/model-routing/#default-routing-for-workflows-without-a-model) with `goal: cost` and `mode: auto` for its main agent. Pi has no model variables, so this default isn't bypassed at run time; set `engine.model-routing: false` to opt out, or set a model.
+
 Threat detection defaults to Copilot regardless of Pi's provider. Supply its separate Copilot credential or [configure another detection engine](/gh-aw/reference/threat-detection/).
 
 ## Capabilities and limitations
@@ -54,15 +56,34 @@ The built-in `tools.playwright` integration uses `playwright-cli`; omit its `mod
 
 Pi resolves [model aliases](/gh-aw/reference/engines/#model-aliases) for the main model and for sub-agents with the same rules as Copilot: `model: copilot/opus` runs on the newest live Opus. Exact ids are checked against AWF `/reflect` before Pi starts, and an unlisted id fails with `model_unavailable`, producing the same unavailable-model failure issue as Copilot. When AWF's model discovery is incomplete, exact ids pass through and aliases fail with `catalog_unavailable`; sub-agents no longer fall back to Pi's built-in model list.
 
+## Session artifacts
+
+The agent artifact contains native `pi-streaming.jsonl` evidence and the
+normalized `agent-session.jsonl`. Conclusion publishes the essential event
+projection in `usage/aw_session.jsonl`. Pi's observed message timestamps are
+retained on canonical messages, reasoning and tool calls when no source-event
+clock is present. Collection also recognizes clocks stored only in
+`data.messageMetadata.timestamp` in older canonical artifacts. Collection
+promotes only finite, in-range milliseconds or calendar-valid timezone-qualified
+ISO strings from archival message metadata. Invalid archival clocks are not
+promoted; missing clocks are not filled with collection time.
+
+Unified tool lifecycle events retain supplied `messageId` and `model` alongside
+`toolCallId`, allowing a tool call to be correlated with its originating model
+response. Full native message metadata, provider envelopes and signatures remain
+in the archival agent evidence rather than the unified projection. Child
+messages remain scoped to their invocation, and child usage is not added to
+parent session totals.
+
 ## Durable runs
 
 > [!WARNING]
-> Pi Durable integration is experimental. Enabling `engine.pi.durable` or
+> Pi session continuation is experimental. Enabling `engine.pi.durable` or
 > `engine.durable` emits a compile-time warning. Configuration and behavior may
 > change without deprecation.
 
-Pi Durable persists harness tasks, submissions, conversation history, tool-call
-budgets, usage and trace propagation in a dedicated GitHub Actions artifact:
+Pi chains its native coding-agent sessions across workflow runs using the same
+GitHub Actions artifact restoration and publication as other engines:
 
 ```aw wrap
 on: workflow_dispatch
@@ -77,12 +98,16 @@ accepts an integer from 1 to 90, subject to repository and organization artifact
 retention policy and gh-aw's global artifact retention overrides. Durable storage
 does not use or require `tools.repo-memory` or `tools.cache-memory`.
 
-The compiler installs and verifies pinned `@earendil-works/pi-durable`, `pi-ai`,
-`chord` and `pi-telemetry` dependencies separately from the ordinary Pi CLI.
-Unsupported engines and custom drivers fail compilation rather than falling back
-to a non-durable invocation. Custom commands, CLI arguments, extensions, native
-session settings and sub-agents cannot be combined with the durable harness.
-The credential-isolated model and MCP gateways remain required.
+The ordinary Pi CLI, SDK (`pi_agent_core_driver.cjs`) and RPC
+(`pi_rpc_driver.cjs`) modes persist a native JSONL session at
+`/tmp/gh-aw/agent/durable-sessions/pi/session.jsonl`. No separate durable library
+or additional runtime dependencies are installed. The normal MCP, codemode,
+compaction, extensions, sub-agents and tool policies remain available. Sub-agents
+remain isolated and ephemeral.
+
+The compiler owns session selection. Custom commands, drivers and harnesses,
+`engine.config.session`, and CLI arguments that select sessions or disable
+persistence cannot override it. The two built-in SDK and RPC drivers are supported.
 
 Before execution, a trusted host step selects the parent run identified by
 inbound `aw_context.run_id` (or `parent_run_id` when the context describes the
@@ -97,14 +122,31 @@ artifact on the last successful run starts a fresh session.
 When retrying a run, an unexpired checkpoint published by an earlier attempt of
 that same run takes precedence over the original parent.
 
-Pending submissions resume their original task rather than admitting the new
-run's prompt. After a submission completes, a later run admits a new prompt into
-the persisted conversation. Restoring a completed checkpoint from the same run
-does not resubmit it.
-The harness yields before its execution deadline with a pending checkpoint so a
-successful workflow run can become the next run's parent. Interrupted external
-mutations are not blindly replayed; durable execution does
-not guarantee exactly-once external side effects.
+Each run opens the exact restored native session and submits the current
+workflow prompt with freshly configured models, credentials and tool policy.
+Without history, the first run creates a new session. Missing or corrupt restored
+transcripts fail instead of silently starting an unrelated conversation. Historical
+session content is untrusted; current workflow instructions take precedence.
+
+This is conversation continuation, not recovery of an exact pending submission
+or tool phase. A retry also submits the current prompt into the restored session.
+Tool budgets apply to the current run, not the entire chain. Continuation does not
+provide exactly-once external side effects; reconcile uncertain prior actions
+before repeating them.
+
+Artifacts from the former experimental Pi Durable task runtime are incompatible
+with native sessions and are not migrated. Restoration rejects those artifacts
+rather than interpreting task journals as conversation history.
+
+To reset a chain blocked by a legacy artifact, remove the configured `durable`
+block, recompile and publish the workflow, and let a new run complete successfully
+without durable mode. Then re-enable durable mode, recompile and publish on the
+same workflow and branch. With that reset run as the latest successful run, the
+next new run starts fresh because its parent has no durable checkpoint; older
+artifacts are not searched. Omit explicit `aw_context.run_id` and `parent_run_id`
+lineage for that next run, especially references to legacy history. This discards
+continuation history rather than migrating it; integrity validation remains
+unchanged for artifacts that are restored.
 
 Workflow-level concurrency serializes execution and artifact publication without
 cancelling the previous writer. Explicit concurrency, reusable workflow calls and
@@ -113,13 +155,12 @@ to the job that restores state; GitHub credentials are not passed to the harness
 The host validates checkpoint integrity after secret redaction, then publishes
 the artifact without treating upload failures as successful persistence.
 
-The harness emits Pi streaming events for the existing unified agentic session
-parser and emits native durable spans through gh-aw's OTel exporter, retaining
-trace propagation across checkpoints. Inference and tool policies are rebound
-to the current run instead of restoring credentials from the artifact.
+The ordinary Pi streaming events feed the existing unified agentic session
+parser. Current-run session capture and gh-aw trace propagation remain enabled;
+the restored transcript is not replayed into the current streaming log.
 
 > [!IMPORTANT]
-> Checkpoints preserve harness state, not the checkout or arbitrary workspace
+> Checkpoints preserve conversation history, not the checkout or arbitrary workspace
 > edits. A hard job timeout, cancellation, runner loss or artifact upload failure
 > can prevent publication. Start a later run to continue from the last published
 > checkpoint; durable mode does not dispatch continuation runs automatically.

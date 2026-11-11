@@ -140,7 +140,7 @@ func (e *CodexEngine) GetSecretValidationStep(workflowData *WorkflowData) GitHub
 }
 
 func codexSkipsStaticSecret(provider LLMProvider, workflowData *WorkflowData) bool {
-	return isCodexAzureOIDC(workflowData) ||
+	return isCodexAzureOIDC(workflowData) || isCodexOpenAIWIF(workflowData) ||
 		provider == LLMProviderGitHub && hasCopilotRequestsWritePermission(workflowData)
 }
 
@@ -148,6 +148,21 @@ func codexSkipsStaticSecret(provider LLMProvider, workflowData *WorkflowData) bo
 func isCodexAzureOIDC(workflowData *WorkflowData) bool {
 	return isAzureOIDCWithAWF(workflowData) &&
 		NewCodexEngine().ResolveLLMProvider(workflowData) == LLMProviderOpenAI
+}
+
+func isCodexOpenAIWIF(workflowData *WorkflowData) bool {
+	return isOpenAIWIFWithAWF(workflowData) &&
+		NewCodexEngine().ResolveLLMProvider(workflowData) == LLMProviderOpenAI
+}
+
+func codexOIDCAuthMode(workflowData *WorkflowData) string {
+	if isCodexAzureOIDC(workflowData) {
+		return "azure"
+	}
+	if isCodexOpenAIWIF(workflowData) {
+		return "openai"
+	}
+	return ""
 }
 
 func (e *CodexEngine) GetInstallationSteps(workflowData *WorkflowData) []GitHubActionStep {
@@ -339,7 +354,7 @@ func (e *CodexEngine) codexHarnessScriptName(workflowData *WorkflowData) string 
 
 func (e *CodexEngine) buildCodexCommand(workflowData *WorkflowData, commandName, harnessScriptName string, firewallEnabled bool, modelEnvVar, structuredOutputParam string) string {
 	modelParam := fmt.Sprintf(`${%s:+ --model "$%s"}`, modelEnvVar, modelEnvVar)
-	if isModelRoutingEnabled(workflowData) {
+	if isModelRoutingUnconditional(workflowData) {
 		modelParam = ""
 	}
 	if workflowData.EngineConfig != nil && codexArgsSelectModel(workflowData.EngineConfig.Args) {
@@ -369,8 +384,9 @@ func (e *CodexEngine) buildCodexCommand(workflowData *WorkflowData, commandName,
 	}
 	if harnessScriptName != "" {
 		execPrefix := fmt.Sprintf(`%s %s/%s %s`, nodeRuntimeResolutionCommand, SetupActionDestinationShell, harnessScriptName, commandName)
-		return fmt.Sprintf("%s exec%s%s%s%s%s%s --prompt-file /tmp/gh-aw/aw-prompts/prompt.txt",
+		command := fmt.Sprintf("%s exec%s%s%s%s%s%s --prompt-file /tmp/gh-aw/aw-prompts/prompt.txt",
 			execPrefix, modelParam, webSearchParam, shellToolParam, executionPolicyParam, structuredOutputParam, customArgsParam)
+		return wrapCustomHarnessDecisionCommand(workflowData, e.GetID(), e.GetHarnessScriptName(), command)
 	}
 	return getWorkspaceCommandPrefixFor(workflowData.EngineConfig) + fmt.Sprintf("%s exec%s%s%s%s%s%s -- \"$INSTRUCTION\"",
 		commandName, modelParam, webSearchParam, shellToolParam, executionPolicyParam, structuredOutputParam, customArgsParam)
@@ -473,6 +489,7 @@ func codexBYOKAPIKeyExport() string {
 func (e *CodexEngine) buildCodexExecutionEnv(workflowData *WorkflowData, firewallEnabled, modelConfigured bool, modelEnvVar string) map[string]string {
 	resolvedGitHubToken := resolveGitHubToken("")
 	provider := e.ResolveLLMProvider(workflowData)
+	oidcAuth := codexOIDCAuthMode(workflowData)
 	env := map[string]string{
 		"CODEX_HOME":                   codexHome(workflowData),
 		"GH_AW_GITHUB_TOKEN":           resolvedGitHubToken,
@@ -489,7 +506,7 @@ func (e *CodexEngine) buildCodexExecutionEnv(workflowData *WorkflowData, firewal
 		copilotToken := llmProviderSecretExpression(provider, workflowData)
 		env["COPILOT_GITHUB_TOKEN"] = copilotToken
 		env[constants.CopilotBYOKDummyAPIKeyEnvVar] = constants.CopilotBYOKDummyAPIKey
-	} else if !isCodexAzureOIDC(workflowData) {
+	} else if oidcAuth == "" {
 		openAIKey := llmProviderSecretExpression(provider, workflowData)
 		env["CODEX_API_KEY"] = openAIKey
 		env["OPENAI_API_KEY"] = openAIKey
@@ -519,9 +536,9 @@ func (e *CodexEngine) buildCodexExecutionEnv(workflowData *WorkflowData, firewal
 	applyEngineCwdEnv(env, workflowData)
 	applyEngineAndAgentEnv(env, workflowData, codexEngineLog)
 	env["CODEX_HOME"] = codexHome(workflowData)
-	if isCodexAzureOIDC(workflowData) {
+	if oidcAuth != "" {
 		// Non-secret launch policy; the harness also verifies fresh AWF reflection.
-		env["GH_AW_CODEX_OIDC_AUTH"] = "azure"
+		env["GH_AW_CODEX_OIDC_AUTH"] = oidcAuth
 	}
 	if !firewallEnabled && provider == LLMProviderOpenAI && workflowData.EngineConfig != nil && workflowData.EngineConfig.APITarget != "" {
 		env["OPENAI_BASE_URL"] = "https://" + path.Join(workflowData.EngineConfig.APITarget, "v1")
@@ -533,7 +550,7 @@ func (e *CodexEngine) buildCodexExecutionEnv(workflowData *WorkflowData, firewal
 }
 
 func applyCodexModelEnv(env map[string]string, workflowData *WorkflowData, modelConfigured bool, modelEnvVar string) {
-	if isModelRoutingEnabled(workflowData) {
+	if isModelRoutingUnconditional(workflowData) {
 		return
 	}
 	if modelConfigured {
@@ -546,6 +563,7 @@ func applyCodexModelEnv(env map[string]string, workflowData *WorkflowData, model
 		return
 	}
 	env[modelEnvVar] = compilerenv.BuildModelOverrideExpressionEmptyFallback(modelEnvVar, compilerenv.DefaultModelCodex)
+	guardImplicitRoutingModelEnv(env, workflowData, constants.EnvVarModelAgentCodex)
 }
 
 func (e *CodexEngine) buildCodexExecutionStep(workflowData *WorkflowData, command string, env map[string]string) GitHubActionStep {

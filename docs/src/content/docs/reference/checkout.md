@@ -29,6 +29,27 @@ The relevant agent-job order is:
 
 Keep the agent workspace on a trusted ref and, when needed, fetch untrusted refs only to inspect their contents as data. Do not switch the host workspace to an untrusted branch or run its scripts: a manual checkout can execute Git hooks and can expose branch-controlled agent configuration. For PR-head work, use compiler-managed automatic PR checkout so the trusted agent configuration is restored; disabling that checkout also disables its paired configuration restore.
 
+### Separate Tooling and Data Checkouts
+
+When trusted host tooling processes a separate checkout only as data, `data-only: true` acknowledges that separation and suppresses the checkout-ref warning for that checkout:
+
+```aw wrap
+checkout:
+  - path: tooling
+    ref: ${{ github.event.repository.default_branch }}
+  - repository: example-org/content
+    ref: ${{ needs.prepare.outputs.branch }}
+    path: target
+    data-only: true
+steps:
+  - working-directory: tooling
+    run: ./scripts/validate-content ../target
+```
+
+This is an author acknowledgement, not enforced isolation or a declaration that the ref is trusted. It does not change checkout behavior, credentials, permissions, automatic PR checkout, or other diagnostics. The compiler does not infer data-only use from `working-directory`: commands can execute code outside that directory. Host tooling must not execute scripts, hooks, plugins, or configuration from the data checkout, including indirectly through validators or package managers. Keep tooling on a trusted ref and use separate, non-overlapping checkout paths.
+
+The option defaults to `false` and accepts only literal booleans. If imports or repeated entries request the same checkout target, every merged request must set `data-only: true`; otherwise the warning remains enabled.
+
 ## PR Revision Binding
 
 By default, the compiler-generated "Checkout PR branch" step fetches a specific commit SHA from the current repository's `origin`, then verifies the checked-out `HEAD` before reporting success or recording a patch baseline. It does not resolve a moving `refs/pull/N/head` during fetch.
@@ -114,6 +135,7 @@ checkout:
 | `max-repos` | integer | Maximum unique repositories per `multi: true` checkout entry. Requires `allowed-repos` in multi mode; defaults to `10`. Must be a positive literal integer. Ignored in single-repository mode. |
 | `allow-private-repos` | boolean | With `multi: true`, allow private/internal targets in a runtime list hosted by a private/internal repository. Requires `allowed-repos` in multi mode; defaults to `false` and must be a literal boolean. Public hosts always reject non-public multi targets, even when `true`. Ignored in single-repository mode. |
 | `ref` | string | Branch, tag, or SHA to checkout. Defaults to the triggering ref. |
+| `data-only` | boolean | Acknowledge data-only consumption by host steps and suppress only a separate checkout's checkout-ref warning. Defaults to `false`; literal boolean only. Does not suppress the default workspace checkout warning, enforce isolation, or change execution. All merged requests for the target must opt in. See [Separate Tooling and Data Checkouts](#separate-tooling-and-data-checkouts). |
 | `path` | string | Path within `GITHUB_WORKSPACE` to place the checkout. Defaults to workspace root. |
 | `github-token` | string | Token for authentication. Use `${{ secrets.MY_TOKEN }}` syntax. |
 | `github-app` | object | GitHub App credentials (`client-id` or `app-id` (deprecated), `private-key`, optional `owner`, `repositories`). Mutually exclusive with `github-token`. `app` is a deprecated alias for the field name. Run `gh aw fix` to auto-migrate `app-id` to `client-id`. |
@@ -222,6 +244,16 @@ The generated checkout step uses `persist-credentials: false`, so the git creden
 - On-demand blob fetches in partial (blobless) clones — operations on files absent from the initial checkout
 
 Fetch everything the workflow needs at checkout time using `fetch-depth` and [`fetch:`](#fetching-additional-refs), and write changes through safe-output tools such as [`push-to-pull-request-branch`](/gh-aw/reference/safe-outputs-pull-requests/) rather than a direct `git push`. The agent is instructed not to configure credential helpers or run `git credential fill`, because authentication cannot succeed; credential errors are reported as a limitation instead of worked around.
+
+For a central workflow repository editing an external repository, combine `repository`, `path`, `current: true`, and checkout-scoped `github-app` authentication. The workflow repository can remain checked out for tooling; `permissions.contents: none` is only needed to suppress its default checkout. Checkout credentials and safe-output publication credentials are configured separately.
+
+Credential setup passes the expected checkout identity through `GH_AW_GIT_REPOSITORY`, not an override of the runner-reserved `GITHUB_REPOSITORY`. The identity includes the `.wiki` suffix for wiki checkouts and names the repository actually checked out by each job, including in trial mode. It verifies effective fetch and push URLs before and after authentication, rejects plaintext HTTP URLs and empty explicit identities, and fails on an identity mismatch rather than retargeting the checkout. If post-authentication verification fails, it restores the original remote configuration. Workspaces without a checkout or `origin` remote skip credential setup; untrusted checkouts or configuration-read errors fail rather than being treated as a missing remote. Diagnostics identify the failing credential-configuration boundary without printing remote URLs or tokens. Recompile existing workflows to emit the non-reserved variable.
+
+When a checkout path contains an expression, credential setup resolves the evaluated directories at runtime. The last checkout targeting the workspace root determines its expected identity, including when an expression evaluates to `.` or an equivalent root path. Earlier root checkouts are not re-authenticated with their superseded identities. Expressions remain environment data, and a directory-resolution failure stops credential setup.
+
+Set `GH_AW_GIT_CREDENTIALS_DEBUG: "true"` on a credential-configuration step to enable privacy-preserving runtime events; `RUNNER_DEBUG=1` also enables them. Events go to stderr under `workflow:git_credentials` and report checkout indexes, root-match booleans, verification phases, skip reasons, and rollback outcomes without repository names, paths, remote URLs, or tokens. Compiler-side logs use the existing `DEBUG` namespaces `workflow:checkout_credentials_render` and `workflow:git_configuration_steps`, reporting counts and selection modes rather than checkout identities.
+
+The credential helper disables shell tracing and Git trace outputs before handling credentials, including configured Trace2 targets, because external tracing can expose expanded tokens despite stderr redaction. Global Git configuration failures produce a fixed diagnostic instead of raw Git errors. Use the privacy-preserving events above rather than tracing the helper.
 
 :::note[Shallow checkout and push-to-pull-request-branch]
 `push-to-pull-request-branch` inspects the commit range `origin/<branch>..<branch>` in the agent's workspace to detect merge commits and select the appropriate transport. With the default shallow clone (`fetch-depth: 1`), `origin/<branch>` has no traversable ancestry, so `git rev-list` reports the entire local history as the range. On large monorepos (thousands of commits) this can falsely trigger bundle or rewrite paths. When the range is implausibly large in a shallow checkout, merge-commit detection returns false (with a warning) to avoid incorrect transport selection; if the range later reaches the signed-push linearization step, that step is refused with a clear error. Set `fetch-depth: 0` to ensure the correct range is visible.

@@ -9,6 +9,8 @@ Control network access for AI engines using the top-level `network` field to spe
 
 If no `network:` permission is specified, it defaults to `network: defaults`, which allows only certificate validation, JSON schema, and stock Ubuntu archive/keyserver hosts. The [complete baseline](#defaults-baseline) lists every allowed host.
 
+For custom CA trust when AWF's API proxy verifies upstream TLS, see [Custom CA certificate for the API proxy](/gh-aw/reference/sandbox/#custom-ca-certificate-for-the-api-proxy).
+
 > [!TIP]
 > New to network configuration? See the [Network Configuration Guide](/gh-aw/guides/network-configuration/) for practical examples and troubleshooting tips.
 
@@ -177,9 +179,13 @@ Engine domain sets are named allowlist bundles for engine CLI authentication and
 | `pi-base` | `github.com`, `host.docker.internal`, `raw.githubusercontent.com`; applied as the provider-independent baseline before a provider prefix is resolved |
 | `threat-detection` | Applied automatically only to Copilot threat-detection runs and available as a compatibility alias: Copilot API hosts, `api.github.com`, `github.com`, `host.docker.internal`, and `registry.npmjs.org` for read-only lockfile validation. Telemetry requires an explicit `copilot-vendor` opt-in. |
 
+Gemini's default upstream remains available to the AWF API proxy without granting the agent direct access to `generativelanguage.googleapis.com`. Add `gemini` or that hostname to `network.allowed` for direct access. An explicitly configured `GEMINI_API_BASE_URL` retains custom-target egress; it does not automatically allow the default hostname.
+
 The `claude` set excludes telemetry, certificate/OCSP hosts, package mirrors, container registries, and Playwright downloads. Those require explicit domains or ecosystem opt-ins such as `defaults`, `containers`, or `playwright`; configuring the Playwright tool also enables its download domains. The direct Anthropic API is included when Claude uses its default Anthropic target. `engine.api-target` configures the Copilot target and does not replace Claude's Anthropic endpoint. Use `ANTHROPIC_BASE_URL` to configure a custom Anthropic target; that does not automatically allow direct access to `api.anthropic.com`. Add `api.anthropic.com` explicitly if a workflow intentionally needs direct Anthropic access alongside a custom target. The broader `anthropic.com` suffix is never included because it would also permit `statsig.anthropic.com`. CLI installation runs outside the agent firewall and does not require adding download hosts to this set.
 
-The `codex` set excludes the broad `openai.com` and `chatgpt.com` suffixes. Optional vendor authentication/telemetry requires `network.allowed: [codex-vendor]`. External Codex detection retains its concrete API transport, uses the API proxy for authentication, and preserves that explicit vendor opt-in; GitHub-hosted detection uses Copilot transport without adding `api.openai.com`. The `gemini` set excludes `*.googleapis.com`; package downloads such as `storage.googleapis.com` require their own ecosystem opt-in.
+The `codex` set excludes the broad `openai.com` and `chatgpt.com` suffixes. Optional agent-side vendor authentication/telemetry requires `network.allowed: [codex-vendor]`. [OpenAI WIF](/gh-aw/reference/auth/#codex-openai-workload-identity-federation) is different: the API proxy exchanges tokens with `auth.openai.com` through its dedicated egress path, so neither that host nor `codex-vendor` is required in the agent or detection allowlist. External Codex detection retains its concrete API transport, uses the API proxy for authentication, and preserves any explicit vendor opt-in; GitHub-hosted detection uses Copilot transport without adding `api.openai.com`.
+
+The `gemini` set excludes `*.googleapis.com`; package downloads such as `storage.googleapis.com` require their own ecosystem opt-in.
 
 `github.com` is retained for direct repository access in the GitHub and engine bundles. AWF has no exact-host-only domain spelling: this suffix also permits GitHub Packages (`npm.pkg.github.com`, `nuget.pkg.github.com`, `maven.pkg.github.com`, and `rubygems.pkg.github.com`) without a language ecosystem opt-in. To exclude that capability while preserving repository access, set `network.blocked: [pkg.github.com]`; blocked domains take precedence over allowed domains.
 

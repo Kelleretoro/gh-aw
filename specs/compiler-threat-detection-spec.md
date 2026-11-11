@@ -7,7 +7,7 @@ sidebar:
 
 # GitHub Actions Compiler Threat Detection Specification
 
-**Version**: 1.0.97
+**Version**: 1.0.99
 **Status**: Candidate Recommendation  
 **Latest Version**: https://github.com/github/gh-aw/blob/main/specs/compiler-threat-detection-spec.md  
 **Editors**: GitHub Next (GitHub, Inc.)
@@ -28,82 +28,19 @@ A conforming implementation satisfies every MUST in Sections 2–8. Rules are sp
 
 ## 2. Spec-to-Implementation Sync
 
-Each version maps to the minimum compatible binary. A version change MUST update this table and any lock-file compatibility change in the same pull request.
+Each version maps to the minimum compatible binary. A version change MUST update this table and any lock-file compatibility change in the same pull request. Detailed per-version changes are recorded in the [spec change log](compiler-threat-detection-changelog.md#version-history).
 
-| Versions | Minimum gh-aw | Compatibility |
-|---|---:|---|
-| `1.0.97` | Unreleased | Extends CTR-006 validation to raw `run:` content, including shell comments and quoted heredocs, while retaining Bash-aware sanitizer and codemod boundaries. Expressions preserved by `gh aw fix` in comments or quoted heredocs require manual migration; no new threat identifier, permission grant, or lock-file schema change. |
-| `1.0.96` | Unreleased | Specifies resolved global-App token persistence only for the default host PR checkout, preserving per-checkout authentication, static additional checkouts, optional-App fallback, and agent isolation. Requires work-queue reconciliation and App minting before shared PR checkout. Regenerate workflow locks; no new threat identifier, permission grant, or repository-scope expansion. |
-| `1.0.95` | Unreleased | Consolidates AGG-005 resource policy into four trusted repository variables for bytes, objects, timeout, and fetch depths, with derived finite budgets preserving defaults, strict validation, consistent generation/upload/publisher enforcement, and explicit MCP container forwarding. Uploads and agent-written environment files cannot override upload-validation or publisher policy. Deploy matching setup runtime and regenerate workflow locks; no new threat identifier, permission grant, or frontmatter setting. |
-| `1.0.94` | Unreleased | Requires descriptor-pinned raw staging parents, post-redaction recovery-envelope validation before artifact upload, preserved generation/output-limit diagnostics, and usable fallback instructions for immutable object-pack uploads. Retains selected-object packaging, native pack validation, strict tip verification, and publisher authorization. Deploy matching setup runtime and regenerate workflow locks for the upload guard; no new threat identifier, permission grant, or frontmatter setting. |
-| `1.0.93` | Unreleased | Scales AGG-005 recovery by selecting pinned-tip object ranges, using baseline hints only for local exclusions, fetching filtered trusted history with pinned bounded adaptive depth, and hydrating only necessary blobs independently identified in trusted trees before import. Preserves offline generation and publisher authorization. No new frontmatter, permissions, or lock-file schema change. |
-| `1.0.92` | Unreleased | Specifies local-only safe-output generation and bounded deferred object-pack recovery under AGG-001–005: transport and configured-program denial, no generation-token forwarding, complete object previews, isolated authorized fetch before import, exact trusted baselines, and ordinary publication policy. Maps runtime and real-Git packaging/application regressions plus separate bounded generation/recovery models. Preserves privileged publication recovery; no new `CTR-*` rejection, permission grant, frontmatter setting, or lock-file schema change. |
-| `1.0.91` | Unreleased | Maps the runtime safe-output staging ownership boundary: built-in backend runner UID/GID defaults and writable container-local HOME preserve private-file readability without relaxing asset guards. Explicit overrides remain effective. Deploy the fixed setup runtime; no new compiler rejection, threat identifier, permission grant, frontmatter setting, or lock-file compatibility change. |
-| `1.0.90` | Unreleased | Extends CTR-006 with expanding-heredoc sanitization, fail-closed Bash boundary validation, and MCP configuration expressions transported as environment data and resolved after JSON parsing. Preserves bounded quoted-heredoc and legacy runner-variable compatibility. Existing locks require recompilation and deployment with the matching gateway startup runtime; no new threat identifier, permission grant, frontmatter setting, or lock-file schema change. |
-| `1.0.89` | Unreleased | Adds explicit data-only guidance for event-derived work-queue assignments and keeps their rendered envelopes opaque through prompt directives and deferred substitution. Preserves assignment JSON and authored claim-completion guidance. Clarifies that non-secret `vars`-backed environment aliases remain supported while direct `vars` prompt expressions and credential-backed bindings remain prohibited. Deploy the fixed setup runtime; no new threat identifier, permission grant, or lock-file compatibility change. |
-| `1.0.88` | Unreleased | Removes all prompt-assembly network fetching and rejects every remote runtime-import target, including public HTTPS, optional/nested/ranged forms, and deprecated aliases, before network/cache/dedup access. Preserves local author bindings, credential controls, and per-node trust metadata. External retrieval belongs to the agent inside the AWF sandbox under existing network policy. Migrate remote runtime imports, deploy matching compiler/setup runtime, and regenerate locks. Frontmatter compile-time imports are unchanged; no new threat identifier or permission grant. |
-| `1.0.87` | Unreleased | Clarifies the existing source-capability matrix, version-1 prompt-tree trust metadata, activation-only credential handling and post-initialization limits, and compiler/runtime migration. Maps trust-label and all-engine golden regressions. Documentation alignment only: no generated-output, runtime, permission, or lock-file schema change. |
-| `1.0.86` | Unreleased | Restores pinned `actions/github-script` for activation prompt rendering and removes `/usr/bin/env` child launchers. Overrides the default token with a literal non-secret placeholder and scrubs environment variables before prompt modules load, without exposing authenticated clients to those modules. Preserves shell validation/printing, local author bindings, static HTTPS, trust labels, and credential-binding rejection. Environment cleanup no longer claims pre-startup isolation. Recompile workflow locks; no new threat identifier or permission grant. |
-| `1.0.85` | Unreleased | Treats local runtime-import files as author sources with compiler-selected non-secret expression bindings, including nested imports and conditions. External HTTPS remains static. Prompt generation steps use credential-free child environments instead of authenticated GitHub-script actions; secret-backed prompt bindings fail in all modes. Deploy compiler and setup runtime together and regenerate locks. Changes generated prompt execution and the compiler/runtime author-binding contract; no new threat identifier or permission grant. |
-| `1.0.84` | Unreleased | Rejects remote inline agent/skill control markers while preserving author/local definitions and static public HTTPS. Requires immediate rejection and socket cleanup for protocol upgrades, decoding of supported compressed responses before content validation, and cancellation/error handling through decompression. Deploy the fixed setup runtime; no new threat identifier, permission grant, or lock-file compatibility change. |
-| `1.0.83` | Unreleased | Enforces fragment expression authorization before conditional placeholder creation, including fenced and unmatched conditionals. Shares the renderer's branch-directive grammar with static remote-content validation so bare elseif aliases cannot alter author branches. Preserves author bindings/imports, bounded local nesting, and static HTTPS policy. Deploy the fixed setup runtime; no new threat identifier, permission grant, or lock-file compatibility change. |
-| `1.0.82` | Unreleased | Restricts remote runtime imports to literal public HTTPS URLs and expression/directive-free responses, including optional and ranged imports. HTTP, dynamic URLs, redirects, credentials, private destinations, and legacy disk-cache reads are denied. Retains DNS/socket pinning, diagnostic privacy, local expression isolation and existing local path forms. Users of HTTP or remote expressions must migrate to permitted local files or static HTTPS content and deploy the fixed compiler/setup runtime. No new threat identifier, permission grant, or lock-file schema change. |
-| `1.0.81` | Unreleased | Specifies imported-expression capability isolation under CTR-010/017 and a supporting runner-side public-destination URL import contract, further restricted in 1.0.82. Imported `env.*` expressions fail closed; explicit main-prompt environment bindings remain supported. Also maps experimental PR-merge revision binding, fail-closed review evidence, workflow-owned CI/approval policies, final revalidation, and decision evidence to Section 7.7. Adds `required-checks` and `required-approvers` frontmatter; enabled live handlers and their App tokens require `checks: read` for runtime-discovered requirements, but an empty requirement union performs no check-run reads. Covers check-producer ambiguity, agent-controlled check-name rejection, submission-time review ordering, and bounded logging/evidence trust claims. Deploy the fixed setup runtime and recompile locks to adopt these policies. Existing merge restrictions and threat-warning abort classification remain unchanged. No new compiler threat identifier or lock-file schema change. |
-| `1.0.80` | Unreleased | Extends CTR-017 with provider-scoped universal-consumer Copilot credentials and an OpenAI-compatible placeholder introduced only inside the AWF sandbox after credential discovery. Maps generated-YAML and simulated startup/client environment regressions. Existing workflow locks require recompilation; no new threat identifier, permission grant, frontmatter setting, or lock-file schema change. |
-| `1.0.79` | Unreleased | Distinguishes drive-memory persistence from Actions cache event/token policy. Documents admitted issue/slash-command writes, repository/ref/drive scope, cross-event residual trust, explicit acceptance, and dry-run/restore-only/no-detection boundaries. Adds generated-YAML and event/result evidence; no runtime or lock-file compatibility change. |
-| `1.0.78` | Unreleased | Documents the implemented cache-memory restore/edit/artifact/publication lifecycle, integrity namespaces and restore scope, and distinct meanings of read-only policies. Maps lifecycle and mode-validation evidence and separates CTR-019 from the host-side MCP read-only and safe-output lifecycle models. Documentation/evidence clarification only; no new runtime behavior, threat identifier, or lock-file compatibility change. |
-| `1.0.77` | Unreleased | Requires parsed, nonempty dependency-cache entries before omitting the detection-enabled agent's read-only cache policy; `cache: []` retains the restriction. Requires trigger-independent validation of authored cache-mode literals before actionlint compatibility suppression. No new threat identifier, frontmatter setting, or lock-file schema change. |
-| `1.0.76` | Unreleased | Replaces the incomplete cache-write event denylist with GitHub's documented write allowlist plus merge-ref-isolated `pull_request`. Publisher and dependency-save guards deny all other and unknown events, including issues/discussions; known-event lint diagnostics share the classification. Also adds explicit `checkout.pull-request-floating-head` current-head selection, default false, preserving SHA fetch/verification and authorization without establishing revision approval or adding a compiler threat rule. Generated locks require regeneration; no new threat identifier or frontmatter setting for cache access. |
-| `1.0.75` | Unreleased | Blocks detection-separated cache-memory publication on low-trust events, restores trusted dependency-cache saves using trigger-scoped tokens, and shares explicit detection acceptance across cache/drive publishers and custom jobs. Adds job-level actionlint compatibility without suppressing invalid locations or values. Also maps immutable PR checkout and actual-HEAD verification to the runtime boundary: event/review revision binding, stale revision rejection, fail-closed dispatch context, and explicit current-head/non-approval semantics for issue comments and unbound manual dispatch. Generated locks require regeneration for cache access; no new threat identifier, frontmatter setting, permission grant, or lock-file schema change. |
-| `1.0.74` | Unreleased | Strengthens CTR-019 with detection-separated agent/publisher cache access and explicit detector acceptance. Specifies the existing GHES compatibility opt-out, dry-run precedence, low-trust explicit-write warnings, and unchanged no-detection behavior. Also specifies bounded Actions/AW `privileged-checkout` and `artifact-execution` review warnings for privileged custom source selection and cross-run artifact execution, and clarifies pwn-request compiler coverage versus runtime/deployment trust: host/cache persistence, producer-code trust, approval-to-revision binding, action version currency, custom executable steps, date-independent effective platform-policy checks, and safe-output warn mode. Preserves strict PRT enforcement, offline pin integrity, data-only consumers, and explicit analysis limits. Generated locks require regeneration for cache access changes; the new review warnings add no runtime enforcement. No new threat identifier, compiler rejection, permission grant, or lock-file schema change. |
-| `1.0.73` | Unreleased | Audit-only clarification that same-repository bot PR `edited` checkout is a runtime trust control restricted to allow-listed actors and body-only changes under Security Architecture Specification RS-05a. No new threat identifier, permission grant, or lock-file schema change. |
-| `1.0.72` | Unreleased | Audit-only clarification that same-repository bot PR `labeled` events remain subject to the collaborator permission floor under Security Architecture Specification RS-05a. No new threat identifier, permission grant, or lock-file schema change. |
-| `1.0.71` | Unreleased | Adds a separate compiler-only `artipacked` exception for agent checkouts immediately followed by exact compiler-owned cleanup and credential verification. Requires current-compilation provenance, unique full-block matching, and statically proven cleanup discovery coverage; runtime authentication and standalone lint remain unchanged. |
-| `1.0.70` | Unreleased | Requires generated admission-output references to follow effective admission enablement, including component execution and conclusion usage metadata. Regeneration removes disabled-admission references. Specifies the compiler-only `artipacked` warning exception for the exact generated safe-output PR checkout/authentication block, with per-compilation provenance and unchanged standalone lint and runtime authentication. No new threat identifier, permission grant, or lock-file schema change. |
-| `1.0.69` | Unreleased | Restores CTR-005's `detection-gate: status-only` syntax and adds bounded TLA+ coverage for the validated continuation exception. No new threat identifier, permission grant, or lock-file schema change. |
-| `1.0.68` | Unreleased | Maps proxy startup diagnostic privacy to runtime redaction and private capture, including runner proxy values, overlapping credential matches, late mask registration, and fail-closed CLI diagnostic publication. No new compiler rejection, threat identifier, permission grant, or lock-file schema change. |
-| `1.0.67` | Unreleased | Audit-only; maps retained PR-head checkout after source-branch deletion to runtime ref isolation (RS-05a), separate from compiler checkout provenance and safe-output lifecycle fencing. No new threat identifier, permission grant, or lock-file schema change. |
-| `1.0.66` | Unreleased | Extends CTR-005 to custom-job detection bypass: transitive ordering checks and compiler-enforced successful, clean detection before ordinary downstream custom jobs, with a contract-validated `detection-gate: status-only` exception for leaf status-reporting jobs. Maps the Actions/AW `custom-job-detection` lint subset and disabled-detection exemption. Generated locks require regeneration; no new threat identifier or lock-file schema change. |
-| `1.0.65` | Unreleased | Adds the `otlp-secret-leak` Actions/AW AST lint subset of CTR-017 for secret-tainted OTLP span and resource attributes, including Actions environment dataflow and value-free diagnostics. It does not infer literal credentials or arbitrary runtime values. No new threat identifier or lock-file schema change. |
-| `1.0.64` | Unreleased | Separates compromised-CA transport authentication from CTR-011 destination authorization. Maps trusted release digests, HTTPS-only bootstrap redirects, patched release toolchains and runtime inventory to security architecture §6.8. Adds optional literal `engine.checksums-sha256` and `sandbox.agent.checksums-sha256` overrides bound to explicit versions, including matching detection/eval installations. Unreviewed downloads without a supplied pin fail closed; no new `CTR-*` identifier or lock-file schema change. |
-| `1.0.63` | Unreleased | Audit-only; distinguishes staged Copilot SDK skill registration and runtime permission-denial enforcement from compiler controls. Preserves CTR-023 engine-capability validation and CTR-028/030 configuration provenance. No new threat identifier, permission grant, or lock-file schema change. |
-| `1.0.62` | Unreleased | Adds authored AST checks for `pull_request_target` checkout trust (CTR-008 subset) and multiline, malformed, or blocked-property prompt expressions (CTR-010 subset). Shares checkout trust predicates with the compiler and expression parsing with secret-flow analysis. Preserves unresolved-import uncertainty and native Actions evidence boundaries. No new threat identifier or lock-file schema change. |
-| `1.0.61` | Unreleased | Exposes known compiler threat IDs in AST rule metadata, text/JSON diagnostics, rule listings, and the standalone linter reference. Checks URL-filter SSL prerequisites in accepted non-strict `sandbox.agent.args`; reports schema-rejected legacy `network.firewall` as requiring migration rather than recommending an invalid remedy. No new threat identifier or lock-file schema change. |
-| `1.0.60` | Unreleased | Adds authored AW checks for unsafe `pull_request_target` role admission (CTR-008 subset), blocked safe-output shell expansions (CTR-009), and URL-filter SSL prerequisites (CTR-011 subset). Preserves non-strict role-warning suppression, shared compiler shell policy, import uncertainty, and native Actions evidence boundaries. No new `CTR-*` rule or lock-file schema change. |
-| `1.0.57` | Unreleased | Maps authored-source checks for bare network allowances (CTR-011 subset), unconstrained wildcard PR pushes (CTR-012 subset), enabled Node install hooks (CTR-014), and bare label allowlists (CTR-015). Preserves strict-policy severity and defers push-constraint absence when imports may supply policy. No new `CTR-*` rule or lock-file schema change. |
-| `1.0.56` | Unreleased | Adds explicit permission-scope/OIDC AST checks (CTR-001 subset), authored AW source checks for disabled version integrity, conditional imports, and private-to-public opt-outs (CTR-018/020/031), and opt-in compiler-backed JavaScript taint analysis (CTR-017 subset). These do not infer job authorization, imported policy, or missing source/runtime metadata. No new `CTR-*` rule or lock-file schema change. |
-| `1.0.55` | Unreleased | Maps independent Actions/AW AST lint checks to observable subsets of CTR-002, CTR-006, CTR-017, CTR-021, and CTR-026. Existing compiler and runtime conformance requirements remain authoritative; no new `CTR-*` rule or lock-file schema change. |
-| `1.0.54` | Unreleased | Specifies the host-side MCP compilation capability boundary: a dedicated read-only mode without startup write-tool opt-in, validation independent of stale outputs, unchanged filesystem/Docker state, cached-only remote imports and nested includes, and repository-root cache lookup. Preserves trusted CLI no-emit import population. Adds bounded TLA+ evidence; no new `CTR-*` rule or lock-file schema change. |
-| `1.0.53` | Unreleased | Adds CTR-034: formalizes pull-request fork admission by repository pattern or explicit author association, retaining same-repository defaults and separating admission from permissions and secrets. Clarifies that same-repository bot checkout on `pull_request` and `pull_request_target` `ready_for_review` and `reopened` events is a runtime trust control governed by Security Architecture Specification RS-05a, not a new compiler threat rule. |
-| `1.0.52` | Unreleased | Adds CTR-033: repository-list checkout requires literal `multi: true`; ordinary repository expressions retain single-checkout semantics with runtime cardinality validation in both jobs. Safe Outputs PTI-001–007 and its TLA+ model clarify a runtime patch/bundle validation-to-application integrity boundary without changing permissions or lock-file schema. |
-| `1.0.51` | Unreleased | Extends CTR-008 to reject `pull_request_target` with `on.roles` containing `read` or `all` in strict mode and permit suppression of only the corresponding warning in non-strict mode via an explicit dangerous feature flag. |
-| `1.0.50` | Unreleased | Extends CTR-032 with mandatory creating-run traceability from first publication, HTML markers for issue comments and PR descriptions, and Markdown anchor markers for PR review comments. Versioned activation markers and review-comment persistence coverage remain implementation obligations. |
-| `1.0.49` | Unreleased | Adds CTR-032; safe-output publishing jobs supply step-level check-run identity, and runtime publishers replace forged execution-provenance markers with trusted metadata. |
-| `1.0.48` | Unreleased | Audit-only; same-repository checkout for allow-listed App comments and reviews is a runtime trust control governed by Security Architecture Specification RS-05a, not a new compiler threat rule. |
-| `1.0.47` | Unreleased | Audit-only; same-repository checkout for allow-listed App comments is a runtime trust control governed by Security Architecture Specification RS-05a, not a new compiler threat rule. |
-| `1.0.46` | Unreleased | Extends CTR-017 OTLP sandbox exclusions to evals AWF invocations. No lock-file schema change. |
-| `1.0.45` | Unreleased | Extends CTR-017 with host-only OTLP exporter configuration: regenerated agent and threat-detection AWF commands exclude collector endpoints and headers when AWF supports `--exclude-env`. No lock-file schema change. |
-| `1.0.44` | Unreleased | Clarifies CTR-001: `id-token: write` is exempt from repository-write rejection, and its OIDC trust-policy reminder is informational rather than a warning. No lock-file compatibility change. |
-| `1.0.43` | `v0.87.9` | Clarifies CTR-008 trusted `pull_request_target` checkouts: acknowledgment suppresses only the trigger warning, allowlisted checkouts require an exact literal repository/ref pair, and any configured `fetch` is rejected. |
-| `1.0.42` | `v0.87.9` | Audit-only; same-repository bot PR checkout authorization is a runtime trust control governed by the security architecture specification, not a new compiler threat rule. |
-| `1.0.41` | `v0.87.9` | Adds CTR-031; private-to-public flow opt-outs are rejected in strict mode and warned in non-strict mode because they can expose private data through public logs or destinations. |
-| `1.0.40` | `v0.87.9` | Adds CTR-030; activation sparse checkouts use the PR base SHA for pull-request and review events before loading runtime imports or skills. |
-| `1.0.38` | `v0.87.9` | Audit-only; safe-outputs workspace checkout discovery is a runtime trust boundary governed by the safe-outputs and checkout-behavior specifications, not a new CTR rule. |
-| `1.0.37` | `v0.87.9` | Adds CTR-028; PR-triggered agent jobs restore agent configuration from the base branch before any step that installs agent content. |
-| `1.0.36` | `v0.87.9` | Audit-only; Opengrep build-reproducibility findings (non-deterministic `npm`/`uv pip` installs, non-SHA-pinned Dockerfile image) are out of conformance scope per Section 1. |
-| `1.0.35` | `v0.87.9` | Audit-only; #681/#678/#676/#675, #679, #674/#669/#668/#667, #663, #657, #652/#651, and #680 are not new threat classes. |
-| `1.0.34` | `v0.87.9` | Adds CTR-027; allowlisted bot synchronization requires trusted same-repository provenance. |
-| `1.0.33` | `v0.87.9` | Audit-only; no new CTR rule or lock-file schema change. |
-| `1.0.32` | `v0.87.9` | Audit-only; no new CTR rule or lock-file schema change. |
-| `1.0.31` | `v0.87.9` | Audit-only; no new CTR rule or lock-file schema change. |
-| `1.0.30` | `v0.87.9` | CTR-001 status-function guard mapping update only. |
-| `1.0.29` | `v0.87.9` | CTR-004 Playwright renderer mapping update only. |
-| `1.0.27`–`1.0.28` | `v0.87.4` | CTR-004 enclave and CTR-006 guard-renderer mapping updates only. |
-| `1.0.26` | `v0.87.4` | Adds CTR-026; generated job timeouts are literal positive integers. |
-| `1.0.23`–`1.0.25` | `v0.87.1` | Adds CTR-025; mapping-only audit updates otherwise. |
-| `1.0.22` | `v0.87.0` | Adds suppression manifest and optimizer safeguards. |
-| `1.0.15`–`1.0.21` | `v0.72.1`–`v0.83.6` | Adds CTR-021–023 and editorial/mapping updates. |
-| `1.0.8`–`1.0.14` | `v0.72.1` | Establishes CTR-016, CTR-018–020; earlier versions establish CTR-001–015. |
+| Versions | Minimum gh-aw |
+|---|---:|
+| `1.0.60`–`1.0.99` | Unreleased |
+| `1.0.44`–`1.0.57` | Unreleased |
+| `1.0.40`–`1.0.43` | `v0.87.9` |
+| `1.0.29`–`1.0.38` | `v0.87.9` |
+| `1.0.26`–`1.0.28` | `v0.87.4` |
+| `1.0.23`–`1.0.25` | `v0.87.1` |
+| `1.0.22` | `v0.87.0` |
+| `1.0.15`–`1.0.21` | `v0.72.1`–`v0.83.6` |
+| `1.0.8`–`1.0.14` | `v0.72.1` |
 
 ### Current Implementation Synchronization
 
@@ -125,6 +62,15 @@ The following implementation snapshot complements the detailed mapping in Sectio
 ## 3. Threat Model Overview
 
 Generated workflows run with elevated permissions and consume untrusted content (issues, PRs, comments, external tool output). The catalog in Section 5 groups the threats a conforming compiler MUST detect into five classes: unauthorized privilege or scope expansion, unsafe or bypassed sandboxing, injection (template, shell, or subprocess argument), unsafe output and supply-chain routes (including forged execution attribution), and compile-time drift between manifests, mappings, and the rules that reference them. Each class maps to one or more `CTR-*` rules with a stable trigger and compiler action.
+
+Invocation decision models for `skip-if-decision` run inside the AWF agent
+sandbox, not on the Actions host or in activation, detection, evals, or
+conclusion. The compiler transports questions as data; the shared harness
+resolves runtime files and calls the existing AWF API proxy only after
+deterministic eligibility checks. Model recommendations are not authorization
+or a replacement for sandbox, credential, retry, budget, or publication
+controls. Section 7.11 specifies this compiler/runtime boundary and its
+residual semantic-evidence risks.
 
 An adversary may also intercept network traffic while possessing a formerly trusted intermediate CA private key, as in the [October 2026 eMudhra compromise](https://emudhra.we-have-a-problem.com). Such an adversary can impersonate an allowlisted HTTPS service to an unpatched client and replace both an executable and an unsigned checksum served beside it. CTR-011 authorizes destinations; it does not authenticate their operators or attest client distrust updates. CTR-002 action pins and CTR-016 manifest checks likewise do not establish remote TLS identity.
 
@@ -748,13 +694,14 @@ Deterministic regressions assert that prompt assembly does not call network inte
 
 ### 7.9 Safe-Output Staging Ownership Boundary
 
-The normative asset contract is [Safe Outputs: Asset Staging Ownership and Transport](../docs/src/content/docs/specs/safe-outputs-specification.md#asset-staging-ownership-and-transport). Before gateway configuration serialization/publication, startup MUST default the built-in `agenticworkflows` and `safeoutputs` backend containers to the runner's validated numeric UID:GID, with a writable container-local `HOME` unless already configured. Explicit container-user overrides MUST remain effective; overriding deployments retain responsibility for producer/host compatibility. Invalid default identity MUST fail explicitly, not select root. Other backends and existing credential, mount, network, and authorization boundaries MUST remain unchanged.
+The normative asset contract is [Safe Outputs: Asset Staging Ownership and Transport](../docs/src/content/docs/specs/safe-outputs-specification.md#asset-staging-ownership-and-transport). Before gateway configuration serialization/publication, startup MUST default the built-in `agenticworkflows` and `safeoutputs` backend containers to the runner's validated effective numeric UID and GID, with a writable container-local `HOME` unless already configured. Explicit container-user overrides and configured supplementary group arguments MUST remain effective; runner supplementary groups MUST NOT be added automatically. Overriding deployments retain responsibility for producer/host compatibility. Invalid default identity MUST fail explicitly, not select root. Other backends and existing credential, mount, network, and authorization boundaries MUST remain unchanged.
 
-The handoff MUST retain guarded exclusive `0600` file creation and `0700` guard-created private directories, including Claim subdirectories, rather than broadly changing ownership or modes. Runtime file-access errors MUST NOT be described as proof of artifact quota exhaustion or Git push failure. A successful MCP staging request is not a completed artifact upload or publication; downstream missing-artifact failures can be cascades of an earlier host-read failure.
+Generated safeoutputs config, tools, metadata, validation, and output files MUST use owner-only (`0600`) no-follow writes, including when replacing existing files. The asset handoff MUST retain guarded exclusive `0600` file creation and `0700` guard-created private directories, including Claim subdirectories, rather than broadly changing ownership or modes. Runtime file-access errors MUST NOT be described as proof of artifact quota exhaustion or Git push failure. A successful MCP staging request is not a completed artifact upload or publication; downstream missing-artifact failures can be cascades of an earlier host-read failure.
 
 | Boundary | Implementation | Regression Evidence |
 |---|---|---|
-| Backend identity before configuration publication | `actions/setup/js/start_mcp_gateway.cjs`: `applyBuiltinMCPRunnerIdentity` and its startup call | `start_mcp_gateway.test.cjs`: both built-ins, validated identities, explicit user/HOME preservation, unchanged unrelated/HTTP backends, idempotency, mixed explicit/default built-ins, and VM startup wiring before gateway launch. |
+| Backend identity before configuration publication | `actions/setup/js/start_mcp_gateway.cjs`: `applyBuiltinMCPRunnerIdentity` and its startup call | `start_mcp_gateway.test.cjs`: both built-ins, validated identities, explicit user/HOME preservation, unchanged unrelated/HTTP backends, idempotency, mixed explicit/default built-ins, and VM startup wiring through each engine converter dispatch. |
+| Owner-only generated safeoutputs files | `actions/setup/js/create_files.cjs`: `writeFile` and `renderFiles`; `generate_safe_outputs_tools.cjs`; `safe_outputs_append.cjs` | `create_files.test.cjs`, `generate_safe_outputs_tools.test.cjs`, and `safe_outputs_append.test.cjs`: owner-only create/replace/append modes and symlink rejection. |
 | Private staged bytes and Claim traversal | `actions/setup/js/safe_outputs_handlers.cjs`: `uploadAssetHandler`; `symlink_guard.cjs`: `readGuardedFile`, `writeGuardedFile` | `start_mcp_gateway.test.cjs`: Linux-only backend-writer/host-reader subprocess regression checking file ownership, `0600` files, and `0700` Claim directories; `symlink_guard.test.cjs` and `safe_outputs_handlers.test.cjs`: bounded reads, link rejection, exclusive creation, path and identity guards. |
 | Host artifact handoff and downstream publication | `pkg/workflow/publish_assets.go`; `actions/setup/js/upload_assets.cjs` | `pkg/workflow/publish_assets_test.go`: generated publication-job input/environment wiring; `actions/setup/js/upload_assets.test.cjs`: guarded consumption, content verification, and failure when every declared asset is missing. |
 
@@ -775,6 +722,85 @@ These are generated-configuration requirements, not new authored-source lint dia
 | Runtime checkout credential isolation | `pkg/workflow/compiler_safe_outputs_steps.go`; `github_token.go`: `resolvePRCheckoutToken`, `resolveStaticCheckoutToken` | `TestSafeOutputDynamicCheckoutTokenPriority`, `TestSafeOutputDynamicCheckoutKeepsHostingAndStaticAuth`, `TestSafeOutputDynamicCheckoutDoesNotInheritAnotherEntryApp`. |
 
 Generated-YAML regressions do not prove live App installation access, effective repository permissions, push identity, or downstream workflow execution. Existing locks MUST be recompiled to adopt this compiler change; no new `CTR-*` identifier or lock-file schema is introduced.
+
+### 7.11 Advisory Invocation Decisions Inside AWF
+
+`skip-if-decision` is experimental. Nonempty agent-phase lists MUST emit the
+standard compiler experimental-feature warning; syntax and behavior may change
+without deprecation.
+
+For a nonempty top-level `skip-if-decision` list, the compiler MUST require the
+AWF agent sandbox and validate up to 64 nonblank string questions. Actions
+expressions in questions MUST be rejected. Questions MUST be transported as
+JSON environment data, not interpolated shell code or host-side decision
+steps. Nonempty lists combined with declarative `protected-session-capture`
+MUST be rejected: the decision wrapper retains the capture descriptor across
+the exec-only boundary, and a skipped invocation cannot supply a verified
+protected session. Absent/empty lists MUST preserve existing generated behavior.
+
+The shared invocation harness MUST evaluate questions inside AWF before every
+otherwise eligible initial, retry, resume, or continuation invocation,
+including built-in engines, custom-harness overrides, and supported declarative/durable
+execution. Deterministic retry, budget, deadline, and nonrecoverable-error
+safeguards MUST remain authoritative. Any `deny` MUST suppress the proposed
+invocation; otherwise any `allow` or all `unknown` MUST preserve the selected
+execution path. API/model unavailability, timeouts, malformed responses, and
+evaluation failures MUST abstain without a separate decision retry, additional
+decision-model call, or independent workflow failure.
+
+Harness initialization MUST be recorded before a potentially billable
+decision request so startup recovery cannot infer zero usage from a missing
+CLI attempt. This initialization marker MUST NOT claim that an agent CLI
+invocation occurred; nonrecoverable preflight checks MUST still run first.
+
+Decision requests MUST use the existing AWF API proxy and its model, network,
+credential, budget, and usage policies. Direct-provider fallback and separate
+credential discovery MUST NOT be introduced. Runtime `@file` evidence MUST be
+read afresh relative to the engine working directory or workspace, confined
+to the workspace or `/tmp/gh-aw/agent`, and checked by the existing guarded
+regular-file reader. Sensitive paths, links, and oversized/changing files MUST
+be rejected; an unreadable reference makes only its question `unknown`.
+Imports MUST use the remaining per-question byte budget and account for
+question text, evidence metadata, and JSON escaping within a 512 KiB ceiling.
+The complete serialized Decisions request MUST be limited to 400,000 UTF-8
+bytes, including input, question definitions, choices, escaped evidence, and
+model/request framing. This approximates 100,000 tokens at four bytes per token;
+it is not tokenizer-exact. A question exceeding the remaining request budget
+MUST abstain without transmission; smaller questions MAY still join the batch.
+
+Before transmission, questions and file evidence MUST be screened using
+configured secret values and common credential patterns. A match MUST withhold
+the entire question and its evidence as `unknown` with
+`sensitive_content_blocked`; other safe questions retain their existing batch
+path. All-blocked batches MUST make no proxy reflection or decision request.
+File evidence MUST use JSON-escaped records with reference and byte-count
+metadata, with data-only guidance outside the record. This structuring prevents
+record-boundary injection, not semantic instruction-following by the model.
+
+Only bounded decision metadata, including question indices, outcomes,
+sanitized error codes, latency, and avoided invocations, MUST enter typed
+`harness.decision` unified-session and audit evidence. Raw file contents,
+question text, provider diagnostics, and credentials MUST NOT enter this
+metadata. A denied invocation MUST NOT increment process attempts or retries.
+Conditional no-op recording MUST follow the Safe Outputs specification's
+invocation-decision skip contract and preserve earlier outputs and failures;
+decision evidence MUST NOT authorize GitHub mutations or waive detection.
+
+| Boundary | Implementation | Regression Evidence |
+|---|---|---|
+| Compiler validation and sandbox-only transport | `pkg/workflow/skip_if_decision.go`, `compiler_orchestrator_workflow.go`, `engine_helpers.go`; `pkg/parser/schemas/main_workflow_schema.json` | `pkg/workflow/skip_if_decision_test.go`: malformed configuration, sandbox disablement, phase exclusions, built-in/custom/declarative/durable paths, protected-capture rejection, and absent/empty compatibility. |
+| Eligible invocation gating, proxy-only requests, and guarded files | `actions/setup/js/harness_retry_runner.cjs`, `shell_harness.cjs`, `skip_if_decision.cjs`, `decisions_client.cjs`, `symlink_guard.cjs` | `skip_if_decision.test.cjs`, `harness_retry_runner.test.cjs`, and `shell_harness.test.cjs`: aggregation, failure abstention, runtime snapshots, normalized working directories, pre-request initialization markers, path confinement, restart paths, and avoided invocations. |
+| Advisory evidence and safe-output preservation | `actions/setup/js/harness_retry_record.cjs`, `unified_session.cjs`, `compact_unified_session.cjs`; `pkg/cli/audit_decision.go` | `unified_session.test.cjs`, `compact_unified_session.test.cjs`, `unified_session_render.test.cjs`, and `pkg/cli/audit_decision_test.go`: bounded metadata, separate counts, and no-op preservation. |
+
+File evidence and model answers remain untrusted semantic inputs: describing
+them as evidence rather than instructions does not prevent prompt injection
+or independently prove that work is complete. Credential screening is heuristic
+and can miss unknown or encoded secrets or withhold benign examples; it does
+not establish that arbitrary project data is safe to transmit. These regressions establish
+compiler wiring and local/mocked behavior, not live AWF deployment, provider
+availability, or absence of semantic false skips. Linux-only guarded-file
+tests remain explicit coverage gaps on other platforms. No new `CTR-*` or
+compiler compliance-test identifier is introduced.
 
 ## 8. Compliance Testing
 

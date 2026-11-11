@@ -47,7 +47,20 @@ async function generateAwInfo(run) {
     Object.assign(process.env, env, { GITHUB_RUN_ATTEMPT: recorded.run_attempt, GITHUB_WORKFLOW_REF: recorded.caller_workflow_ref, GITHUB_SERVER_URL: "https://github.com" });
     global.core = mockCore;
     const { main } = await import("./generate_aw_info.cjs");
-    await main(mockCore, fixtures.runContext(recorded));
+    const workflowPath = `.github/workflows/${run.workflow}.lock.yml`;
+    const contents = fs.readFileSync(path.resolve(__dirname, "../../..", workflowPath), "utf8");
+    const githubClient = {
+      rest: {
+        repos: {
+          getContent: vi.fn(async ({ path: requestedPath, ref }) => {
+            expect(requestedPath).toBe(workflowPath);
+            expect(ref).toBe(recorded.sha);
+            return { data: { type: "file", path: workflowPath, encoding: "base64", content: Buffer.from(contents).toString("base64") } };
+          }),
+        },
+      },
+    };
+    await main(mockCore, fixtures.runContext(recorded), githubClient);
     return JSON.parse(files.get("/tmp/gh-aw/aw_info.json"));
   } finally {
     for (const spy of spies) spy.mockRestore();
@@ -157,6 +170,9 @@ describe("routing analytics in aw_session.jsonl", () => {
     // Native routing records its provider; Copilot routing omits it and unknown values are dropped.
     expect(projectModelConfig({ routing: { enabled: true, provider: "anthropic", candidate_models: ["claude-sonnet-5"] } })).toEqual({ routing: { enabled: true, provider: "anthropic", candidateModels: ["claude-sonnet-5"] } });
     expect(projectModelConfig({ routing: { enabled: true, provider: "copilot" } })).toEqual({ routing: { enabled: true } });
+    // A router model value is recorded as requested; anything else is dropped.
+    expect(projectModelConfig({ routing: { enabled: true, goal: "cost", mode: "economy", requested: "router/economy" } })).toEqual({ routing: { enabled: true, goal: "cost", mode: "economy", requested: "router/economy" } });
+    expect(projectModelConfig({ routing: { enabled: true, requested: "router/fast" } })).toEqual({ routing: { enabled: true } });
   });
 
   it("model_config_records_unrouted_resolved_baseline", async () => {

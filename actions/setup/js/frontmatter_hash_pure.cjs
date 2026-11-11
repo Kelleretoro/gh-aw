@@ -42,6 +42,13 @@ function isFileNotFound(error) {
   return error.cause ? isFileNotFound(error.cause) : false;
 }
 
+function isHttpNotFound(error) {
+  if (!error) return false;
+  const status = error.status || error.response?.status;
+  if (status !== undefined) return status === HTTP_STATUS_NOT_FOUND;
+  return error.cause ? isHttpNotFound(error.cause) : false;
+}
+
 /**
  * Parses a boolean flag from frontmatter text using simple text scanning.
  * Matches lines of the form "key: true" or "key: false" at the top level.
@@ -206,9 +213,10 @@ function extractFrontmatterAndBody(content) {
  * @param {Set<string>} visited - Set of visited files for cycle detection
  * @param {Function} fileReader - File reader function (async (filePath) => content)
  * @param {(filePath: string, error: Error) => void} [onMissingImport] - Called when an import file is missing
+ * @param {string} [rootDir] - Directory of the root workflow, retained across nested imports
  * @returns {Promise<{importedFiles: string[], importedFrontmatterTexts: string[]}>}
  */
-async function processImportsTextBased(frontmatterText, baseDir, visited = new Set(), fileReader = defaultFileReader, onMissingImport) {
+async function processImportsTextBased(frontmatterText, baseDir, visited = new Set(), fileReader = defaultFileReader, onMissingImport, rootDir = baseDir) {
   const importedFiles = [];
   const importedFrontmatterTexts = [];
 
@@ -224,7 +232,7 @@ async function processImportsTextBased(frontmatterText, baseDir, visited = new S
 
   for (const importPath of sortedImports) {
     // Join import path with base directory (preserves relative paths for GitHub API compatibility)
-    const fullPath = path.join(baseDir, importPath);
+    const fullPath = resolveHashImportPath(importPath, baseDir, rootDir);
 
     // Skip if already visited (cycle detection)
     if (visited.has(fullPath)) continue;
@@ -241,13 +249,13 @@ async function processImportsTextBased(frontmatterText, baseDir, visited = new S
 
       // Recursively process imports in the imported file
       const importBaseDir = path.dirname(fullPath);
-      const nestedResult = await processImportsTextBased(importFrontmatterText, importBaseDir, visited, fileReader, onMissingImport);
+      const nestedResult = await processImportsTextBased(importFrontmatterText, importBaseDir, visited, fileReader, onMissingImport, rootDir);
 
       // Add nested imports
       importedFiles.push(...nestedResult.importedFiles);
       importedFrontmatterTexts.push(...nestedResult.importedFrontmatterTexts);
     } catch (err) {
-      if (!isFileNotFound(err)) throw err;
+      if (!isFileNotFound(err) || (isHttpNotFound(err) && !isWorkflowSpecImport(importPath))) throw err;
       onMissingImport?.(fullPath, /** @type {Error} */ err);
       continue;
     }
@@ -583,19 +591,25 @@ function runtimeImportHashCandidatePaths(importPath, baseDir) {
  * @param {string} baseDir
  * @returns {string}
  */
+function findGitHubFolder(baseDir) {
+  let directory = path.normalize(baseDir);
+  while (!directory.endsWith(".github")) {
+    const parent = path.dirname(directory);
+    if (parent === directory || parent === "." || parent === "/") {
+      return baseDir;
+    }
+    directory = parent;
+  }
+  return directory;
+}
+
+/**
+ * @param {string} baseDir
+ * @returns {string}
+ */
 function runtimeImportHashWorkspaceRoot(baseDir) {
-  const normalized = path.normalize(baseDir).replace(/\\/g, "/");
-  if (normalized === ".github" || normalized.startsWith(".github/")) {
-    return ".";
-  }
-  const markerIndex = normalized.indexOf("/.github/");
-  if (markerIndex >= 0) {
-    return normalized.substring(0, markerIndex);
-  }
-  if (normalized.endsWith("/.github")) {
-    return path.dirname(baseDir);
-  }
-  return baseDir;
+  const githubFolder = findGitHubFolder(baseDir);
+  return githubFolder.endsWith(".github") ? path.dirname(githubFolder) : baseDir;
 }
 
 /**
@@ -658,9 +672,10 @@ function marshalSorted(data) {
  * @param {string} baseDir - Base directory for resolving imports
  * @param {Set<string>} visited - Set of visited files for cycle detection
  * @param {Function} fileReader - File reader function (async (filePath) => content)
+ * @param {string} [rootDir] - Directory of the root workflow, retained across nested imports
  * @returns {Promise<string[]>} Array of imported body texts
  */
-async function collectImportedBodies(frontmatterText, baseDir, visited = new Set(), fileReader = defaultFileReader) {
+async function collectImportedBodies(frontmatterText, baseDir, visited = new Set(), fileReader = defaultFileReader, rootDir = baseDir) {
   const importedBodyTexts = [];
 
   const imports = extractImportsFromText(frontmatterText);
@@ -671,7 +686,7 @@ async function collectImportedBodies(frontmatterText, baseDir, visited = new Set
   const sortedImports = [...imports].sort();
 
   for (const importPath of sortedImports) {
-    const fullPath = path.join(baseDir, importPath);
+    const fullPath = resolveHashImportPath(importPath, baseDir, rootDir);
 
     if (visited.has(fullPath)) continue;
     visited.add(fullPath);
@@ -683,15 +698,65 @@ async function collectImportedBodies(frontmatterText, baseDir, visited = new Set
       importedBodyTexts.push(importBody);
 
       const importBaseDir = path.dirname(fullPath);
-      const nestedBodies = await collectImportedBodies(importFrontmatterText, importBaseDir, visited, fileReader);
+      const nestedBodies = await collectImportedBodies(importFrontmatterText, importBaseDir, visited, fileReader, rootDir);
       importedBodyTexts.push(...nestedBodies);
     } catch (err) {
-      if (!isFileNotFound(err)) throw err;
+      if (!isFileNotFound(err) || (isHttpNotFound(err) && !isWorkflowSpecImport(importPath))) throw err;
       continue;
     }
   }
 
   return importedBodyTexts;
+}
+
+function isWorkflowSpecImport(importPath) {
+  let cleanPath = importPath.split("#", 1)[0];
+  cleanPath = cleanPath.split("@", 1)[0];
+  const parts = cleanPath.split("/");
+  if (parts.length < 3) return false;
+  if (cleanPath.includes("://")) return true;
+  if (cleanPath.startsWith(".") || cleanPath.startsWith("shared/") || cleanPath.startsWith("/")) return false;
+  return parts[0] !== "" && parts[1] !== "";
+}
+
+/**
+ * Mirrors native imports' base selection, allowed roots, and containment checks.
+ * @param {string} importPath
+ * @param {string} baseDir
+ * @param {string} rootDir
+ * @returns {string}
+ */
+function resolveHashImportPath(importPath, baseDir, rootDir) {
+  importPath = importPath.split("#", 1)[0];
+  const fileRelative = !importPath.includes("/") || importPath.startsWith("./");
+  let resolveBase = fileRelative ? baseDir : rootDir;
+  const githubFolder = findGitHubFolder(resolveBase);
+  let securityBase = githubFolder;
+  let filePath = importPath;
+  let filePathSlash = filePath.split(path.sep).join("/");
+  if (githubFolder.endsWith(".github")) {
+    const repoRoot = path.dirname(githubFolder);
+    if (filePathSlash.startsWith(".github/")) {
+      resolveBase = repoRoot;
+    } else if (filePathSlash.startsWith("/")) {
+      filePath = filePathSlash.substring(1);
+      filePathSlash = filePath;
+      if (!filePath.startsWith(".github/") && !filePath.startsWith(".agents/")) {
+        throw new Error(`${ERR_VALIDATION}: security: path ${importPath} must be within .github or .agents folder`);
+      }
+      resolveBase = repoRoot;
+      if (filePath.startsWith(".agents/")) securityBase = path.join(repoRoot, ".agents");
+    }
+  }
+  if (filePathSlash.startsWith("/") && !filePathSlash.substring(1).startsWith(".github/") && !filePathSlash.substring(1).startsWith(".agents/")) {
+    throw new Error(`${ERR_VALIDATION}: security: path ${importPath} must be within .github or .agents folder`);
+  }
+  const fullPath = path.join(resolveBase, filePath);
+  const relativePath = path.relative(securityBase, fullPath);
+  if (relativePath === ".." || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) {
+    throw new Error(`${ERR_VALIDATION}: security: path ${importPath} must be within ${path.basename(securityBase)} folder (resolves to: ${relativePath})`);
+  }
+  return fullPath;
 }
 
 /**

@@ -6,6 +6,7 @@ import path from "path";
 import os from "node:os";
 
 const require = createRequire(import.meta.url);
+const { prepareMarkdownFixtures } = require("../../../scripts/markdown_metadata_test_adapter.cjs");
 const {
   resolveCodexPromptFileArgs,
   resolveCodexPromptInput,
@@ -26,7 +27,7 @@ const {
   extractDeniedCommands,
   buildMissingToolPermissionIssuePayload,
   buildCodexChildEnv,
-  hasCodexAzureOIDCProxy,
+  hasCodexOIDCProxy,
   resolveSafeCodexConfigPath,
   extractPortFromURL,
   extractOpenAIProxyBaseURLFromToml,
@@ -58,7 +59,8 @@ const {
 } = require("./codex_harness.cjs");
 const { TMP_GH_AW_PATH } = require("./constants.cjs");
 const reflectFixtures = require("./fixtures/model_resolution_reflect.cjs");
-const { detectNonRetryableHarnessGuard } = require("./harness_retry_guard.cjs");
+const { detectExhaustedAWFInvocationBudget, detectNonRetryableHarnessGuard } = require("./harness_retry_guard.cjs");
+const { normalizeHarnessRetryRecord } = require("./harness_retry_record.cjs");
 
 let agentTempDir;
 function makeHarnessTempDir(name) {
@@ -147,6 +149,58 @@ function runHarnessFixture(script, { prompt = "fix the bug", args = [], env = {}
 }
 
 describe("codex_harness.cjs", () => {
+  it.each([
+    ["1", "2000", 2, "rate_limit_error", true],
+    ["245", "60000", 1, "rate_limit_wait_exceeded", true],
+    ["245", "60000", 2, null, false],
+  ])("honors Retry-After=%s within cap=%s, attempts=%i, class=%s, GitHub=%s", (delay, cap, attempts, failureClass, github) => {
+    const { result, calls, harnessRetry } = runHarnessFixture(
+      `
+        const attempts = fs.readFileSync(process.env.CODEX_HARNESS_STUB_CALLS, "utf8").trim().split("\\n").length;
+        if (attempts === 1) {
+          console.log(JSON.stringify({type:"error", error:{headers:{"retry-after":"${delay}"}, status:429}}));
+          console.log(JSON.stringify({type:"turn.failed", error:{message:"429 Too Many Requests"}}));
+          process.exit(1);
+        }
+      `,
+      { env: { GH_AW_HARNESS_MAX_DELAY_MS: cap, GH_AW_LLM_PROVIDER: github ? "github" : "openai", ...(github ? { GH_AW_MODEL_AGENT_CODEX: "copilot/gpt-5" } : {}) } }
+    );
+    expect(result.status, result.stderr).toBe(attempts === 2 ? 0 : 1);
+    expect(calls).toHaveLength(attempts);
+    if (failureClass) expect(harnessRetry.attempt_results[0].failure_classes).toEqual([failureClass]);
+    else expect(harnessRetry.attempt_results[0].failure_classes || []).not.toContain("rate_limit_wait_exceeded");
+    if (attempts === 2) expect(harnessRetry.attempt_results[1].backoff_ms).toBe(github ? 1000 : 1);
+  });
+
+  it("does not use tool output as Retry-After timing evidence", () => {
+    const { result, calls, harnessRetry } = runHarnessFixture(`
+      if (fs.readFileSync(process.env.CODEX_HARNESS_STUB_CALLS, "utf8").trim().split("\\n").length === 1) {
+        console.log(JSON.stringify({type:"item.completed", item:{type:"command_execution", output:"HTTP 429\\nRetry-After: 245"}}));
+        process.exit(1);
+      }
+    `);
+    expect(result.status, result.stderr).toBe(0);
+    expect(calls).toHaveLength(2);
+    expect(harnessRetry.attempt_results[0].failure_classes).not.toContain("rate_limit_wait_exceeded");
+    expect(harnessRetry.attempt_results[1].backoff_ms).toBe(1);
+  });
+
+  it("handles repeated permission failures without replaying work", () => {
+    const directory = makeHarnessTempDir("permission-output-");
+    const safeOutputsPath = path.join(directory, "safe-outputs.jsonl");
+    const { result, calls, harnessRetry } = runHarnessFixture(
+      `
+        console.log("  | observed command\\nPermission denied\\npermission denied\\npermission denied");
+        process.exit(1);
+      `,
+      { env: { GH_AW_SAFE_OUTPUTS: safeOutputsPath, GH_AW_SAFEOUTPUTS_CLI: "true", GH_AW_HARNESS_MAX_RETRIES: "2" } }
+    );
+    expect(result.status, result.stderr).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(harnessRetry.attempt_results[0].failure_classes).toContain("permission_denied");
+    expect(result.stderr).toContain("classified as missing tool/permission issue");
+  });
+
   it("records an initial explicit Codex resume as continuation, not a retry", () => {
     const { result, calls, harnessRetry } = runHarnessFixture("", { args: ["resume", "00000000-0000-4000-8000-000000000001"] });
     expect(result.status, result.stderr).toBe(0);
@@ -183,6 +237,29 @@ describe("codex_harness.cjs", () => {
       );
       expect(result.status).toBe(0);
       expect(calls).toHaveLength(1);
+    });
+
+    describe("OpenAI WIF", () => {
+      const env = { CODEX_API_KEY: "", OPENAI_API_KEY: "", GH_AW_CODEX_OIDC_AUTH: "openai", AWF_REFLECT_ENABLED: "1", GH_AW_LLM_PROVIDER: "openai" };
+      const endpoint = { provider: "openai", configured: true, auth_type: "github-oidc/openai", port: 10000, models_url: "http://api-proxy:10000/v1/models", models: ["gpt-5.4"] };
+      const config = 'model_provider = "openai-proxy"\n[model_providers.openai-proxy]\nbase_url = "http://172.30.0.30:10000"\nwire_api = "responses"\nrequires_openai_auth = false\n';
+
+      it("runs without API keys through the configured OpenAI WIF proxy", () => {
+        const { result, calls } = runHarnessFixture(
+          'const config=fs.readFileSync(process.env.CODEX_HOME+"/config.toml","utf8");if(process.env.CODEX_API_KEY||process.env.OPENAI_API_KEY||config.includes("env_key")||!config.includes("http://api-proxy:10000"))process.exitCode=1;',
+          { env, reflectData: { endpoints: [endpoint] }, config }
+        );
+        expect(result.status).toBe(0);
+        expect(calls).toHaveLength(1);
+      });
+
+      it("requires the OpenAI WIF policy and endpoint authentication", () => {
+        expect(hasCodexOIDCProxy({ endpoints: [endpoint] }, env, "openai")).toBe(true);
+        expect(hasCodexOIDCProxy({ endpoints: [{ ...endpoint, auth_type: "static-key" }] }, env, "openai")).toBe(false);
+        expect(hasCodexOIDCProxy({ endpoints: [endpoint] }, { ...env, AWF_REFLECT_ENABLED: "0" }, "openai")).toBe(false);
+        expect(hasCodexOIDCProxy({ endpoints: [endpoint] }, { ...env, GH_AW_CODEX_OIDC_AUTH: "" }, "openai")).toBe(false);
+        expect(hasCodexOIDCProxy({ endpoints: [endpoint] }, env, "azure")).toBe(false);
+      });
     });
 
     it.each([
@@ -225,10 +302,10 @@ describe("codex_harness.cjs", () => {
     });
 
     it("requires the compiler policy and firewall even with OIDC reflection", () => {
-      expect(hasCodexAzureOIDCProxy({ endpoints: [endpoint] }, env)).toBe(true);
-      expect(hasCodexAzureOIDCProxy({ endpoints: [endpoint] }, { ...env, GH_AW_CODEX_OIDC_AUTH: "" })).toBe(false);
-      expect(hasCodexAzureOIDCProxy({ endpoints: [endpoint] }, { ...env, AWF_REFLECT_ENABLED: "0" })).toBe(false);
-      expect(hasCodexAzureOIDCProxy({ endpoints: [endpoint] }, { ...env, GH_AW_LLM_PROVIDER: "github" })).toBe(false);
+      expect(hasCodexOIDCProxy({ endpoints: [endpoint] }, env, "azure")).toBe(true);
+      expect(hasCodexOIDCProxy({ endpoints: [endpoint] }, { ...env, GH_AW_CODEX_OIDC_AUTH: "" }, "azure")).toBe(false);
+      expect(hasCodexOIDCProxy({ endpoints: [endpoint] }, { ...env, AWF_REFLECT_ENABLED: "0" }, "azure")).toBe(false);
+      expect(hasCodexOIDCProxy({ endpoints: [endpoint] }, { ...env, GH_AW_LLM_PROVIDER: "github" }, "azure")).toBe(false);
     });
 
     it("checks the endpoint that will actually be selected", () => {
@@ -855,6 +932,145 @@ fs.appendFileSync(process.env.GH_AW_SAFE_OUTPUTS, JSON.stringify(item) + "\\n");
       } finally {
         fs.rmdirSync(dir);
       }
+    });
+  });
+
+  describe("shared invocation budget (PureLock run 42217846868)", () => {
+    const runs = { enabled: true, max_runs: 60, invocation_count: 60, remaining_runs: 0 };
+    const failure = `process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"budget-thread"})+"\\n");
+process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:"exceeded retry limit, last status: 429 Too Many Requests"}})+"\\n");
+process.exit(1);`;
+
+    it("requires a complete, consistent exhausted counter", async () => {
+      const detectBudget = reflectData =>
+        detectExhaustedAWFInvocationBudget({
+          nativeTerminalRateLimitError: true,
+          env: { AWF_REFLECT_ENABLED: "1" },
+          fetchReflect: async () => ({ ok: true, reflectData }),
+        });
+      await expect(detectBudget({ runs })).resolves.toEqual({ invocationCount: 60, maxRuns: 60 });
+      await expect(detectBudget({ runs: { ...runs, invocation_count: 61 } })).resolves.toEqual({ invocationCount: 61, maxRuns: 60 });
+      for (const invalid of [
+        null,
+        {},
+        { runs: null },
+        { runs: { ...runs, enabled: false } },
+        { runs: { ...runs, invocation_count: 59 } },
+        { runs: { ...runs, max_runs: 0 } },
+        { runs: { ...runs, max_runs: "60" } },
+        { runs: { ...runs, invocation_count: 60.5 } },
+        { runs: { ...runs, remaining_runs: 1 } },
+        { runs: { enabled: true, max_runs: 60, invocation_count: 60 } },
+      ]) {
+        await expect(detectBudget(invalid)).resolves.toBeNull();
+      }
+    });
+
+    it("does not resume a generic terminal 429 when fresh reflection confirms exhaustion", () => {
+      const { result, calls, harnessRetry } = runHarnessFixture(failure, { env: { AWF_REFLECT_ENABLED: "1" }, reflectData: { runs } });
+      expect(result.status).toBe(1);
+      expect(calls).toHaveLength(1);
+      expect(result.stderr).toContain("AWF shared invocation budget exhausted (60/60)");
+      expect(result.stderr).not.toContain("rate_limit_exceeded (transient)");
+      expect(harnessRetry.attempt_results[0].failure_classes).toContain("invocation_cap_exceeded");
+      expect(normalizeHarnessRetryRecord(harnessRetry)?.attemptResults[0].failureClasses).toContain("invocation_cap_exceeded");
+    });
+
+    it("does not resume a generic terminal 429 emitted only on stderr", () => {
+      const { result, calls } = runHarnessFixture(`process.stderr.write("429 Too Many Requests\\n");process.exit(1);`, {
+        env: { AWF_REFLECT_ENABLED: "1" },
+        reflectData: { runs },
+      });
+      expect(result.status).toBe(1);
+      expect(calls).toHaveLength(1);
+      expect(result.stderr).toContain("AWF shared invocation budget exhausted (60/60)");
+    });
+
+    it("recognizes a terminal 429 in an oversized stdout event prefix", () => {
+      const script = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:"429 Too Many Requests"},padding:"x".repeat(1024*1024)})+"\\n",()=>process.exit(1));`;
+      const { result, calls } = runHarnessFixture(script, { env: { AWF_REFLECT_ENABLED: "1" }, reflectData: { runs } });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("AWF shared invocation budget exhausted (60/60)");
+      expect(calls).toHaveLength(1);
+    });
+
+    it("preserves completed expected safe outputs after the reflected cap", () => {
+      const dir = makeHarnessTempDir("codex-reflected-cap-");
+      const safeOutputsPath = path.join(dir, "safe-outputs.jsonl");
+      const script = `require("fs").appendFileSync(process.env.GH_AW_SAFE_OUTPUTS, JSON.stringify({type:"add_comment",body:"Review complete"})+"\\n");\n${failure}`;
+      const { result, calls } = runHarnessFixture(script, { env: { AWF_REFLECT_ENABLED: "1", GH_AW_SAFE_OUTPUTS: safeOutputsPath }, reflectData: { runs } });
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls).toHaveLength(1);
+      expect(result.stderr).toContain("invocation cap saturated but safe-outputs already contain expected output");
+      expect(fs.readFileSync(safeOutputsPath, "utf8")).not.toContain("incomplete");
+    });
+
+    it.each([
+      ["reflected", "create_pull_request_review_comment"],
+      ["reflected", "create-pull-request-review-comment"],
+      ["explicit", "create_pull_request_review_comment"],
+      ["explicit", "create-pull-request-review-comment"],
+    ])("preserves partial %s cap findings of type %s but fails without a final review", (cap, type) => {
+      const dir = makeHarnessTempDir("codex-partial-review-cap-");
+      const safeOutputsPath = path.join(dir, "safe-outputs.jsonl");
+      const safeOutputsCLI = path.join(dir, "safeoutputs.cjs");
+      fs.writeFileSync(
+        safeOutputsCLI,
+        `#!${process.execPath}
+const fs=require("fs");const args=process.argv.slice(2);const item={type:args[0]};
+for(let i=1;i<args.length;i+=2)item[args[i].slice(2)]=args[i+1];
+fs.appendFileSync(process.env.GH_AW_SAFE_OUTPUTS,JSON.stringify(item)+"\\n");`
+      );
+      fs.chmodSync(safeOutputsCLI, 0o700);
+      const terminalFailure = cap === "reflected" ? failure : `process.stderr.write('{"error":{"type":"max_runs_exceeded","message":"Maximum LLM invocations exceeded (60 / 60)."}}\\n');process.exit(1);`;
+      const script = `fs.appendFileSync(process.env.GH_AW_SAFE_OUTPUTS,JSON.stringify({type:${JSON.stringify(type)},body:"Partial finding",path:"a.go",line:1})+"\\n");\n${terminalFailure}`;
+      const { result, calls } = runHarnessFixture(script, {
+        env: { AWF_REFLECT_ENABLED: "1", GH_AW_SAFE_OUTPUTS: safeOutputsPath, GH_AW_SAFEOUTPUTS_CLI: safeOutputsCLI },
+        reflectData: { runs },
+      });
+      expect(result.status, result.stderr).toBe(1);
+      expect(calls).toHaveLength(1);
+      const items = fs
+        .readFileSync(safeOutputsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map(line => JSON.parse(line));
+      expect(items).toHaveLength(2);
+      expect(items[0]).toMatchObject({ type, body: "Partial finding" });
+      expect(items[1]).toMatchObject({ type: "report_incomplete", reason: "infrastructure_error" });
+      expect(result.stderr).not.toContain("suppressing terminal verdict");
+    });
+
+    it("preserves a submitted final review after partial findings and the reflected cap", () => {
+      const dir = makeHarnessTempDir("codex-submitted-review-cap-");
+      const safeOutputsPath = path.join(dir, "safe-outputs.jsonl");
+      const script = `fs.appendFileSync(process.env.GH_AW_SAFE_OUTPUTS,[{type:"create_pull_request_review_comment",body:"Finding"},{type:"submit_pull_request_review",event:"COMMENT",body:"Review complete"}].map(item=>JSON.stringify(item)).join("\\n")+"\\n");\n${failure}`;
+      const { result, calls } = runHarnessFixture(script, { env: { AWF_REFLECT_ENABLED: "1", GH_AW_SAFE_OUTPUTS: safeOutputsPath }, reflectData: { runs } });
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls).toHaveLength(1);
+      expect(fs.readFileSync(safeOutputsPath, "utf8")).not.toContain("report_incomplete");
+    });
+
+    it.each([
+      ["a remaining budget", { runs: { ...runs, invocation_count: 59, remaining_runs: 1 } }, true, "1"],
+      ["missing counter metadata", {}, true, "1"],
+      ["a failed fresh fetch despite a saved exhausted snapshot", { runs }, false, "1"],
+      ["disabled reflection", { runs }, true, "0"],
+    ])("preserves transient retries with %s", (_name, reflectData, reflectOk, enabled) => {
+      const { result, calls } = runHarnessFixture(failure, { env: { AWF_REFLECT_ENABLED: enabled }, reflectData, reflectOk });
+      expect(result.status).toBe(1);
+      expect(calls).toHaveLength(2);
+      expect(result.stderr).toContain("rate_limit_exceeded (transient)");
+    });
+
+    it.each(["command_execution", "agent_message"])("does not treat a %s quoted 429 as a native terminal error, including an oversized prefix", type => {
+      const script = `process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"quote-thread"})+"\\n");
+process.stdout.write(JSON.stringify({type:"item.completed",item:{type:${JSON.stringify(type)},id:"1",aggregated_output:"429 Too Many Requests",exit_code:0},padding:"x".repeat(1024*1024)})+"\\n",()=>{
+process.exit(1);});`;
+      const { result, calls } = runHarnessFixture(script, { env: { AWF_REFLECT_ENABLED: "1" }, reflectData: { runs } });
+      expect(result.status).toBe(1);
+      expect(calls).toHaveLength(2);
+      expect(result.stderr).not.toContain("confirmed by fresh reflection");
     });
   });
 
@@ -2645,6 +2861,9 @@ describe("Codex native sub-agent roles before spawn (github/gh-aw#70939)", () =>
     fs.mkdirSync(staged, { recursive: true });
     fs.mkdirSync(codexHome, { recursive: true });
     for (const [name, content] of Object.entries(agents)) fs.writeFileSync(path.join(staged, name), content);
+    const { metadataManifestFields } = require("./markdown_metadata.cjs");
+    fs.mkdirSync(recordsDir, { recursive: true });
+    fs.writeFileSync(path.join(recordsDir, "aw_info.json"), JSON.stringify(metadataManifestFields(prepareMarkdownFixtures(...Object.values(agents)))));
     const { result, calls } = runHarnessFixture(
       `const p=require("path");const d=p.join(process.env.CODEX_HOME,"agents");fs.writeFileSync(p.join(process.env.CODEX_HOME,"roles-at-spawn.json"),JSON.stringify(fs.existsSync(d)?Object.fromEntries(fs.readdirSync(d).filter(n=>n.endsWith(".toml")).sort().map(n=>[n,fs.readFileSync(p.join(d,n),"utf8")])):null));`,
       {
@@ -2679,7 +2898,7 @@ describe("Codex native sub-agent roles before spawn (github/gh-aw#70939)", () =>
     expect(Object.keys(rolesAtSpawn)).toEqual(["paper-screener.toml"]);
     const toml = rolesAtSpawn["paper-screener.toml"];
     expect(roleField(toml, "name")).toBe("paper-screener");
-    expect(roleField(toml, "description")).toBe("Fast relevance screening of arXiv paper abstracts for GitHub Agentic Workflows");
+    expect(roleField(toml, "description")).toBe("paper-screener");
     expect(roleField(toml, "developer_instructions")).toBe(agent.slice(agent.indexOf("\n---\n") + 5).trim());
     expect(roleField(toml, "model")).toBe("gpt-5-mini-2025-08-07");
     expect(records.filter(record => record.role !== "main")).toEqual([{ engine: "codex", role: "paper-screener", configured_model: "small", resolved_model: "gpt-5-mini-2025-08-07", provider: "openai", status: "resolved", cause: null }]);

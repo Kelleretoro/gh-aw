@@ -369,6 +369,15 @@ gh aw fix --list-codemods              # List available codemods
 
 **Options:** `--dir/-d`, `--disable-codemod`, `--list-codemods`, `--write`
 
+Without `--write`, no files are modified. With `--write`, `fix` writes the updated
+workflow files, deletes the deprecated `.github/aw/schemas/agentic-workflow.json` and
+obsolete template files under `pkg/cli/templates/` when present, and removes old
+legacy files under `.github/agents/` (including `.agent.md` and `.md` files) and
+`.github/aw/upgrade-agentic-workflow.md` when present. It also refreshes
+`.github/skills/agentic-workflows/SKILL.md` and `.github/agents/agentic-workflows.md`
+when they differ from the bundled templates. The legacy agent-file cleanup and this
+refresh are skipped when instruction-file updates are disabled.
+
 Use `--disable-codemod` (repeatable) to skip specific codemod IDs by name. Unlike the `--no-X` flags used elsewhere in the CLI (which toggle boolean options), `--disable-codemod` takes a codemod ID as its value and can be specified multiple times, so the `--no-codemod` pattern does not apply here.
 
 Available codemods include:
@@ -434,7 +443,7 @@ gh aw compile --actions-lock               # Update the standard Actions depende
 gh aw compile --purge                      # Remove orphaned .lock.yml files
 ```
 
-For `--zizmor` and `--poutine`, compilation automatically uses a binary on `PATH` when its version is at least 1.31.1 or 1.1.6, respectively. The version is checked with `zizmor --version` or `poutine version --disable-version-check`. If the binary is missing, too old, or its version cannot be determined, the scanner uses the pinned Docker image instead. Other Docker-based checks still require Docker.
+For `--zizmor` and `--poutine`, compilation automatically uses a binary on `PATH` when its version is at least 1.32.0 or 1.1.6, respectively. The version is checked with `zizmor --version` or `poutine version --disable-version-check`. If the binary is missing, too old, or its version cannot be determined, the scanner uses the pinned Docker image instead. Other Docker-based checks still require Docker.
 
 If the repository root contains an [`aw.yml` manifest](/gh-aw/reference/aw-yml-package-manifest/), `gh aw compile` validates it before compiling workflows.
 
@@ -456,7 +465,7 @@ Compile-time lint is Actions/AW AST-only and does not require a native JavaScrip
 
 **`--no-logo` flag:** Omit the ASCII logo from generated workflow headers without removing metadata or regeneration instructions. To persist this setting for all compiles, including upgrades, set [`"lock_file_logo": false` in `.github/workflows/aw.json`](/gh-aw/reference/compilation-process/#repository-configuration-awjson). Either opt-out disables the logo; `--banner` only controls terminal output.
 
-**`--dry-run` flag:** Compile with strict source validation, staged safe outputs, shellcheck, and model checks. Existing and added medium-or-higher or unclassified scanner findings fail; baseline counts remain available for comparison. Low-severity findings and zizmor's `secrets-outside-env` rule do not fail the gate. Docker-based image validation and scanners are opt-in; native shellcheck provides required run-step linting without Docker. Missing required checks or model inventory block compilation. Compiler-managed GitHub mutations and authored custom jobs are disabled. Custom jobs and custom safe-output jobs become credential-free placeholders, including reusable calls with inherited secrets. Authored host steps, custom MCP servers, `mcp-scripts`, custom safe-output scripts, enabled Bash graders, and authored OIDC permissions are rejected, including imported declarations. Remove unsupported declarations in a separate diagnostic workflow. Emitted locks remove telemetry environment variables and automatic OTLP authentication. Agent shell commands, custom engine execution, custom credentials, and hosted identities still require review; dry-run is not a hosted sandbox. Explicitly disabling a required check is rejected; `--no-emit`, `--watch`, `--approve`, and `--allow-action-refs` are incompatible. This flag does not upload or execute workflows and is distinct from `--action-mode dev`. The compile MCP input is `dry_run`; `validate_images: true` opts into required image validation. See [Development Testing Mode](/gh-aw/reference/compilation-process/#development-testing-mode).
+**`--dry-run` flag:** Compile with strict source validation, staged safe outputs, shellcheck, and model checks. Existing and added medium-or-higher or unclassified scanner findings fail; baseline counts remain available for comparison. Low-severity findings and zizmor's `secrets-outside-env` rule do not fail the gate. Docker-based image validation and scanners are opt-in; native shellcheck provides required run-step linting without Docker. Missing required checks or model inventory block compilation. Compiler-managed GitHub mutations and authored custom jobs are disabled. Custom jobs and custom safe-output jobs become credential-free placeholders, including reusable calls with inherited secrets. Workflow `steps` and `post-steps` are accepted but their code and credentials are omitted from the emitted lock, so they cannot execute when that lock is separately dispatched. Omitted setup and cleanup reduce live-test coverage; dry-run locks still execute the agent and compiler-owned steps when dispatched under separate authorization. `pre-steps`, `pre-agent-steps`, `on.steps`, custom MCP servers, `mcp-scripts`, custom safe-output scripts, enabled Bash graders, and authored OIDC permissions are rejected, including imported declarations. Remove unsupported declarations in a separate diagnostic workflow. Emitted locks remove telemetry environment variables and automatic OTLP authentication. Agent shell commands, custom engine execution, custom credentials, and hosted identities still require review; dry-run is not a hosted sandbox. Explicitly disabling a required check is rejected; `--no-emit`, `--watch`, `--approve`, and `--allow-action-refs` are incompatible. This flag does not upload or execute workflows and is distinct from `--action-mode dev`. The compile MCP input is `dry_run`; `validate_images: true` opts into required image validation. See [Development Testing Mode](/gh-aw/reference/compilation-process/#development-testing-mode).
 
 Dry-run locks also omit daily credit accounting, retain existing per-run caps or promote configured/imported daily limits, and add manual dispatch restricted to maintainer/admin actors without bot exemptions. `DEBUG=workflow:compiler_development,cli:compile_development` reports mutations without configuration values.
 
@@ -541,7 +550,7 @@ See [Workflow Linters](/gh-aw/reference/workflow-linters/) for the rule catalog 
 
 #### `trial`
 
-Test workflows in temporary private repositories (default) or run directly in specified repository (`--host-repo`). Results saved to `trials/`.
+Test workflows in private repositories or run directly in a specified repository (`--host-repo`). Results are saved to `trials/`.
 
 ```bash wrap
 gh aw trial githubnext/agentics/ci-doctor          # Test remote workflow
@@ -555,6 +564,10 @@ gh aw trial ./workflow.md --dry-run                # Preview without executing
 Unlike `run --repo/-r`, `trial` has no `--repo/-r`: `--logical-repo/-l` sets the simulated `github.repository` context, while `--host-repo` selects where the trial actually runs. `--json/-j` is available for trial output.
 
 `--timeout` sets the execution timeout in integer minutes (default: `30`; `0` disables the timeout). For example, use `--timeout 10`, not `--timeout 10m`.
+
+By default, the host repository is retained after the trial. Specify
+`--delete-host-repo-after` to delete it when the trial completes, including an existing
+repository supplied with `--host-repo`.
 
 **Secret Handling:** API keys required for the selected engine are automatically checked. If missing from the target repository, they are prompted for interactively and uploaded.
 
@@ -643,7 +656,11 @@ gh aw list --repo owner/repo --path .github/workflows  # List from a remote repo
 
 `--dir` (`-d`) overrides the local workflow directory and applies only when `--repo` is not set. `--path` specifies the workflow directory in a remote repository and is used with `--repo`.
 
-`list` enumerates workflows locally without GitHub API queries. For enabled/disabled state and run information, use `status` instead.
+Without `--repo`, `list` enumerates workflows from the local checkout without GitHub API
+queries. With `--repo`, it lists workflows from that remote repository; `--path` selects
+the remote workflows directory (default: `$GH_AW_WORKFLOWS_DIR` or `.github/workflows`).
+The `--stale` filter is local-only. For enabled/disabled state and run information, use
+`status` instead.
 
 For local workflows, `compiled` is `Yes` when the source frontmatter matches the generated `.lock.yml`, `No` when the hashes differ, and `N/A` when the lock file is missing. JSON output is a top-level array with one object per workflow and the same values in each object's `compiled` field. Use `--stale` to inspect only stale or missing lock files:
 
@@ -674,10 +691,17 @@ gh aw status --repo owner/other-repo        # Check different repository
 
 #### `logs`
 
-Download and analyze logs with tool usage, network patterns, errors, warnings. Results cached for 10-100x speedup on subsequent runs.
+Download and analyze workflow logs and artifacts. By default, only the compact usage
+artifact (token usage and run metadata) is downloaded. `--artifacts` replaces this default:
+`--artifacts agent` downloads only agent data, and `--artifacts firewall` downloads only
+firewall and network data. Use `--artifacts usage,agent` to download both compact usage
+and agent data. Results are cached for 10-100x speedup on subsequent runs.
 
 ```bash wrap
 gh aw logs workflow                        # Download logs for workflow
+gh aw logs workflow --artifacts agent     # Download only detailed agent data
+gh aw logs workflow --artifacts firewall  # Download only firewall and network data
+gh aw logs workflow --artifacts usage,agent # Download usage and agent data
 gh aw logs -c 10 --start-date -1w         # Filter by count and date
 gh aw logs --ref main --parse --json      # With markdown/JSON output for branch
 ```
@@ -825,7 +849,7 @@ gh aw logs episode 1234567890 --repo owner/repo \
 | `--max-api-requests` | `500` | REST requests initiated by the collector, including metadata, discovery pages, artifact inventories, and archive downloads. Artifact-storage redirect transfers are excluded. |
 | `--timeout` | `5m` | Collection deadline, expressed as a duration. |
 | `--output/-o` | `.github/aw/logs` | Compact artifacts, isolated by host, repository, run, attempt, and immutable artifact ID. |
-| `--json` | Disabled | Standard logs JSON plus `episode_retrieval` bounds, counters, stop reasons, and evidence gaps. |
+| `--json/-j` | Disabled | Standard logs JSON plus `episode_retrieval` bounds, counters, stop reasons, and evidence gaps. |
 | `--view` | `summary` | Display `summary` or recorded `hops`; JSON includes both views' data. |
 | `--refresh` | Disabled | Recollect instead of reading the cached episode snapshot; immutable artifact downloads are still reused. |
 
@@ -1120,13 +1144,15 @@ Ignored runs do not count as successes or consume the minimum sample. They are e
 
 Filtered runs do not consume the minimum sample. Health searches backward for five completed first-attempt runs per current-revision scope, stopping at the requested time boundary or API budget rather than a fixed page count. It narrows the search window to continue beyond GitHub's 1,000-run search limit, overlapping boundary timestamps and deduplicating runs. If timestamp ties prevent further progress, the report explicitly marks collection as partial.
 
-Collection prioritizes early detection over exhaustive verification. It inventories registered AW `failure` conclusions using run-list payloads alone, then checks jobs and revisions for one job-backed representative per branch/event. The inventory retains at most five candidates per workflow and stops when all registered workflows reach that count or after ten pages. Confirmed approval expiries free candidate slots: backfill first reuses overflow retained from fetched pages, then requests older pages if needed, within the same ten-page listing and shared request budgets. Confirmed expiries therefore do not consume the five-retained-candidate limit; the 20-request annotation cap still applies. Hitting the page limit marks collection partial with `failure_listing_limit`; chronological sampling continues. A named-workflow check scopes that inventory to the selected workflow rather than scanning unrelated repository runs. The normal chronological sample adds successful, pending, and other failed conclusions, visiting recently failing workflows first and deduplicating runs across passes. `collection.failure_listing_complete` covers the bounded inventory; `failure_pass_complete` covers representative verification.
+Collection resolves the repository's default branch from GitHub and scans its non-PR runs before reviewing PR and other branch runs. PR events always use the later pass, even when the source branch has the default branch's name. PR failures may reflect unmerged broken code rather than a default-branch regression; they remain evidence, but do not displace the initial default-branch sample. The later pass fetches at least one chronological page per workflow and reuses that workflow's default-branch evidence for its stopping check, avoiding a second exhaustive scan of default-only history. Known other-branch failure scopes still require their own chronological evidence; default runs cannot satisfy them. JSON reports expose `collection.default_branch` and `default_branch_pass_complete`; budget interruptions and unadvanceable chronological pagination preserve collected runs and leave the default pass incomplete.
+
+Within each branch pass, collection prioritizes early detection over exhaustive verification. It inventories registered AW `failure` conclusions using run-list payloads alone, then checks jobs and revisions for one job-backed representative per branch/event. The inventory retains at most five candidates per workflow across both passes, giving default-branch candidates priority, and stops when all registered workflows reach that count or after ten pages shared across both passes. Confirmed approval expiries free candidate slots: backfill first reuses overflow retained from fetched pages, then requests older pages if needed, within the same ten-page listing and shared request budgets. Confirmed expiries therefore do not consume the five-retained-candidate limit; the 20-request annotation cap still applies. Hitting the page limit marks collection partial with `failure_listing_limit`; chronological sampling continues. A named-workflow check scopes that inventory to the selected workflow rather than scanning unrelated repository runs. Each chronological sample adds successful, pending, and other failed conclusions, visiting recently failing workflows first and deduplicating runs across passes. `collection.failure_listing_complete` covers both bounded inventories; `failure_pass_complete` covers representative verification in both passes.
 
 `collection.failure_candidates`, `failure_candidate_workflows`, and `potential_issues` retain approximate signals even when verification exhausts the budget. Potential issues include a representative run URL and `run_list_only` evidence; these counts may include jobless, historical, or superseded failures. `representative_status` distinguishes unverified, jobless, superseded, revision-unknown, and revision-checked representatives. These signals do not establish a current issue, recovery, or a fleet failure rate. Confirmed current-revision clusters remain separate.
 
 Job-presence checks inspect only the jobs array, without decoding job/step fields. Current failure-first representatives separately fetch typed jobs in at most three 100-job pages per run attempt, without downloading artifacts. Only complete live inventories contribute job/step failure signals; incomplete runs remain metadata-only unless compatible cached evidence is available. Shared failed steps cluster across workflow names; conclusion-job aftermath remains separate from the original failure boundary. `collection.job_evidence` reports each representative's source, fetched job count, attempt, update time, and completeness. Failed or capped optional enrichment marks collection partial with a warning and preserves collected runs while sampling continues; primary inventory and presence errors remain errors, and quota or request-budget limits still stop collection. `job_requests` counts actual Jobs API requests within `api_requests`.
 
-JSON `collection.producer_version`, `report_schema_version`, `capabilities`, and `observed_at` identify the producer and supported evidence. The creation-time bounds do not make the API responses an atomic snapshot. Investigation representatives include branch, event, head SHA, attempt, and update time when known. `status_counts` partitions all workflow entries, including intentional-failure workflows. `healthy_workflows` counts non-intentional workflows with `healthy` or `recovery_observed` status that meet the threshold and have no observed sub-agent failures; an above-threshold rate alone does not establish health. `observed_failure_workflows` counts non-intentional workflows with sampled current-revision Actions failures, including insufficient samples. `degraded_workflows` remains the sub-agent-only count, not a count of all failing workflows.
+JSON `collection.producer_version`, `report_schema_version`, `capabilities`, and `observed_at` identify the producer and supported evidence. The creation-time bounds do not make the API responses an atomic snapshot. Investigation representatives include branch, event, head SHA, attempt, and update time when known. `status_counts` partitions all workflow entries, including intentional-failure workflows. `healthy_workflows` counts non-intentional workflows with `healthy` or `recovery_observed` status that meet the threshold and have no observed sub-agent or threat-detection failures; an above-threshold rate alone does not establish health. `observed_failure_workflows` counts non-intentional workflows with sampled current-revision Actions failures, including insufficient samples. `degraded_workflows` counts non-intentional workflows with sub-agent or threat-detection failures; a workflow with both is counted once.
 
 For events whose head SHA identifies the executing workflow, health also compares the workflow's Markdown source at that SHA with the pushed source on the run's branch. Source blob SHAs are included as `revisions[].current.source_sha` and `previous.source_sha`. A source change stops older evidence collection for that branch/event and excludes superseded failures from current failure clusters and investigation targets, even if the lock file is unchanged. A pushed source with no matching runs has `no_current_revision_runs`, not a healthy or fixed status. Unrelated repository commits do not stop collection. Unavailable source revisions produce a warning and unknown revision evidence rather than proof of recovery.
 
@@ -1137,6 +1163,8 @@ Shows success/failure rates, trend indicators (↑ improving, → stable, ↓ de
 When a selected workflow's published default-branch lock file enables work-queue, health also reads and validates the repository's current `work-queue` ledger once. This includes workflows without recent runs. Text `[health_work_queue]` and JSON `collection.work_queue` report backlog, eligible and blocked work by pool, oldest available work, pauses, native reservations, and pending, verified, or failed delivery. Pauses and failed deliveries produce `attention_required`; an otherwise readable snapshot is `observed`, not proof of live worker health. Detection warnings do not change the status of a successfully read ledger. Missing or invalid definitions, policy, ledger, or credentials remain explicit, privacy-safe warnings rather than healthy results. Queue diagnostics are current ledger evidence independent of `--days` or date bounds, do not download artifacts, and do not mutate the queue or launch workers. Optional workflow detection runs after primary Actions collection, uses its remaining API budget, and reuses downloaded lock content. The ledger uses the authenticated, isolated Git transport without fetching into the checkout, and validates resource references against the selected GitHub host. Actions rates and fleet workflow counts remain unchanged.
 
 Health also reads matching `run_summary.json` files from `--logs-dir` (default: `.github/aw/logs`) for failed sub-agent invocations, including workflows whose Actions conclusion is `success`. An affected current revision has status `subagent_failures_observed` and is excluded from `healthy_workflows`; its Actions success/failure counts and success rate remain unchanged. JSON reports include `subagent_failure_count` (invocations), `subagent_failure_runs` (distinct runs), and per-workflow `subagent_failures` with run URLs, agent names, and requested models. Fleet JSON also includes `degraded_workflows`.
+
+Threat-detection failures, warnings, and detected threats also degrade the current revision, with status `detection_failures_observed`. JSON includes `detection_failure_runs` and per-workflow `detection_failures` with run URLs and findings; text reports include `[detection_failures]`. Actions success rates remain unchanged, and a workflow with both detection and sub-agent failures counts only once in `degraded_workflows`. Audit reports expose detection outcomes in findings and error or warning counts. Detection engine errors such as `parse_error` are tooling failures, not security findings. When older usage artifacts omit the outcome, audit and health can recover it from downloaded conclusion-job environment logs.
 
 This check does not download artifacts. Populate the cache with `gh aw logs --artifacts usage` or `gh aw audit <run-id>` before checking health. `collection.cache_evidence` reports per-run `compatible`, `missing`, `unreadable`, `invalid`, `stale`, or `version_mismatch_raw_jobs_only` status, with the cached producer version when readable. A producer-version mismatch permits reuse of raw Jobs API observations only, after checking run identity, repository URL, attempt, head SHA, workflow, status, conclusion, and update time. Derived usage, classification, and sub-agent metrics still require the current CLI version; cached producer metadata is never rewritten. Missing or rejected derived evidence does not establish failure-free delegation. Historical-revision failures do not degrade the current revision.
 
@@ -1376,6 +1404,28 @@ The `--visibility` flag sets access for newly created org or ent variables (`all
 For repository scope, `--repo` currently accepts `owner/repo` only. To target GitHub Enterprise Server, select the host via `GH_HOST` rather than prefixing the repository with `[HOST/]`.
 
 ### Advanced
+
+#### `connector`
+
+Configure or test an experimental declarative connector using `gh aw connector <id> setup` or `gh aw connector <id> test`. Declarations are discovered at `.github/workflows/connectors/<id>.md`; `--file` selects a repository-owned declaration or import wrapper. There is no built-in provider catalog or fallback.
+
+```bash wrap
+gh aw connector linear setup
+gh aw connector linear setup --repo owner/repo --phase agent
+gh aw connector linear setup --input 'reader-secret="LINEAR_DEV_READ_KEY"'
+```
+
+`setup` displays binding types, endpoints, credential names, scopes, and provisioning guidance without reading or writing secret values. It is offline by default. Unlike other commands' repository-targeting `--repo` flags, connector setup's `--repo/-r OWNER/REPO` is a read-only check of repository secret and variable names; it prints suggested provisioning commands but does not run them. Missing settings are informational, while an inventory failure returns an error. Setup does not select capabilities or establish provider authorization.
+
+`test` requires `--phase` and `--capability`. Agent/context read tests contact the declared provider with that phase's configured credentials. Safe-output tests always stage without credentials or provider requests. Trigger tests project native fixture JSON offline without deploying or enrolling a receiver. Test arguments must satisfy the declaration's types and exact resource grants.
+
+**Binding options:** `--root`, `--file`, repeatable `--input name=JSON`, repeatable `--grant resource=JSON-array`. Each `--grant` replaces that resource's declared allowlist.
+
+**Setup options:** `--repo` (setup only), `--phase` (optional credential-phase filter).
+
+**Test options:** `--phase` (`agent`, `context`, `safe-output`, or `trigger`), `--capability`, `--args` (JSON object; default `{}`), `--remote-tool` (exact hosted MCP method), `--native-event` (trigger discriminator), `--node-runtime` (trusted matching shared Node runtime; required for annotated safe-output content), `--timeout` (duration greater than zero and at most `20s`; default `20s`).
+
+See [Local setup and conformance](/gh-aw/reference/connectors/#local-setup-and-conformance) for complete test examples and provisioning limits. The separate plural `gh aw connectors` command validates and inspects raw connector definitions and runs compiler-frozen plans in trusted hosts; use `gh aw connectors --help` and subcommand help for those low-level options.
 
 #### `mcp`
 

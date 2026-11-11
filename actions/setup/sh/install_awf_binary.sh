@@ -121,19 +121,8 @@ if [ "$ROOTLESS" = "true" ]; then
   fi
 fi
 
-# Clean up any stale AWF chroot directories left by previous runs before we
-# execute awf. Rootless AWF can fail its writeConfigs startup path with EACCES
-# when stale /tmp/awf-*-chroot-home or /tmp/awf-chroot-* directories remain
-# from earlier jobs on the same runner. Limit cleanup to directories owned by
-# root or the current runner user so we do not delete unrelated /tmp entries
-# that happen to match the name pattern.
-echo "Cleaning up stale AWF chroot directories..."
-if command -v sudo >/dev/null 2>&1; then
-  sudo find /tmp -maxdepth 1 -name 'awf-*-chroot-home' -type d \( -user root -o -user "$(id -un)" \) -exec rm -rf -- {} + || true
-  sudo find /tmp -maxdepth 1 -name 'awf-chroot-*' -type d \( -user root -o -user "$(id -un)" \) -exec rm -rf -- {} + || true
-else
-  echo "Warning: sudo is unavailable; skipping stale AWF chroot cleanup" >&2
-fi
+# Other invocations can share both /tmp and the runner UID. Neither a filename
+# pattern nor the filesystem owner proves that a chroot belongs to this install.
 
 # Download URLs
 BASE_URL="https://github.com/${AWF_REPO}/releases/download/${AWF_VERSION}"
@@ -166,10 +155,12 @@ sha256_hash() {
   fi
 }
 
+# The AWF CLI uses TMPDIR for its chroot scratch directories. Persist a private
+# directory for subsequent workflow steps and leave cleanup to the scoped post step.
+create_awf_runtime_tmp
+
 # Create a private staging directory on the runner's job-owned filesystem.
-TEMP_DIR="${RUNNER_TEMP:-$PWD}/awf-install-$$-${RANDOM}"
-mkdir -m 700 "$TEMP_DIR"
-trap 'rm -rf "$TEMP_DIR"' EXIT
+create_release_staging awf
 
 download_release_asset() {
   local asset="$1"
@@ -265,7 +256,13 @@ install_bundle() {
   fi
 
   # Verify checksum
-  if ! verify_checksum "${TEMP_DIR}/${bundle_name}" "${bundle_name}"; then
+  local verify_status=0
+  verify_checksum "${TEMP_DIR}/${bundle_name}" "${bundle_name}" || verify_status=$?
+  if [ "$verify_status" -eq "$RELEASE_QUOTA_EXHAUSTED_STATUS" ]; then
+    echo "ERROR: Bundle attestation verification blocked by GitHub API quota exhaustion; refusing fallback" >&2
+    exit "$RELEASE_QUOTA_EXHAUSTED_STATUS"
+  fi
+  if [ "$verify_status" -ne 0 ]; then
     echo "ERROR: Bundle checksum verification failed; refusing fallback" >&2
     exit 1
   fi

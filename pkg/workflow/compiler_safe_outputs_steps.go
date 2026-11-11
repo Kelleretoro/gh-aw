@@ -3,7 +3,7 @@ package workflow
 import (
 	"fmt"
 	"path"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
@@ -34,14 +34,28 @@ func (c *Compiler) buildSharedPRCheckoutSteps(data *WorkflowData) []string {
 	consolidatedSafeOutputsStepsLog.Print("Building shared PR checkout steps (mirroring agent job layout)")
 	checkoutMgr, prCheckoutToken := prepareSharedPRCheckout(data)
 	steps, condition := c.buildSharedPRCheckoutLayout(data, checkoutMgr)
-	steps = append(steps, checkoutMgr.GenerateConfigureGitCredentialsSteps(prCheckoutToken, condition)...)
-	c.prCheckoutLintBlock = preparePRCheckoutLintBlock(steps, c.formatFrameworkJobRunsOn(data))
+	rootRepo := checkoutMgr.effectiveRootCheckoutRepository()
+	if c.trialMode && !checkoutMgr.HasExternalRootCheckout() {
+		rootRepo = "${{ github.repository }}"
+		if c.trialLogicalRepoSlug != "" {
+			rootRepo = fmt.Sprintf("%q", c.trialLogicalRepoSlug)
+		}
+	}
+	steps = append(steps, checkoutMgr.generateConfigureGitCredentialsStepsForRoot(prCheckoutToken, condition, rootRepo)...)
+	jobEnvironment := c.buildJobLevelSafeOutputEnvVars(data, GetWorkflowIDFromPath(c.markdownPath))
+	jobEnvironmentNames := make([]string, 0, len(jobEnvironment))
+	for name := range jobEnvironment {
+		jobEnvironmentNames = append(jobEnvironmentNames, name)
+	}
+	jobEnvironmentNames = append(jobEnvironmentNames, runtimeFeaturesEnvVarName)
+	slices.Sort(jobEnvironmentNames)
+	c.prCheckoutLintBlock = preparePRCheckoutLintBlock(steps, c.formatFrameworkJobRunsOn(data), jobEnvironmentNames)
 	consolidatedSafeOutputsStepsLog.Printf("Built shared PR checkout steps with condition: %s", condition.Render())
 	return steps
 }
 
-func preparePRCheckoutLintBlock(steps []string, runsOn string) string {
-	block := renderStepForRunner(strings.Join(steps, ""), runsOn)
+func preparePRCheckoutLintBlock(steps []string, runsOn string, jobEnvironmentVariables []string) string {
+	block := renderStepForRunnerWithEnvironment(strings.Join(steps, ""), runsOn, string(constants.SafeOutputsJobName), jobEnvironmentVariables)
 	finalized, err := finalizeRunnerTempSafety(block)
 	if err != nil {
 		return ""
@@ -262,7 +276,7 @@ func (c *Compiler) buildDispatchRepositoryAppTokenSteps(data *WorkflowData) []st
 		for toolKey := range data.SafeOutputs.DispatchRepository.Tools {
 			toolKeys = append(toolKeys, toolKey)
 		}
-		sort.Strings(toolKeys)
+		slices.Sort(toolKeys)
 		globalStaged := templatableBoolIsTrue(data.SafeOutputs.Staged)
 		for _, toolKey := range toolKeys {
 			tool := data.SafeOutputs.DispatchRepository.Tools[toolKey]
@@ -395,12 +409,12 @@ func generateSafeOutputScriptContent(scriptName string, scriptConfig *SafeScript
 		for name := range scriptConfig.Inputs {
 			safeName := stringutil.SanitizeParameterName(name)
 			if safeName != name {
-				inputNames = append(inputNames, name+": "+safeName)
+				inputNames = append(inputNames, fmt.Sprintf("%q: %s", name, safeName))
 			} else {
 				inputNames = append(inputNames, name)
 			}
 		}
-		sort.Strings(inputNames)
+		slices.Sort(inputNames)
 		sb.WriteString("  const { " + strings.Join(inputNames, ", ") + " } = config;\n")
 	}
 

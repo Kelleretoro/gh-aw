@@ -424,6 +424,22 @@ describe("native creation Claim delivery", () => {
     }
   });
 
+  it("returns field-level pull request mismatch diagnostics", async () => {
+    const labels = fixture("create_pull_request");
+    await labels.execute(async () => {
+      await labels.capture();
+      labels.pull.labels = [{ name: "changed" }];
+      expect((await labels.settle()).diagnostics).toMatchObject({ event: "pull_request.readback.mismatch", labels_matches: false, title_matches: true });
+    });
+
+    const base = fixture("create_pull_request");
+    await base.execute(async () => {
+      await base.capture();
+      base.pull.base.sha = "f".repeat(40);
+      expect((await base.settle()).diagnostics).toMatchObject({ event: "pull_request.readback.mismatch", base_matches: false });
+    });
+  });
+
   describe.each([
     ["create_discussion", "labels", "labels_matches"],
     ["create_pull_request", "labels", "labels_matches"],
@@ -610,8 +626,13 @@ describe("native creation Claim delivery", () => {
     }
   });
 
-  it.each(["create_discussion", "create_pull_request"])("settles %s through the actual manager verifier and publishes a protected Result", async type => {
+  it.each(
+    ["create_discussion", "create_pull_request"].flatMap(type =>
+      [{}, { output_id: "so_xbzi2dhGSY-3" }, { "depends-on": "so_priorOutput1" }, { output_id: "so_xbzi2dhGSY-3", "depends-on": "so_priorOutput1" }].map(metadata => ({ type, metadata }))
+    )
+  )("settles $type with submission metadata $metadata through the actual manager verifier and publishes a protected Result", async ({ type, metadata }) => {
     const f = fixture(type);
+    Object.assign(f.message, metadata);
     await f.execute(async () => {
       await f.capture();
       expect(closeClaimEffectChannel()).toBeDefined();
@@ -622,6 +643,18 @@ describe("native creation Claim delivery", () => {
     const finalized = await f.finalize();
     expect(finalized.claims.h1.state).toBe("result");
     expect(f.queue.state.works.get(f.member.work_id).barrier).toBe("verified");
+  });
+
+  it.each(["create_discussion", "create_pull_request"])("rejects undeclared %s fields even with submission metadata", async type => {
+    const f = fixture(type);
+    Object.assign(f.message, { output_id: "so_xbzi2dhGSY-3", "depends-on": "so_priorOutput1", unexpected_transport_field: "untrusted" });
+    await f.execute(async () => {
+      await f.capture();
+      expect((await f.settle()).verification).toBe("unknown");
+    });
+    expect(f.client.graphql).not.toHaveBeenCalled();
+    expect(f.client.rest.pulls.get).not.toHaveBeenCalled();
+    expect(f.queue.state.works.get(f.member.work_id).barrier).toBe("pending");
   });
 
   it("settles the enriched PR message emitted by the safe-output transport", async () => {

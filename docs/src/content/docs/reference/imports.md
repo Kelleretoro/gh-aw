@@ -44,6 +44,13 @@ imports:
 
 `uses` is an alias for `path`; `with` is an alias for `inputs`.
 
+Nested local frontmatter imports in relative form (excluding `.github/...` and
+`/...`; see [Path Resolution](#path-resolution)) use the root workflow directory
+for qualified paths such as `shared/graders/recurrence-determinism.md`. Bare names such as
+`common.md` and paths beginning with `./` are relative to the importing file.
+Lock-file frontmatter and body hashes follow the same rules for these relative-form
+imports, so changes to those nested components invalidate the importing workflow's lock.
+
 Conditional frontmatter imports are not supported. If an experiment should vary shared prompt content, keep imports unconditional and gate `{{#runtime-import? ...}}` (optional form) inside your `{{#if experiments.<name> ...}}` block instead. The optional form is not promoted to unconditional lock-file macros, so the content is only injected when the condition is true at runtime.
 
 ### Single-import constraint
@@ -230,6 +237,15 @@ imports:
 ```
 
 Use this form when workflows in different directories need the same stable import path, and for files under `.github/agents/`.
+
+The object form, such as `uses: ".github/workflows/connectors/jira.md"`, follows
+the same resolution rules. Go compilation and JavaScript activation hash checks
+resolve `.github/` imports from the repository root, including nested imports,
+and hash their frontmatter and bodies. Missing local imports fail compilation;
+they are not treated as optional.
+
+Hash checks use the same local path resolution and allowed-root rules as
+`imports`, regardless of the checkout directory's name.
 
 ### Cross-repo imports
 
@@ -424,28 +440,11 @@ network:
 
 Consumers import it with `imports: [shared/mcp/tavily.md]`.
 
-For Azure-based integrations, combine `shared/azure-auth.md` with Azure MCP
-imports to preserve OIDC-backed Azure CLI auth inside the agent sandbox.
-Azure DevOps MCP support (`shared/mcp/azure-devops.md`) is still experimental:
-
-```aw wrap
----
-imports:
-  - uses: shared/azure-auth.md
-    with:
-      azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
-      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
-  - uses: shared/mcp/azure-devops.md
-    with:
-      organization: YOUR_ORG
----
-```
-
-`shared/azure-auth.md` sets `AZURE_CONFIG_DIR` to an agent-accessible path and
-re-authenticates `az` in `pre-agent-steps`, which bridges auth across the
-runner-to-sandbox process boundary. See
-[Using MCPs](/gh-aw/guides/mcps/#azure-shared-imports-oidc-azure-devops-azure-mcp)
-for network domains and read-only Azure MCP tool allowlist guidance.
+For Azure CLI authentication inside the sandbox, use `shared/azure-auth.md`
+with the Azure MCP import. Azure DevOps instead uses the imported
+`".github/workflows/connectors/azure-devops.md"` import; see
+[Connectors](/gh-aw/reference/connectors/#azure-devops). Importing it alone grants
+no tools or safe outputs and does not acquire an Entra token.
 
 ### Importing MCP Gateway Settings
 

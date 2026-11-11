@@ -62,6 +62,10 @@ type CheckoutConfig struct {
 	// Ref (branch, tag, or SHA) to checkout. Defaults to the ref that triggered the workflow.
 	Ref string `json:"ref,omitempty"`
 
+	// DataOnly acknowledges that host steps consume this checkout only as data.
+	// It suppresses the checkout-ref warning without changing runtime behavior.
+	DataOnly bool `json:"-"`
+
 	// Path within GITHUB_WORKSPACE to place the checkout. Defaults to the workspace root.
 	Path string `json:"path,omitempty"`
 
@@ -151,6 +155,7 @@ type checkoutKey struct {
 type resolvedCheckout struct {
 	key               checkoutKey
 	ref               string           // last non-empty ref wins
+	dataOnly          bool             // every merged entry must explicitly acknowledge data-only use
 	token             string           // last non-empty github-token wins
 	githubApp         *GitHubAppConfig // GitHub App config (first non-nil wins)
 	safeOutputApp     *GitHubAppConfig // safe_outputs-only GitHub App config (first non-nil wins)
@@ -352,6 +357,7 @@ func (cm *CheckoutManager) add(cfg *CheckoutConfig) {
 		// once either github-token or github-app is set for an entry, the other method is not added
 		// even if a later config provides it — this preserves the main workflow's auth choice).
 		entry := cm.ordered[idx]
+		entry.dataOnly = entry.dataOnly && cfg.DataOnly
 		entry.maxRepos = min(entry.maxRepos, maxRepos)
 		entry.allowPrivateRepos = entry.allowPrivateRepos && allowPrivateRepos
 		entry.fetchDepth = deeperFetchDepth(entry.fetchDepth, cfg.FetchDepth)
@@ -390,6 +396,7 @@ func (cm *CheckoutManager) add(cfg *CheckoutConfig) {
 		entry := &resolvedCheckout{
 			key:               key,
 			ref:               cfg.Ref,
+			dataOnly:          cfg.DataOnly,
 			token:             cfg.GitHubToken,
 			githubApp:         cfg.GitHubApp,
 			safeOutputApp:     cfg.SafeOutputGitHubApp,
@@ -536,11 +543,15 @@ func resolveCheckoutPermissions(data *WorkflowData) *Permissions {
 }
 
 // GetCurrentRepository returns the repository slug for the checkout marked
-// current:true. Returns an empty string when no current checkout is configured
-// or when the current checkout targets the workflow repository.
+// current:true, including the .wiki suffix for wiki checkouts. Returns an empty
+// string when no current checkout is configured or when a non-wiki current
+// checkout targets the workflow repository.
 func (cm *CheckoutManager) GetCurrentRepository() string {
 	for _, entry := range cm.ordered {
 		if entry.current {
+			if entry.key.wiki {
+				return wikiRepository(entry.key.repository)
+			}
 			return entry.key.repository
 		}
 	}

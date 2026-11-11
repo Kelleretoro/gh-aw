@@ -17,7 +17,7 @@ func splitContentIntoChunks(content string) []string {
 	const maxChunkSize = 20900        // 21000 - 100 character buffer
 	const indentSpaces = "          " // 10 spaces added to each line
 
-	lines := strings.Split(content, "\n")
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") //nolint:splitlinesonnewline // Normalize CRLF and preserve the trailing line for prompt chunking.
 	var chunks []string
 	var currentChunk []string
 	currentSize := 0
@@ -64,7 +64,8 @@ func (c *Compiler) generatePrompt(output *strings.Builder, data *WorkflowData, p
 	if err != nil {
 		return err
 	}
-	promptMarkdown := data.MarkdownContent + "\n" + data.ImportedMarkdown + "\n" + c.collectRuntimeImportMarkdownForCompilerAnalysis(data)
+	data.CompiledPromptMarkdown = append(data.CompiledPromptMarkdown, strings.Join(userPromptChunks, "\n"))
+	promptMarkdown := data.MarkdownContent + "\n" + data.PromptMarkdown + "\n" + data.ImportedMarkdown + "\n" + c.collectRuntimeImportMarkdownForPromptExpressions(data)
 	expressionMappings, data.DeferredPromptExpressions = rewriteDeferredPromptExpressions(expressionMappings, data.Jobs, beforeActivationJobs, promptMarkdown)
 	expressionMappings = filterPromptExpressionsForActivation(expressionMappings, data.Jobs, beforeActivationJobs, promptMarkdown)
 
@@ -121,7 +122,7 @@ func (c *Compiler) enrichExpressionMappings(data *WorkflowData, expressionMappin
 			expressionMappings = append(expressionMappings, mainExprMappings...)
 		}
 	}
-	if runtimeImportMarkdown := c.collectRuntimeImportMarkdownForCompilerAnalysis(data); runtimeImportMarkdown != "" {
+	if runtimeImportMarkdown := c.collectRuntimeImportMarkdownForPromptExpressions(data); runtimeImportMarkdown != "" {
 		runtimeImportExtractor := NewExpressionExtractor()
 		runtimeImportExprMappings, err := runtimeImportExtractor.ExtractExpressions(wrapExpressionsInTemplateConditionals(runtimeImportMarkdown))
 		if err != nil {
@@ -146,9 +147,13 @@ func (c *Compiler) enrichExpressionMappings(data *WorkflowData, expressionMappin
 func (c *Compiler) buildMainWorkflowPromptChunks(data *WorkflowData, userPromptChunks []string, expressionMappings []*ExpressionMapping) ([]string, []*ExpressionMapping, error) {
 	data.MainWorkflowPromptPath = ""
 	if c.inlinePrompt || data.InlinedImports {
-		if data.MainWorkflowMarkdown != "" {
-			compilerYamlPromptLog.Printf("Inlining main workflow markdown (%d bytes)", len(data.MainWorkflowMarkdown))
-			inlinedMarkdown := removeXMLComments(data.MainWorkflowMarkdown)
+		promptMarkdown := data.PromptMarkdown
+		if promptMarkdown == "" {
+			promptMarkdown = data.MainWorkflowMarkdown
+		}
+		if promptMarkdown != "" {
+			compilerYamlPromptLog.Printf("Inlining main workflow markdown (%d bytes)", len(promptMarkdown))
+			inlinedMarkdown := removeXMLComments(promptMarkdown)
 			inlinedMarkdown = wrapExpressionsInTemplateConditionals(inlinedMarkdown)
 			inlineExtractor := NewExpressionExtractor()
 			inlineExprMappings, err := inlineExtractor.ExtractExpressions(inlinedMarkdown)
@@ -260,9 +265,10 @@ func (c *Compiler) processOrderedPromptImports(data *WorkflowData) (userPromptCh
 				userPromptChunks = append(userPromptChunks, fmt.Sprintf("{{#runtime-import %s}}", importPath))
 				continue
 			}
-			importedBody, extractErr := parser.ExtractMarkdownContent(string(rawContent))
+			source := parser.RemoveConnectorDocumentation(string(rawContent))
+			importedBody, extractErr := parser.ExtractMarkdownContent(source)
 			if extractErr != nil {
-				importedBody = string(rawContent)
+				importedBody = source
 			}
 			chunks, exprMaps, err := extractPromptChunksFromMarkdown(importedBody)
 			if err != nil {
@@ -311,9 +317,10 @@ func (c *Compiler) processLegacyPromptImports(data *WorkflowData) (userPromptChu
 				userPromptChunks = append(userPromptChunks, fmt.Sprintf("{{#runtime-import %s}}", importPath))
 				continue
 			}
-			importedBody, extractErr := parser.ExtractMarkdownContent(string(rawContent))
+			source := parser.RemoveConnectorDocumentation(string(rawContent))
+			importedBody, extractErr := parser.ExtractMarkdownContent(source)
 			if extractErr != nil {
-				importedBody = string(rawContent)
+				importedBody = source
 			}
 			chunks, exprMaps, err := extractPromptChunksFromMarkdown(importedBody)
 			if err != nil {
@@ -377,6 +384,15 @@ func resolveWorkspaceRoot(markdownPath string) string {
 	}
 	// Fallback: use the directory containing the workflow file.
 	return filepath.Dir(markdownPath)
+}
+
+func (c *Compiler) collectRuntimeImportMarkdownForPromptExpressions(data *WorkflowData) string {
+	if data == nil {
+		return ""
+	}
+	promptData := *data
+	promptData.MainWorkflowMarkdown += "\n" + data.PromptMarkdown
+	return c.collectRuntimeImportMarkdownForCompilerAnalysis(&promptData)
 }
 
 func (c *Compiler) collectRuntimeImportMarkdownForCompilerAnalysis(data *WorkflowData) string {
@@ -459,7 +475,7 @@ func readRuntimeImportMarkdownForAnalysis(ref runtimeImportReference, workspaceR
 			continue
 		}
 		seen[seenKey] = struct{}{}
-		content := string(rawContent)
+		content := parser.RemoveConnectorDocumentation(string(rawContent))
 		if ref.startLine > 0 || ref.endLine > 0 {
 			content = applyRuntimeImportLineRangeForAnalysis(content, ref.startLine, ref.endLine)
 		}
@@ -477,7 +493,7 @@ func readRuntimeImportMarkdownForAnalysis(ref runtimeImportReference, workspaceR
 }
 
 func applyRuntimeImportLineRangeForAnalysis(content string, startLine, endLine int) string {
-	lines := strings.Split(content, "\n")
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") //nolint:splitlinesonnewline // Normalize CRLF while retaining line-range coordinates.
 	start := startLine
 	if start <= 0 {
 		start = 1

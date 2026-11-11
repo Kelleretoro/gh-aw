@@ -146,6 +146,84 @@ func TestValidateMainWorkflowFrontmatter_MaxToolCalls(t *testing.T) {
 	}
 }
 
+func TestValidateMainWorkflowFrontmatter_MaxIssueArtifacts(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		value   any
+		wantErr bool
+	}{
+		{"positive", 3, false},
+		{"zero", 0, false},
+		{"negative", -3, false},
+		{"fraction", 1.5, true},
+		{"string", "3", true},
+		{"boolean", false, true},
+		{"expression", "${{ inputs.max }}", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(map[string]any{
+				"on": "workflow_dispatch",
+				"safe-outputs": map[string]any{
+					"create-issue": map[string]any{"max-issue-artifacts": test.value},
+				},
+			}, "workflow.md")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validation error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateMainWorkflowFrontmatter_MaxIssueArtifactsRejectsTypo(t *testing.T) {
+	for _, config := range []map[string]any{
+		{"max-isssue-artifacts": 3},
+		{"max-issue-artifacts": 3, "max-isssue-artifacts": 4},
+	} {
+		err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(map[string]any{
+			"on":           "workflow_dispatch",
+			"safe-outputs": map[string]any{"create-issue": config},
+		}, "workflow.md")
+		if err == nil {
+			t.Fatal("Expected the misspelled artifact count option to be rejected")
+		}
+	}
+}
+
+func TestValidateMainWorkflowFrontmatter_MaxIssueArtifactSize(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		value   any
+		wantErr bool
+	}{
+		{"positive", 1024, false},
+		{"one-mb", 1048576, false},
+		{"above-default", 2097152, false},
+		{"zero", 0, true},
+		{"negative", -1, true},
+		{"fraction", 1.5, true},
+		{"human-size", "1mb", false},
+		{"fractional-human-size", "1.5mb", false},
+		{"spaced-human-size", " 512 KiB ", false},
+		{"short-unit", "1m", false},
+		{"quoted-bytes", "1048576", false},
+		{"unknown-unit", "1xb", true},
+		{"missing-number", "mb", true},
+		{"boolean", false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateMainWorkflowFrontmatterWithSchemaAndLocation(map[string]any{
+				"on": "workflow_dispatch",
+				"safe-outputs": map[string]any{
+					"create-issue": map[string]any{"max-issue-artifact-size": test.value},
+				},
+			}, "workflow.md")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validation error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateMainWorkflowFrontmatter_DockerImagePullPolicy(t *testing.T) {
 	for _, tt := range []struct {
 		policy  any
@@ -2607,7 +2685,7 @@ func TestValidateWithSchema_YAMLTypedSlice(t *testing.T) {
 
 func TestProtectedFilesExclusionsRequireScope(t *testing.T) {
 	t.Parallel()
-	for _, handler := range []string{"create-pull-request", "push-to-pull-request-branch", "approve-workflow-run"} {
+	for _, handler := range []string{"create-pull-request", "push-to-pull-request-branch", "merge-pull-request", "approve-workflow-run"} {
 		for _, pattern := range []string{"", "*", "**", "**/*", "*/**/*", "/**", "/**/*", "**.*", "/**.*", ".*/**", "/.*/**", ".", "/", " ", " docs/**", "docs/** ", "docs/a b.md", "docs/\tfile.md", "docs/\nfile.md", "AGENTS.md", ".agents/", "/pyproject.toml", "/.changeset/*.md", "/docs/**", "/**/*.md", "/_/**", "/-/**", "/1/**"} {
 			t.Run(handler+"/"+pattern, func(t *testing.T) {
 				config := map[string]any{

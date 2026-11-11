@@ -233,6 +233,32 @@ func TestGetThreatDetectionAdditionalAllowedDomains_DetectionOnlyBaseURL(t *test
 	}
 }
 
+func TestGetThreatDetectionAdditionalAllowedDomains_OpenAIWIFDoesNotAllowTokenHost(t *testing.T) {
+	data := &WorkflowData{
+		EngineConfig: &EngineConfig{
+			ID: "codex",
+			Auth: &EngineAuthConfig{
+				Type:                     "github-oidc",
+				Provider:                 "openai",
+				OpenAIIdentityProviderID: "idp",
+				ServiceAccountID:         "service-account",
+				Audience:                 "https://api.openai.com/v1",
+			},
+		},
+		NetworkPermissions: &NetworkPermissions{
+			Allowed: []string{"defaults"},
+		},
+		SafeOutputs: &SafeOutputsConfig{
+			ThreatDetection: &ThreatDetectionConfig{},
+		},
+	}
+
+	got := getThreatDetectionAdditionalAllowedDomains(data, string(constants.CodexEngine))
+	if slices.Contains(got, "auth.openai.com") {
+		t.Fatalf("OpenAI WIF exchange host is reached through the API proxy, not the detector allowlist; got %v", got)
+	}
+}
+
 func TestThreatDetectionExecutionPreservesVendorOptIn(t *testing.T) {
 	compiler := NewCompiler()
 	for _, tt := range []struct {

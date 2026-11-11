@@ -51,6 +51,7 @@ describe("check_workflow_timestamp_api.cjs", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockGithub.rest.repos.getContent.mockReset();
     delete process.env.GH_AW_WORKFLOW_FILE;
     delete process.env.GITHUB_WORKFLOW_REF;
     delete process.env.GITHUB_WORKFLOW_SHA;
@@ -129,6 +130,42 @@ engine: copilot
       expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("Same-repo invocation"));
       expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("GITHUB_WORKFLOW_REF:"));
       expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("Resolved source repo:"));
+    });
+  });
+
+  describe("smoke-issues connector imports", () => {
+    it.each(["API", "local fallback"])("should verify the compiled smoke workflow through %s", async mode => {
+      const repoRoot = path.resolve(__dirname, "../../..");
+      const files = new Map(
+        ["smoke-issues.md", "smoke-issues.lock.yml", "connectors/jira.md", "connectors/linear.md"].map(file => {
+          const filePath = `.github/workflows/${file}`;
+          return [filePath, fs.readFileSync(path.join(repoRoot, filePath), "utf8")];
+        })
+      );
+      process.env.GH_AW_WORKFLOW_FILE = "smoke-issues.lock.yml";
+      if (mode === "local fallback") process.env.GITHUB_WORKSPACE = repoRoot;
+      process.env.GH_AW_STALE_CHECK_FULL = "true";
+      mockGithub.rest.repos.getContent.mockImplementation(async ({ path: filePath }) => {
+        if (!files.has(filePath)) throw Object.assign(new Error(`Unexpected import path: ${filePath}`), { status: 404 });
+        if (mode === "local fallback" && filePath.startsWith(".github/workflows/connectors/")) {
+          throw Object.assign(new Error("Service unavailable"), { status: 503 });
+        }
+        return { data: { type: "file", encoding: "base64", content: Buffer.from(files.get(filePath)).toString("base64") } };
+      });
+
+      await main();
+
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("Lock file is up to date"));
+      if (mode === "API") {
+        for (const connector of ["jira", "linear"]) {
+          expect(mockGithub.rest.repos.getContent).toHaveBeenCalledWith(expect.objectContaining({ path: `.github/workflows/connectors/${connector}.md` }));
+        }
+        expect(mockCore.info).not.toHaveBeenCalledWith(expect.stringContaining("Attempting local filesystem fallback"));
+      } else {
+        expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("Could not compute frontmatter hash via API:"));
+        expect(mockCore.info).toHaveBeenCalledWith("Frontmatter hash comparison (local filesystem fallback):");
+      }
     });
   });
 
@@ -814,7 +851,41 @@ engine: copilot
       }
     });
 
-    it.each([404, 200])("should preserve missing-import and edited-import behavior (HTTP %s)", async status => {
+    it("should use the local fallback when a listed import API read transiently returns HTTP 404", async () => {
+      const { computeFrontmatterHash } = require("./frontmatter_hash_pure.cjs");
+      const content = "---\nengine: copilot\nimports:\n  - shared/test.md\n---\n# Test";
+      const importContent = "---\ntools:\n  bash: true\n---\nImported body";
+      fs.mkdirSync(path.join(workflowsDir, "shared"));
+      fs.writeFileSync(path.join(workflowsDir, "test.md"), content);
+      fs.writeFileSync(path.join(workflowsDir, "shared", "test.md"), importContent);
+      const sourcePath = path.join(workflowsDir, "test.md");
+      const hash = await computeFrontmatterHash(sourcePath);
+      const lockContent = `# frontmatter-hash: ${hash}\n`;
+      fs.writeFileSync(path.join(workflowsDir, "test.lock.yml"), lockContent);
+      process.env.GITHUB_WORKSPACE = tmpDir;
+      let importReads = 0;
+      mockGithub.rest.repos.getContent.mockImplementation(async ({ path: filePath }) => {
+        if (filePath.endsWith(".lock.yml")) return { data: { type: "file", content: Buffer.from(lockContent).toString("base64"), encoding: "base64" } };
+        if (filePath === ".github/workflows/test.md") return { data: { content: Buffer.from(content).toString("base64"), encoding: "base64" } };
+        if (filePath === ".github/workflows/shared/test.md") {
+          importReads++;
+          if (importReads === 1) throw Object.assign(new Error("Not Found"), { status: 404 });
+          return { data: { content: Buffer.from(importContent).toString("base64"), encoding: "base64" } };
+        }
+        throw Object.assign(new Error("Not Found"), { status: 404 });
+      });
+
+      await main();
+
+      expect(importReads).toBe(1);
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("(HTTP 404)"));
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("Frontmatter hash comparison (local filesystem fallback):"));
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("✅ Lock file is up to date"));
+      expect(mockCore.info).not.toHaveBeenCalledWith(expect.stringContaining("Hashes differ"));
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    it.each([404, 200])("should fail on a listed-import HTTP 404 and detect edited imports (HTTP %s)", async status => {
       const { computeFrontmatterHash } = require("./frontmatter_hash_pure.cjs");
       const content = "---\nengine: copilot\nimports:\n  - shared/test.md\n---\n# Test";
       fs.writeFileSync(path.join(workflowsDir, "test.md"), content);
@@ -827,12 +898,13 @@ engine: copilot
         else throw Object.assign(new Error("Not Found"), { status: 404 });
         return { data: { type: "file", content: Buffer.from(text).toString("base64"), encoding: "base64" } };
       });
+      process.env.GITHUB_WORKSPACE = tmpDir;
 
       await main();
 
       if (status === 404) {
-        expect(mockCore.setFailed).not.toHaveBeenCalled();
-        expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("✅ Lock file is up to date"));
+        expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining("HTTP 404"));
+        expect(mockCore.info).not.toHaveBeenCalledWith(expect.stringContaining("Hashes differ"));
       } else {
         expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining("frontmatter hash mismatch"));
         expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("Hashes differ"));

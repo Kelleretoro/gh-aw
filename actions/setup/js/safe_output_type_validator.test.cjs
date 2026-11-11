@@ -22,7 +22,7 @@ const SAMPLE_VALIDATION_CONFIG = {
       temporary_id: { type: "string" },
     },
   },
-  linear_create_issue: {
+  bounded_external_effect: {
     defaultMax: 1,
     fields: {
       title: { required: true, type: "string", sanitize: true, maxLength: 128, rejectIfOversized: true },
@@ -63,7 +63,7 @@ const SAMPLE_VALIDATION_CONFIG = {
   },
   update_issue: {
     defaultMax: 1,
-    customValidation: "requiresOneOf:status,title,body,labels,assignees,milestone",
+    customValidation: "requiresOneOf:status,title,body,labels,assignees,milestone,artifacts",
     fields: {
       status: { type: "string", enum: ["open", "closed"] },
       title: { type: "string", sanitize: true, maxLength: 128 },
@@ -592,6 +592,18 @@ describe("safe_output_type_validator", () => {
       const result = validateItem({ type, title: "Report", body: "Detailed issue body text.", data: {} }, type, 1);
 
       expect(result.isValid).toBe(true);
+      expect(result.normalizedItem.body.includes("<details>")).toBe(collapseData);
+      expect(result.normalizedItem.body.includes("Structured data:")).toBe(!collapseData);
+    });
+
+    it.each([true, false])("honors trusted runtime collapseData=%s without accepting agent layout overrides", async collapseData => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+      const data = { state: "a".repeat(64) };
+      const item = { type: "add_comment", body: "Copilot is working through the prep list.", data, collapseData: !collapseData };
+      const result = validateItem(item, "add_comment", 1, { dataEnabled: true, collapseData });
+      expect(result.isValid).toBe(true);
+      expect(result.normalizedItem.data).toEqual(data);
+      expect(result.normalizedItem).not.toHaveProperty("collapseData");
       expect(result.normalizedItem.body.includes("<details>")).toBe(collapseData);
       expect(result.normalizedItem.body.includes("Structured data:")).toBe(!collapseData);
     });
@@ -1540,30 +1552,30 @@ describe("safe_output_type_validator", () => {
   });
 
   describe("rejectIfOversized validation", () => {
-    it("should reject an oversized linear_create_issue title instead of truncating it", async () => {
+    it("should reject an oversized external effect title instead of truncating it", async () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
       const oversizedTitle = "x".repeat(129);
-      const result = validateItem({ type: "linear_create_issue", title: oversizedTitle, body: "A sufficiently detailed body." }, "linear_create_issue", 1);
+      const result = validateItem({ type: "bounded_external_effect", title: oversizedTitle, body: "A sufficiently detailed body." }, "bounded_external_effect", 1);
 
       expect(result.isValid).toBe(false);
       expect(result.error).toContain("exceeds maximum length");
     });
 
-    it("should reject an oversized linear_create_issue body instead of truncating it", async () => {
+    it("should reject an oversized external effect body instead of truncating it", async () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
       const oversizedBody = "x".repeat(65001);
-      const result = validateItem({ type: "linear_create_issue", title: "Valid title", body: oversizedBody }, "linear_create_issue", 1);
+      const result = validateItem({ type: "bounded_external_effect", title: "Valid title", body: oversizedBody }, "bounded_external_effect", 1);
 
       expect(result.isValid).toBe(false);
       expect(result.error).toContain("exceeds maximum length");
     });
 
-    it("should accept a linear_create_issue title/body within the configured limits", async () => {
+    it("should accept an external effect title/body within the configured limits", async () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
-      const result = validateItem({ type: "linear_create_issue", title: "Valid title", body: "A sufficiently detailed body." }, "linear_create_issue", 1);
+      const result = validateItem({ type: "bounded_external_effect", title: "Valid title", body: "A sufficiently detailed body." }, "bounded_external_effect", 1);
 
       expect(result.isValid).toBe(true);
     });

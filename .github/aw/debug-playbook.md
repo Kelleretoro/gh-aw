@@ -5,8 +5,8 @@ disable-model-invocation: true
 
 # Debug Playbook
 
-Fix first failing boundary; follow [debugging gates](debug-agentic-workflow.md).
-Do not dispatch workflows or execute artifacts. Keep secrets/prompts/configuration/reasoning private.
+Fix first failing boundary; [debugging gates](debug-agentic-workflow.md).
+Do not dispatch workflows or execute artifacts; keep secrets/prompts/config/reasoning private.
 
 ## Start here
 
@@ -24,21 +24,22 @@ Read completeness/`overview`/`key_findings`/`recommendations`/`errors`.
 Timeout: incomplete JSON report; fetch evidence.
 Read only the linked `playbook_url`/code row; [cluster fleets](analyzing-runs.md).
 Keep codes/severity; advisory/pending/skipped/policy-denied may be intentional.
-Unknown: [unmapped codes](#unmapped-codes).
+[Unmapped codes](#unmapped-codes).
 
 ## Audit findings
 
 | Codes | Check | Remedy |
 | --- | --- | --- |
-| `workflow_failed` | First failed step; native error. | Route specific cause; conclusion isn't root cause. |
-| `workflow_timeout` | Step/budget/result. | Remove blockers/narrow scope; justify timeout changes. |
-| `multiple_errors` | First error vs cascades. | Fix cause, not repeats. |
-| `mcp_server_failures`, `tools_not_available` | MCP startup, registration, failed calls. | Fix tool/server/config/auth; no blind permission expansion. |
+| `workflow_failed` | First error. | Fix cause, not conclusion. |
+| `workflow_timeout` | Step/budget/result. | Unblock/narrow scope; justify timeout changes. |
+| `multiple_errors` | Cause vs cascades. | Fix cause. |
+| `mcp_server_failures`, `tools_not_available` | MCP setup/availability. | Fix tool/server/config/auth; retain permission scope. |
+| `tool_error` | Call result. | Fix tool/config/auth; retain permission scope. |
 | `model_unavailable`, `model_endpoint_unsupported` | Full same-run inventory: absent model/incompatible endpoint. | [Model availability](#model-availability); verify candidate/API, edit pin, recompile. |
 | `model_availability_unknown` | Missing/incomplete/malformed/ambiguous/contradictory reflection. | Inspect discovery/auth; do not declare removal/switch models without evidence. |
 | `model_resolution_failed` | Failed `model.resolution`; missing same-role startup-stop evidence. | Advisory: verify pins; unproven cause. |
-| `subagent_model_not_observed` | Spawn, child usage, evidence coverage. | Missing observations != nonexecution. |
-| `subagent_model_unavailable` | Child model, request, provider policy/catalog. | Verify child separately; follow [model/engine guide](debug-model-engine-misconfiguration.md). |
+| `subagent_model_not_observed` | Spawn, child usage, evidence. | Missing observations != nonexecution. |
+| `subagent_model_unavailable` | Child model/request/provider policy/catalog. | Verify child separately; [model/engine guide](debug-model-engine-misconfiguration.md). |
 | `subagent_failed` | Child error; parent dispatch. | Fix child cause; parent success != child success. |
 | `blocked_network_requests` | Destination, caller, denial, necessity. | Fix URL/tool or authorize narrow destination; retain firewall. |
 | `threat_detection_job_failed`, `engine_step_failed` | Detector/evals step, first error, execution state. | Fix engine/proxy startup; failed/green job != clean verdict/evals. |
@@ -48,12 +49,12 @@ Unknown: [unmapped codes](#unmapped-codes).
 | `agentic_poor_agentic_control`, `agentic_partially_reducible` | Stop rules, tools, reducible stages. | Bound loops; extract deterministic work; preserve outcomes. |
 | `agentic_model_downgrade_available` | Capability/API needs; measured alternatives. | Benchmark; no automatic downgrade. |
 | `agentic_delegated_context_present` | Delegation/context. | Deduplicate; advisory, not always error. |
-| `workflow_succeeded` | Required downstream effect. | Verify missing effect; conclusion alone insufficient. |
+| `workflow_succeeded` | Downstream effect. | Verify effect; conclusion alone insufficient. |
 
 ## Agent, model, and proxy classifications
 
-Inspect `agent-stdio.log`, `agent_execution.json`, native errors/reflection/proxy; [inventory](#model-availability).
-Assistant/tool prose isn't native error.
+Inspect `agent-stdio.log`, `agent_execution.json`, errors/reflection/proxy and [inventory](#model-availability).
+Prose isn't native error.
 
 | Codes | Check | Remedy |
 | --- | --- | --- |
@@ -72,6 +73,7 @@ Assistant/tool prose isn't native error.
 | `model_policy_violation`, `content_filter` | Provider/proxy reason; endpoint mismatch separately. | Correct request within policy; no credential swap/bypass. |
 | `awf_api_proxy_blocking_requests` | Specific budget/policy/filter guard. | Address guard; blocking alone != authentication failure. |
 | `capi_quota_exceeded_error` | Native 429; exhausted retries. | Respect quota/reset; no retry storm. |
+| `rate_limit_wait_exceeded`, `rate_limit_error` | Native 429, model provider, `Retry-After`, harness attempt telemetry, `max-delay-ms` and remaining timeout. | For GitHub-provided models in Copilot, Claude or Codex, allow the requested wait only if it fits both bounds; otherwise stop/defer. Other providers retain their existing retry policy. Terminal quota and proxy guards still take precedence. Check whether the CLI emitted a usable header; other engines may not have a retrying harness. Do not redispatch without authorization. |
 | `capi_server_error`, `engine_outage`, `infrastructure_error` | Exhausted native 5xx/infrastructure timeline. | Report cause; bounded backoff, no unapproved redispatch. |
 | `agentic_engine_timeout` | Step/SDK budget vs post-result `watchdogFired=true`. | Fix genuine stall; post-result watchdog alone != timeout. |
 | `sandbox_runtime_crash` | Exit/signal, resources, runtime revision. | Fix crash/resources; retain redacted diagnostic/version. |
@@ -161,7 +163,7 @@ Nonempty `safeoutputs.jsonl` != publication.
 | `missing_terminal_safe_output` | Expected terminal tool, denied calls, last session event. | Fix publication/prompt completion contract; silence is not an intentional noop. |
 | `request_rejection`, `prompt_exhaustion`, `unknown` | Native error, budget, missing evidence. | Resolve cause; retain unknown without evidence. |
 | `ERR_VALIDATION`, `E001` | Fields/types, target IDs, schema. | Fix producer; no silent coercion. |
-| `E002`, `MAX_COUNT_REACHED` | Operation cap; accepted records. | Reduce count; never replay applied mutations. |
+| `E002`, `MAX_COUNT_REACHED`, `connector_budget_exceeded` | Cap vs attempts/records. | Reduce count; no replay. |
 | `E003` | Named count/size limit. | Split/reduce authorized payload. |
 | `ERR_PERMISSION`, `E004`, `APPROVE_WORKFLOW_RUN_PERMISSION_DENIED`, `DISCUSSIONS_TOKEN_SCOPE_MISMATCH` | Target/scope, permissions, token type. | Fix authorized permissions; never expose tokens/evade guards. |
 | `E006` | Body/string length. | Shorten; retain required content. |
@@ -199,7 +201,9 @@ Check current PR head/base/checks/reviews/guards; diagnosis isn't merge authoriz
 | `merge_conflicts`, `not_mergeable` | Mergeability/conflicts; unknown != conflict. | Resolve reviewed-head conflicts; bound waits. |
 | `missing_required_labels`, `title_prefix_mismatch` | Labels/title. | Correct authorized metadata; retain guards. |
 | `required_checks_missing`, `required_checks_failing`, `required_check_producer_missing`, `required_check_producer_mismatch`, `required_check_producer_ambiguous` | Identity/SHA/completion/result/app IDs. | Require complete, unambiguous current-head configured-producer checks; no bypass. |
-| `pending_reviewers`, `blocking_review_state`, `blocking_individual_review`, `unresolved_review_threads`, `required_approval_missing` | Pending/blocked reviews/vetoes; threads; current-head allowlisted human approval. | Address feedback; retain reviewer authority/independent-human approval. |
+| `pending_reviewers`, `blocking_review_state`, `blocking_individual_review`, `unresolved_review_threads`, `required_approval_missing` | Reviews/vetoes/threads; current-head allowlisted human approval. | Address feedback; retain independent reviewer authority. |
+| `protected_files_modified` | Complete live PR file list, including deleted paths and both rename sides; shared protected-file rules/exclusions. | Independently review and merge manually, or correct authorized scoped exclusions in trusted workflow configuration and recompile. Explicit `protected-files: allowed` disables only this file gate, not caution vetoes or other merge guards. |
+| `manual_review_caution` | PR/review detection/protected-files/caution notice. | Use independent manual review/merge; approvals/dismissals/labels/green checks cannot clear this guard. |
 | `merge_not_completed`, `merge_operation_error` | API/live state. | Reconcile possibly-merged state before retry. |
 
 ## Parser and ledger diagnostics
@@ -250,7 +254,7 @@ or profile/effect-scope bypass.
 | `result_invalid`, `completion_conflict`, `cancellation_conflict`, `ownership_terminal`, `work_terminal`, `work_missing` | Work/ownership state; finish/result intent. | Respect terminal transitions; reconcile duplicate/conflicting completion/cancellation. |
 | `retry_invalid`, `retry_exhausted`, `release_invalid`, `release_open_claims`, `remediation_invalid` | Retry/release policy, attempts, open claims. | Stop exhausted retries; reconcile claims; authorized recovery only. |
 | `ERR_WORK_QUEUE_RECONCILIATION`, `observation_invalid`, `observation_conflict`, `reconciliation_invalid`, `reconciliation_pending`, `inspection_invalid`, `resource_unverified` | Reason, run/Claim binding, provenance/freshness. | Bounded trusted reconciliation; unverified stays blocked; never force release. |
-| `resource_invalid`, `resource_limit`, `assignment_limit`, `evidence_limit`, `graph_limit`, `work_queue_graph_limit`, `ledger_limit`, `observation_limit`, `operation_limit`, `payload_limit`, `pending_limit`, `projection_limit`, `reconciliation_limit` | Named limit; actual count. | Bound/batch/compact through supported operations; retain limits. |
+| `resource_invalid`, `resource_limit`, `assignment_limit`, `evidence_limit`, `graph_limit`, `work_queue_graph_limit`, `ledger_limit`, `observation_limit`, `operation_limit`, `payload_limit`, `pending_limit`, `projection_limit`, `reconciliation_limit`, `obsolete_limit` | Named limit; count. | Bound/batch/compact via supported paths; keep limits. |
 | `issue_binding_invalid`, `issue_binding_conflict` | Queue-issue binding; ownership. | Correct authorized binding; never adopt another work item's issue. |
 | `projection_invalid`, `projection_journal_invalid`, `projection_journal_conflict`, `projection_scope_changed`, `projection_write_ambiguous` | Journal, native acknowledgement, target, CAS. | Reconcile receipts; never duplicate uncertain writes, drop uncertain locks or rewrite history. |
 | `projection_target_unavailable`, `projection_unavailable` | Actual failure; safe status/request ID. | Diagnose cause; preserve mirrors and locks. |
@@ -261,12 +265,11 @@ or profile/effect-scope bypass.
 | Codes or signature | Check | Remedy |
 | --- | --- | --- |
 | HTTP `401`, `403`, `404`, `429`, `5xx` | Operation, response, proxy guard, policy. | Distinguish auth/SSO, hidden resource, quota, outage; status alone insufficient. |
-| JSON-RPC `-32700`, `-32600`, `-32601`, `-32602`, `-32603`, `isError` | Protocol vs tool failure. | Fix parse/request/method/params/client/schema/server; tool errors need not be protocol errors. |
+| JSON-RPC `-32700`, `-32600`, `-32601`, `-32602`, `-32603`, `isError` | Protocol vs tool failure. | Fix parse/request/method/params/client/schema/server. |
 | `EACCES`, `ENOENT`, `ETIMEDOUT`, process exit/signal | Operation/path; fatal vs caught. | Fix boundary; caught `/run/awf-config-audit` warning doesn't prove later inference failure. |
 | Unlisted code, compile/schema/scanner error | Identifier/revision; emitter/caller. | Trace cause; add regression/code row; report gaps, never guess. |
 
 No run: inspect file/line; follow [compile-only gates](debug-compilation.md).
 Compilation != inference/execution authority.
 
-Report code/boundary/revision, evidence/uncertainty, remedy/files/execution.
-No blind retries/downgrades/credential-rotation/guard-bypass.
+Report code/boundary/revision, evidence/uncertainty, remedy/files/execution; no blind retries/downgrades/credential-rotation/guard-bypass.

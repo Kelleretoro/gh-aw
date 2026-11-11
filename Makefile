@@ -40,8 +40,18 @@ all: build
 
 # Build the binary, run make deps before this
 .PHONY: build
-build: sync-action-pins sync-action-scripts sync-compat sync-model-aliases
+build: check-agent-local-settings sync-action-pins sync-action-scripts sync-compat sync-model-aliases
 	go build $(LDFLAGS) -o $(BINARY_NAME) ./cmd/gh-aw
+
+# Reject persisted local command approvals even if force-added or already tracked.
+.PHONY: check-agent-local-settings test-agent-local-settings
+check-agent-local-settings:
+	bash scripts/check-agent-local-settings.sh
+
+test-agent-local-settings: check-agent-local-settings
+	bash scripts/check-agent-local-settings_test.sh
+
+build-all build-linux build-darwin build-windows build-android build-wasm: check-agent-local-settings
 
 # Build for all platforms
 .PHONY: build-all
@@ -206,6 +216,7 @@ bench:
 # Uses time-based -benchtime (not a fixed low iteration count) so that results are
 # averaged over many iterations and are far less sensitive to shared CI runner noise.
 .PHONY: bench-performance
+bench-performance: SHELL := /bin/bash -eu -o pipefail
 bench-performance:
 	@echo "Running critical performance benchmarks..."
 	@echo "This includes: CompileSimpleWorkflow, CompileComplexWorkflow, CompileMCPWorkflow,"
@@ -291,14 +302,14 @@ check-cjs-syntax:
 	@echo "✓ CommonJS runtime syntax validated"
 
 .PHONY: test-js
-test-js: build-js
+test-js: build-js test-workflow-tool-contracts
 	node --test scripts/pr-sous-chef.test.mjs
 	cd actions/setup/js && npm run test:js -- --no-file-parallelism
 	cd eslint-factory && npm test
 
 # Test impacted JavaScript unit tests only (excluding integration tests)
 .PHONY: test-impacted-js
-test-impacted-js: build-js
+test-impacted-js: build-js test-workflow-tool-contracts
 	@BASE_COMMIT=$$(bash scripts/resolve-base-commit.sh --base-ref $(BASE_REF)); \
 	if [ -z "$$BASE_COMMIT" ]; then \
 		echo "Set BASE_REF explicitly, for example: make test-impacted-js BASE_REF=origin/main"; \
@@ -523,16 +534,36 @@ bundle-js:
 	@echo "✓ bundle-js tool built"
 	@echo "To bundle a JavaScript file: ./bundle-js <input-file> [output-file]"
 
+# Run workflow contracts in CJS CI even when impacted runtime tests are skipped.
+.PHONY: test-workflow-tool-contracts
+test-workflow-tool-contracts:
+	node --test scripts/workflow-tool-contracts.test.cjs scripts/code-scanning-fixer-selection.test.cjs scripts/cache-strategy-workflows.test.cjs
+
 # Run script tests (authentication probes, stale locks, workflow drift, and workflow purity).
+.PHONY: test-pageindex-workflow
+test-pageindex-workflow:
+	@set -eu; \
+	if ! command -v uv >/dev/null 2>&1; then \
+		echo "uv is required to run PageIndex workflow tests (requires pageindex==0.5.3)." >&2; \
+		exit 1; \
+	fi; \
+	tmp_dir=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp_dir"' EXIT; \
+	uv venv --python 3.12 "$$tmp_dir/venv"; \
+	uv pip install --exclude-newer "$$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)" --only-binary=:all: --python "$$tmp_dir/venv/bin/python" "pageindex==0.5.3"; \
+	"$$tmp_dir/venv/bin/python" scripts/test_pageindex_workflow.py
+
 .PHONY: test-scripts
-test-scripts: build
+test-scripts: build test-workflow-tool-contracts test-agent-local-settings test-pageindex-workflow
 	@echo "Running script tests..."
 	node --test scripts/agy-authentication.test.cjs
 	node --test scripts/check-npm-1es.test.mjs
 	node --test scripts/release-workflows.test.cjs
+	node --test scripts/maintenance-workflows.test.cjs
+	node --test scripts/auditor-workflow.test.cjs
 	bash scripts/extract-workflow-frontmatter-keys_test.sh
 	bash scripts/check-stale-lock-files_test.sh
-	bash scripts/agent-report-progress_test.sh
+	$(MAKE) --no-print-directory test-agent-dev-loop
 	bash scripts/check-skill-file-paths_test.sh
 	bash scripts/check-safe-outputs-conformance_test.sh
 	bash scripts/resolve-base-commit_test.sh
@@ -547,6 +578,8 @@ test-scripts: build
 	python3 scripts/test_super_linter_scope.py
 	python3 scripts/test_publish_safe_outputs_node.py
 	python3 scripts/test_pr_specification_reviewer.py
+	python3 scripts/test_archivx_analyzer.py
+	python3 scripts/test_parse_benchmark_results.py
 	bash actions/setup/sh/collect_usage_artifact_files_test.sh
 	bash actions/setup/sh/copy_gh_aw_binary_for_mcp_test.sh
 	bash actions/setup/sh/create_gh_aw_tmp_dir_test.sh
@@ -555,8 +588,14 @@ test-scripts: build
 	bash actions/setup/sh/install_gh_cli_test.sh
 	bash actions/setup/sh/install_threat_detect_binary_test.sh
 	bash actions/setup/sh/release_integrity_test.sh
+	bash .github/scripts/install_tla_runtime_test.sh
 	bash actions/setup/sh/runtime_trust_inventory_test.sh
 	@echo "✓ All script tests passed"
+
+.PHONY: test-agent-dev-loop
+test-agent-dev-loop:
+	bash scripts/format-changed_test.sh
+	bash scripts/agent-report-progress_test.sh
 
 # Test all code and guidance (Go, JavaScript, wasm golden, shell scripts, and guidance contracts)
 .PHONY: test-all
@@ -875,6 +914,7 @@ deps: check-node-version
 	go mod tidy
 	cd actions/setup/js && npm ci
 	cd eslint-factory && npm ci
+	cd specs/otel && npm ci
 
 # Install development tools (including linter)
 .PHONY: deps-dev
@@ -1030,9 +1070,14 @@ check-stale-schema-binary:
 		bash scripts/check-stale-schema-binary.sh --binary "./$(BINARY_NAME)"; \
 	fi
 
-# Format code
+# Format only branch changes, including staged, unstaged, and untracked files.
 .PHONY: fmt
-fmt: fmt-go fmt-cjs fmt-json
+fmt:
+	@BASE_REF="$(BASE_REF)" bash scripts/format-changed.sh
+
+# Explicit full-repository formatting (not part of the inner development loop).
+.PHONY: fmt-all
+fmt-all: fmt-go fmt-cjs fmt-json
 	@echo "✓ Code formatted successfully"
 
 .PHONY: fmt-go
@@ -1135,9 +1180,18 @@ validate-registry:
 .PHONY: validate-otel-contract
 validate-otel-contract:
 	@echo "Validating gh-aw OpenTelemetry compatibility contract..."
+	@$(MAKE) --no-print-directory check-otel-attributes
 	@go test ./pkg/parser ./pkg/workflow -run 'TestValidateMainWorkflowFrontmatterWithSchemaAndLocation_OTLP(CustomAttributes|ResourceAttributes|GitHubAppImplicitOIDC)|TestInjectOTLPConfig|TestApplyTraceContextEnvToMap' -count=1
 	@cd actions/setup/js && npm run test:js -- otel_contract.test.cjs send_otlp_span.test.cjs --no-file-parallelism >/dev/null
 	@echo "✓ OpenTelemetry compatibility contract validated"
+
+.PHONY: check-otel-attributes
+check-otel-attributes:
+	@npm run check --prefix specs/otel
+
+.PHONY: generate-otel-attributes
+generate-otel-attributes:
+	npm run generate --prefix specs/otel
 
 MODELS_DEV_MODELS_JSON_URL ?= https://models.dev/catalog.json
 
@@ -1209,7 +1263,7 @@ shellcheck-setup-sh:
 
 # Validate all project files
 .PHONY: lint
-lint: check-stale-lock-files check-skill-file-paths fmt-check fmt-check-json lint-cjs golint validate-model-alias-chains lint-action-sh shellcheck-setup-sh check-stale-schema-binary
+lint: check-stale-lock-files check-skill-file-paths fmt-check fmt-check-json lint-cjs golint validate-model-alias-chains lint-action-sh shellcheck-setup-sh check-stale-schema-binary check-otel-attributes
 	@echo "✓ All validations passed"
 
 # Install the binary locally
@@ -1362,7 +1416,7 @@ compile-cli-workflows:
 		echo "./$(BINARY_NAME) not found; building it first..."; \
 		$(MAKE) build; \
 	fi
-	@TMP_WORKFLOWS_DIR=$$(mktemp -d); \
+	@set -e; TMP_WORKFLOWS_DIR=$$(mktemp -d); \
 	trap 'rm -rf "$$TMP_WORKFLOWS_DIR"' EXIT; \
 	cp -R pkg/cli/workflows "$$TMP_WORKFLOWS_DIR/workflows"; \
 	WORKFLOWS=$$(find "$$TMP_WORKFLOWS_DIR/workflows" -maxdepth 1 -type f -name '*.lock.yml' | sed 's/\.lock\.yml$$/.md/' | sort | tr '\n' ' '); \
@@ -1370,7 +1424,11 @@ compile-cli-workflows:
 		echo "No workflow files found in pkg/cli/workflows"; \
 		exit 1; \
 	fi; \
-	./$(BINARY_NAME) compile --fix --no-check-update $$WORKFLOWS
+	./$(BINARY_NAME) compile --fix --no-check-update $$WORKFLOWS; \
+	mkdir -p "$$TMP_WORKFLOWS_DIR/.github/workflows"; \
+	cp -R .github/workflows/connectors "$$TMP_WORKFLOWS_DIR/.github/workflows/connectors"; \
+	cp pkg/cli/workflows/*-golden.md "$$TMP_WORKFLOWS_DIR/.github/workflows/"; \
+	./$(BINARY_NAME) compile --validate --strict --no-emit --no-check-update "$$TMP_WORKFLOWS_DIR"/.github/workflows/*-golden.md
 
 # Apply automatic fixes to workflow files
 .PHONY: fix
@@ -1458,13 +1516,13 @@ sbom:
 	syft packages . -o cyclonedx-json=sbom.cdx.json
 	@echo "✓ SBOM files generated: sbom.spdx.json, sbom.cdx.json"
 
-# Agent should run this task before finishing its turns
+# Explicit repository-wide maintenance sweep, not an inner-loop gate.
 .PHONY: agent-finish
-agent-finish: deps-dev fmt lint build build-wasm test-all validate-otel-contract fix recompile dependabot generate-schema-docs generate-agent-factory generate-llms-txt security-scan
+agent-finish: deps-dev fmt-all lint build build-wasm test-all validate-otel-contract fix recompile dependabot generate-schema-docs generate-agent-factory generate-llms-txt security-scan
 	@echo "Agent finished tasks successfully."
 
-# Change-scoped pre-PR gate — run before every intermediate report_progress call.
-# The driver runs independent lint checks in parallel after formatting and build.
+# Fast intermediate gate: scoped formatting and compilation/vet, no test bodies.
+# Package-wide Go linters and workflow recompilation run only in the final gate.
 .PHONY: agent-report-progress-no-test
 agent-report-progress-no-test:
 	@bash scripts/agent-report-progress.sh
@@ -1492,6 +1550,8 @@ help:
 	@echo "  test-unit        - Run impacted Go unit tests first (~$(TEST_UNIT_MAX_SECONDS)s budget); set TEST_UNIT_RUN_FULL=1 for full suite"
 	@echo "  test-unit-all    - Run full Go unit test suite"
 	@echo "  test-security    - Run security regression tests"
+	@echo "  check-agent-local-settings - Reject tracked Claude Code local permission settings"
+	@echo "  test-agent-local-settings - Test local settings secret-leak prevention"
 	@echo "  test-js          - Run JavaScript tests"
 	@echo "  test-impacted-js - Run impacted JavaScript unit tests for current branch changes"
 	@echo "  test-impacted-go - Run impacted Go unit tests for current branch changes"
@@ -1531,7 +1591,8 @@ help:
 	@echo "  golint           - Run golangci-lint (full repository scan)"
 	@echo "  golint-incremental - Run golangci-lint incrementally (only changed files, requires BASE_REF)"
 	@echo "  lint             - Run linter"
-	@echo "  fmt              - Format code"
+	@echo "  fmt              - Format branch changes (Go-only changes need no npm)"
+	@echo "  fmt-all          - Format the entire repository"
 	@echo "  fmt-cjs          - Format JavaScript/TypeScript/JSON files in actions/setup/js and eslint-factory"
 	@echo "  fmt-json         - Format JSON files in pkg directory (excluding actions/setup/js)"
 	@echo "  fmt-check        - Check code formatting"
@@ -1585,7 +1646,7 @@ help:
 	@echo "  clean-docs       - Clean documentation artifacts (dist, node_modules, .astro)"
 
 	@echo "  agent-finish                - Complete validation sequence (build, test, fix, recompile, fmt, lint, security-scan)"
-	@echo "  agent-report-progress-no-test - Fast change-scoped pre-PR gate without tests"
+	@echo "  agent-report-progress-no-test - Fast scoped formatting and compile/vet gate; full Go lint and workflow drift deferred"
 	@echo "  agent-report-progress       - Change-scoped pre-PR gate with impacted Go tests"
 	@echo "  agent-report-progress-lint  - Full pre-PR gate + gh aw lint lock-file check"
 	@echo "  sbom             - Generate SBOM in SPDX and CycloneDX formats (requires syft)"

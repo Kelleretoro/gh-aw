@@ -256,6 +256,8 @@ max-turns: 20
 
 `max-turns` works across Claude, Codex, Copilot, Gemini, and Pi. When set, gh-aw exports the compiled value as `GH_AW_MAX_TURNS` for the engine runtime, so you do not need to set `CLAUDE_CODE_MAX_TURNS` or an equivalent variable separately.
 
+With AWF, the invocation budget is shared with sub-agents. Parallel workers do not receive independent budgets; reserve capacity for the orchestrator's validation and final outputs. When Codex exposes a generic terminal HTTP 429, the harness checks fresh AWF reflection before retrying. A confirmed exhausted invocation budget stops retries because resuming cannot restore it. Missing or unavailable counter evidence does not turn an ordinary rate limit into a terminal budget error.
+
 The field accepts integer literals or GitHub Actions expressions, making it composable with `workflow_call` inputs:
 
 ```aw wrap
@@ -292,6 +294,12 @@ Scan snapshots are optional accelerators, not authoritative daily totals. Each r
 An incomplete history, permanent API failure, or quota restriction stops activation rather than reporting an under-budget result from partial data. Transient reads receive bounded retries; unresolved accounting uses the per-run maximum when available. Respect any logged reset or `Retry-After` deadline before retrying. A missing usage artifact is not zero usage unless complete job metadata confirms that all generated AI-powered jobs were skipped or never assigned a runner, with no executed jobs carried forward from earlier attempts.
 
 Activation logs identify artifact discovery and accounting failures with the underlying error and guidance to check Actions read permissions, artifact retention, and accounting coverage. The activation summary separates recorded usage, confirmed-zero runs, and conservative estimates. The exceeded-guardrail log also reports measured and assumed AIC separately. These totals are guardrail accounting, not provider billing; reconcile charges with the provider.
+
+When **Restore daily AIC scan observations** is blocked, its summary identifies the failed operation, observed response count, and the same retry-not-before deadline used by recovery when available. A `current_run` failure occurs before snapshot discovery in the failed restore phase attempt, so it does not establish a cache miss or expensive cold scan; an earlier attempt may already have queried history or artifacts. The response count belongs to this restore across phase attempts; `used` belongs to the credential's shared quota.
+
+Trace the restore step's `github-token` reference in the compiled workflow to the dedicated daily-AIC app, activation credential, or `github.token`. Compare concurrent consumers using the same user or app installation, including other workflows and repositories; separately minted tokens for the same installation do not isolate its quota. Record only credential reference names and validated quota metadata, never token values. Matching quota limits and reset times alone do not identify the credential or the consumer that depleted it.
+
+Before retrying, inspect existing scheduled runs after the reported retry-not-before deadline for a successful restore and complete guardrail check. For exhausted quota or a protective reserve stop, this deadline is the later of the quota reset and `Retry-After`; for a secondary limit above the reserve, only `Retry-After` applies. An unknown deadline does not permit an immediate retry, and an expired deadline alone does not establish recovery. Avoid simultaneous reruns, preserve the fail-closed guard, and investigate snapshot reuse and API response counts before changing scan behavior.
 
 Cold scans check the compiler-owned `agent`, `detection`, and `evals` jobs independently. Every executed component needs valid accounting; empty collector placeholders and evaluation results alone do not prove zero usage. Raw token usage takes precedence over overlapping summaries. Invalid numeric fields make the accounting unknown. Failed-only reruns retain successful components from earlier attempts, but a rerun component needs a producer artifact from its own job execution. Missing carried-forward usage remains unknown. Older snapshots without component-coverage validation are not reused.
 

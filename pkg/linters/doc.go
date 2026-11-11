@@ -1,10 +1,11 @@
 // Package linters is a namespace for gh-aw's custom Go analysis linters.
 //
-// All 87 active analyzers:
+// All 95 active analyzers:
 //
 //   - appendbytestring — flags append(b, []byte(s)...) calls where s is a string that can be simplified to append(b, s...)
 //   - appendoneelement — flags append(s, []T{x}...) calls where a single-element slice literal is spread and can be simplified to append(s, x)
 //   - blankassigncomma — flags assignment statements where every result is discarded via 2 or more blank identifiers
+//   - blankassignedcleanuperror — reports discarded errors from os.Remove, os.RemoveAll, os.WriteFile, and os.MkdirAll when assigned to _, including in deferred closures
 //   - bufferresetbeforereuse — flags bytes.Buffer or strings.Builder reuse after a read without an intervening Reset
 //   - bufioscannererunchecked — flags bufio.Scanner loops that do not check Err after scanning completes
 //   - bytesbufferstring — reports string(buf.Bytes()) calls where buf is a bytes.Buffer value and suggests buf.String() instead
@@ -22,6 +23,7 @@
 //   - excessivefuncparams — flags function declarations with too many positional parameters
 //   - execcommandwithoutcontext — flags exec.Command calls inside functions that already receive context.Context
 //   - fileclosenotdeferred — flags file Close() calls that are not deferred
+//   - filepathwalkpreferwalkdir — reports filepath.Walk calls and recommends filepath.WalkDir
 //   - fmterrorfnoverbs — flags fmt.Errorf calls with no format verbs, recommending errors.New
 //   - formatintitoa — flags strconv.FormatInt(int64(x), 10) for int arguments that should use strconv.Itoa
 //   - fprintferrorunchecked — flags fmt.Fprintf/Fprint/Fprintln assignments that explicitly discard all return values
@@ -34,8 +36,10 @@
 //   - httpnoctx — flags HTTP calls that do not accept a context.Context
 //   - httprespbodyclose — flags HTTP response bodies that are not closed
 //   - httpstatuscode — flags HTTP status code anti-patterns
+//   - ignoredlocalerror — reports discarded errors from functions in the gh-aw module
 //   - ioutildeprecated — reports uses of deprecated io/ioutil functions that should be replaced with io or os package equivalents
 //   - jsonmarshalignoredeerror — flags json.Marshal/Unmarshal calls where the error is discarded with _
+//   - jsonunmarshalbytesconversion — reports json.Unmarshal calls that convert a string to []byte
 //   - largefunc — flags function bodies that exceed a configurable line-count threshold
 //   - lenstringsplit — flags len(strings.Split(s, sep)) with a non-empty separator that should use strings.Count(s, sep)+1
 //   - lenstringzero — flags len(s) == 0 / len(s) != 0 on string values that should use s == "" / s != ""
@@ -49,6 +53,7 @@
 //   - osgetenvlibrary — flags os.Getenv calls in library packages
 //   - osisnotexist — flags legacy os error predicates that should use errors.Is or errors.As for wrapped errors
 //   - osopenreadallpreferreadfile — recommends os.ReadFile for files used only by deferred Close and a single ReadAll
+//   - osremoveuncheckedcleanup — flags os.Remove and os.RemoveAll expression and go statements where the error return is discarded
 //   - ossetenvlibrary — flags os.Setenv calls in library packages
 //   - packagelevelmutableslicemap — reports mutation of package-level slice/map variables from inside function bodies, which risks data races and cross-call state leaks
 //   - panic-in-library-code — flags panic() calls in library packages
@@ -59,8 +64,10 @@
 //   - regexpdynamicpattern — flags regexp compile calls whose pattern is not a compile-time constant
 //   - seenmapbool — flags map[string]bool used as a set that should use map[string]struct{}
 //   - slicemakezerolength — flags zero-length slice allocations before known-size range loops that append one element per iteration
+//   - sortbasicslices — flags sort.Strings, sort.Ints, and sort.Float64s calls that should use slices.Sort
 //   - sortslice — flags sort.Slice / sort.SliceStable calls that should use slices.SortFunc / slices.SortStableFunc
-//   - splitindexzero — flags strings.Split(s, sep)[0] and strings.SplitN(s, sep, 2)[0] calls that allocate a slice to read only the first segment; use strings.Cut
+//   - splitindexzero — flags strings.SplitN(s, sep, 2)[0] calls that allocate a slice to read only the first segment; use strings.Cut
+//   - splitlines-on-newline — flags strings.Split calls using a newline separator that can retain carriage returns on CRLF input or produce a trailing empty element
 //   - sprintferrdot — flags redundant .Error() calls on error values passed to fmt format functions
 //   - sprintferrorsnew — flags errors.New(fmt.Sprintf(...)) calls that should use fmt.Errorf instead
 //   - sprintfbool — flags fmt.Sprintf("%t", b) calls where b is a single bool value and suggests using strconv.FormatBool(b) instead
@@ -74,6 +81,7 @@
 //   - stringsindexcontains — flags strings.Index(s, substr) comparisons that should use strings.Contains
 //   - stringsindexhasprefix — reports strings.Index(s, sub) comparisons with 0 (== 0 and != 0) and their yoda-order variants that should use strings.HasPrefix(s, sub) or !strings.HasPrefix(s, sub)
 //   - stringsjoinone — flags strings.Join([]string{s}, sep) calls with a single-element slice literal where the separator is unused and the call is equivalent to just s
+//   - stringssplitfirst — flags strings.Split(s, sep)[0] with a constant non-empty separator; use strings.Cut to read the first segment without allocating a slice
 //   - timeafterleak — flags time.After in select cases inside loops that leak timer channels
 //   - timesleepnocontext — flags time.Sleep calls in context-aware functions that should propagate cancellation
 //   - timenowsub — reports time.Now().Sub(t) calls that should be simplified to time.Since(t)

@@ -134,7 +134,6 @@ The `cli` package is intentionally large and command-oriented. The tables below 
 | `RunAuditDiff` | `func RunAuditDiff(ctx context.Context, baseRunID int64, compareRunIDs []int64, opts AuditOptions) error` | Diffs multiple audit reports. |
 | `DownloadWorkflowLogs` | `func DownloadWorkflowLogs(ctx context.Context, opts LogsDownloadOptions) error` | Downloads and parses workflow logs and artifacts. |
 | `NewHealthCommand` | `func NewHealthCommand() *cobra.Command` | Constructs the `gh aw health` command. |
-| `RunHealth` | `func RunHealth(config HealthConfig) error` | Computes workflow health metrics for one workflow or all workflows. |
 | `CalculateWorkflowHealth` | `func CalculateWorkflowHealth(workflowName string, runs []WorkflowRun, threshold float64) WorkflowHealth` | Calculates success-rate and trend metrics for one workflow. |
 | `CalculateHealthSummary` | `func CalculateHealthSummary(workflowHealths []WorkflowHealth, period string, threshold float64) HealthSummary` | Aggregates workflow health results. |
 | `NewChecksCommand` | `func NewChecksCommand() *cobra.Command` | Constructs the `gh aw checks` command. |
@@ -433,7 +432,7 @@ The `cli` package exports many types used across its command implementations. Th
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `ZizmorImage` | `"ghcr.io/zizmorcore/zizmor:1.31.1@sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9"` | Default image for Zizmor security scanner. |
+| `ZizmorImage` | `"ghcr.io/zizmorcore/zizmor:1.32.0@sha256:3014cc8f68f663935f69b3c3e0e41f5ce102b268d97db13db0f62208747f860d"` | Default image for Zizmor security scanner. |
 | `PoutineImage` | `"ghcr.io/boostsecurityio/poutine:1.1.6@sha256:722a8e0999b583c1540fe2974e691032b2d9d21b9256a17965132b6bfd0081b0"` | Default image for Poutine supply-chain scanner. |
 | `ActionlintImage` | `"rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667"` | Default image for Actionlint workflow linter. |
 | `RunnerGuardImage` | `"ghcr.io/vigilant-llc/runner-guard:3.1.5@sha256:2df426ef96d21f1622e05b21329f26bd263fc46110609cefb6afe43457613ac0"` | Default image for Runner Guard sandbox. |
@@ -540,16 +539,6 @@ err := cli.AuditWorkflowRun(ctx, runID, cli.AuditOptions{
     OutputDir: "/tmp/output",
     Verbose:   true,
     Parse:     true,
-})
-```
-
-### Checking workflow health
-
-```go
-err := cli.RunHealth(cli.HealthConfig{
-    Pattern:   "*.md",
-    Threshold: 0.8,
-    Period:    "30d",
 })
 ```
 
@@ -769,10 +758,10 @@ This appendix is generated from the current non-test Go source files in this pac
 | `mcp_registry_types.go` | `const` | `ArgumentTypePositional` | `const ArgumentTypePositional = "positional"` | Argument type constants |
 | `mcp_registry_types.go` | `const` | `StatusActive` | `const StatusActive = "active"` | Status constants for server status |
 | `mcp_registry_types.go` | `const` | `StatusInactive` | `const StatusInactive = "inactive"` | Status constants for server status |
-| `docker_images.go` | `const` | `GrantImage` | `const GrantImage = "anchore/grant:v0.6.8@sha256:..."` | GrantImage is the pinned image used to run Grant license scanning. |
-| `docker_images.go` | `const` | `GrypeImage` | `const GrypeImage = "anchore/grype:v0.121.0@sha256:..."` | GrypeImage is the pinned image used to run Grype vulnerability scanning. |
+| `docker_images.go` | `const` | `GrantImage` | `const GrantImage = "anchore/grant:v0.7.0@sha256:..."` | GrantImage is the pinned image used to run Grant license scanning. |
+| `docker_images.go` | `const` | `GrypeImage` | `const GrypeImage = "anchore/grype:v0.121.1@sha256:..."` | GrypeImage is the pinned image used to run Grype vulnerability scanning. |
 | `docker_images.go` | `const` | `ShellcheckImage` | `const ShellcheckImage = "koalaman/shellcheck:v0.11.0@sha256:..."` | ShellcheckImage is the pinned image used for shellcheck validation. |
-| `docker_images.go` | `const` | `SyftImage` | `const SyftImage = "anchore/syft:v1.55.0@sha256:..."` | SyftImage is the pinned image used for Syft SBOM generation. |
+| `docker_images.go` | `const` | `SyftImage` | `const SyftImage = "anchore/syft:v1.56.0@sha256:..."` | SyftImage is the pinned image used for Syft SBOM generation. |
 | `docker_images.go` | `const` | `YamllintImage` | `const YamllintImage = "pipelinecomponents/yamllint:latest@sha256:..."` | YamllintImage is the pinned image used for yamllint checks. |
 | `flags.go` | `const` | `EngineFlagFilterUsage` | `const EngineFlagFilterUsage = "Filter logs by AI engine (...)"` | EngineFlagFilterUsage is the CLI help text for `--engine` log filtering. |
 | `flags.go` | `const` | `EngineFlagOverrideUsage` | `const EngineFlagOverrideUsage = "Override AI engine (...)"` | EngineFlagOverrideUsage is the CLI help text for `--engine-override`. |

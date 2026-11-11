@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
+import { createHash } from "node:crypto";
 
 // Mock the global objects that GitHub Actions provides
 const mockCore = {
@@ -30,6 +31,11 @@ const mockContext = {
 
 const mockGithub = {
   rest: {
+    repos: {
+      getContent: vi.fn(async ({ path }) => ({
+        data: { type: "file", path, encoding: "base64", content: Buffer.from('# gh-aw-metadata: {}\n# gh-aw-manifest: {"version":1,"agent_metadata":{}}\n# compiled fixture\n').toString("base64") },
+      })),
+    },
     actions: {
       getWorkflowRun: vi.fn(),
     },
@@ -50,6 +56,7 @@ const queueAssignment = {
 describe("generate_aw_info.cjs", () => {
   let main;
   let awInfoPath;
+  let originalGithub;
 
   it("persists declared sub-agent models without configured skills", async () => {
     const models = [{ name: "reader", model: "small", patterns: ["github-copilot/*haiku*"] }];
@@ -77,14 +84,23 @@ describe("generate_aw_info.cjs", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    originalGithub = global.github;
     // Keep compiler-fixed runner paths in memory; never write to the host's /tmp.
     const files = new Map();
     const realRead = fs.readFileSync.bind(fs);
     const realExists = fs.existsSync.bind(fs);
+    const realStat = fs.lstatSync.bind(fs);
+    const realPath = fs.realpathSync.bind(fs);
     vi.spyOn(fs, "mkdirSync").mockImplementation(() => undefined);
     vi.spyOn(fs, "writeFileSync").mockImplementation((filename, content) => files.set(String(filename), String(content)));
     vi.spyOn(fs, "existsSync").mockImplementation(filename => (String(filename).startsWith("/tmp/gh-aw") ? files.has(String(filename)) : realExists(filename)));
+    vi.spyOn(fs, "lstatSync").mockImplementation(filename => (String(filename).endsWith(".lock.yml") ? { isFile: () => true, size: 128 } : realStat(filename)));
+    vi.spyOn(fs, "realpathSync").mockImplementation(filename => (String(filename).endsWith(".lock.yml") ? String(filename) : realPath(filename)));
     vi.spyOn(fs, "readFileSync").mockImplementation((filename, ...args) => {
+      if (String(filename).endsWith(".lock.yml")) {
+        const header = '# gh-aw-metadata: {}\n# gh-aw-manifest: {"version":1,"agent_metadata":{}}\n# compiled fixture\n';
+        return args[0] === "utf8" ? header : Buffer.from(header);
+      }
       if (files.has(String(filename))) return files.get(String(filename));
       if (String(filename).startsWith("/tmp/gh-aw")) throw Object.assign(new Error("missing fixture"), { code: "ENOENT" });
       return realRead(filename, ...args);
@@ -103,6 +119,8 @@ describe("generate_aw_info.cjs", () => {
     process.env.GH_AW_INFO_CLI_VERSION = "";
     process.env.GH_AW_INFO_WORKFLOW_NAME = "my-workflow";
     process.env.GH_AW_INFO_WORKFLOW_ID = "github/my-repo/.github/workflows/my-workflow.lock.yml@refs/heads/main";
+    process.env.GH_AW_INFO_WORKFLOW_SHA = "a".repeat(40);
+    global.github = mockGithub;
     process.env.GH_AW_INFO_EXPERIMENTAL = "false";
     process.env.GH_AW_INFO_SUPPORTS_TOOLS_ALLOWLIST = "true";
     delete process.env.GH_AW_INFO_CACHE_MEMORY;
@@ -137,6 +155,7 @@ describe("generate_aw_info.cjs", () => {
     }
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    global.github = originalGithub;
   });
 
   it("should write aw_info.json with values from env vars and context", async () => {
@@ -168,6 +187,100 @@ describe("generate_aw_info.cjs", () => {
     expect(awInfo.created_at).toBeTruthy();
   });
 
+  it("keeps compiler metadata in aw_info.json without dumping it to Actions logs", async () => {
+    const agent = { name: "private-agent", description: "confidential-agent-description", model: "private-model", tools: ["confidential-tool"] };
+    const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    const agentDigest = digest(agent);
+    const errorDigest = digest("invalid-agent-source");
+    const manifest = {
+      version: 1,
+      agent_metadata: { [agentDigest]: agent, [errorDigest]: null },
+      metadata_errors: { [`artifact:${errorDigest}`]: "confidential-compiler-error" },
+    };
+    mockGithub.rest.repos.getContent.mockImplementationOnce(async ({ path }) => ({
+      data: { type: "file", path, encoding: "base64", content: Buffer.from(`# gh-aw-metadata: {}\n# gh-aw-manifest: ${JSON.stringify(manifest)}\n# compiled fixture\n`).toString("base64") },
+    }));
+
+    await main(mockCore, mockContext);
+
+    const awInfo = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
+    expect(awInfo).toMatchObject({
+      agent_metadata: { [agentDigest.slice(0, 20)]: agent },
+      metadata_errors: { [`artifact:${errorDigest.slice(0, 20)}`]: "confidential-compiler-error" },
+      engine_id: "copilot",
+      run_id: mockContext.runId,
+    });
+    expect(mockGithub.rest.repos.getContent).toHaveBeenCalledWith(expect.objectContaining({ ref: process.env.GH_AW_INFO_WORKFLOW_SHA }));
+    expect(mockCore.setOutput).toHaveBeenCalledWith("model", "gpt-4");
+    expect(mockCore.setOutput).toHaveBeenCalledWith("engine_id", "copilot");
+    expect(mockCore.info).toHaveBeenCalledWith("Generated aw_info.json at: " + awInfoPath);
+    const logs = [mockCore.info, mockCore.debug, mockCore.warning, mockCore.error].flatMap(log => log.mock.calls.flat()).join("\n");
+    for (const value of ["agent_metadata", "model_pins", "metadata_errors", agent.name, agent.description, agent.model, ...agent.tools, ...Object.values(manifest.metadata_errors)]) {
+      expect(logs).not.toContain(value);
+    }
+  });
+
+  describe("GitHub API quota exhaustion while reading the executing lock manifest", () => {
+    const quotaFailure = resetSeconds =>
+      Object.assign(new Error("API rate limit exceeded for installation"), {
+        status: 403,
+        response: { status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-limit": "15000", "x-ratelimit-used": "15000", "x-ratelimit-resource": "core", "x-ratelimit-reset": String(resetSeconds) } },
+      });
+    const clockAt = start => {
+      let current = start;
+      vi.spyOn(Date, "now").mockImplementation(() => current);
+      return {
+        now: () => current,
+        sleep: vi.fn(async ms => {
+          current += ms;
+        }),
+      };
+    };
+
+    it("waits for the failed response's reset and then generates run info", async () => {
+      const start = Date.parse("2026-11-09T23:58:53Z");
+      const reset = Date.parse("2026-11-10T00:00:04Z");
+      const clock = clockAt(start);
+      const requestTimes = [];
+      const fixture = mockGithub.rest.repos.getContent.getMockImplementation();
+      mockGithub.rest.repos.getContent.mockImplementationOnce(async () => {
+        requestTimes.push(clock.now());
+        throw quotaFailure(reset / 1000);
+      });
+      mockGithub.rest.repos.getContent.mockImplementationOnce(async request => {
+        requestTimes.push(clock.now());
+        return fixture(request);
+      });
+      await main(mockCore, mockContext, mockGithub, { quotaWait: clock });
+      expect(clock.sleep).toHaveBeenCalledExactlyOnceWith(reset + 1000 - start);
+      expect(requestTimes).toHaveLength(2);
+      expect(requestTimes[1]).toBeGreaterThanOrEqual(reset);
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).toHaveBeenCalledWith(awInfoPath, expect.any(String));
+    });
+
+    it("blocks activation with an explicit quota summary when the reset is beyond the bounded wait", async () => {
+      const start = Date.parse("2026-11-09T23:00:00Z");
+      const clock = clockAt(start);
+      mockGithub.rest.repos.getContent.mockRejectedValueOnce(quotaFailure(start / 1000 + 3600));
+      await expect(main(mockCore, mockContext, mockGithub, { quotaWait: clock })).rejects.toThrow("GitHub API quota exhausted; activation blocked until at least 2026-11-10T00:00:00.000Z");
+      expect(clock.sleep).not.toHaveBeenCalled();
+      expect(mockGithub.rest.repos.getContent).toHaveBeenCalledTimes(1);
+      expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining("resource=core; limit=15000; remaining=0; used=15000; reset=2026-11-10T00:00:00.000Z"));
+      expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining("reason=reset_exceeds_budget"));
+      expect(mockCore.summary.addRaw).toHaveBeenCalledWith(expect.stringContaining("### GitHub API quota exhausted"));
+      expect(mockCore.summary.addRaw).toHaveBeenCalledWith(expect.stringContaining("no unverified fallback was used"));
+      expect(fs.writeFileSync).not.toHaveBeenCalledWith(awInfoPath, expect.any(String));
+    });
+
+    it("does not reclassify an authorization 403 as quota exhaustion", async () => {
+      const denied = Object.assign(new Error("Resource not accessible by integration"), { status: 403, response: { status: 403, headers: {} } });
+      mockGithub.rest.repos.getContent.mockRejectedValueOnce(denied);
+      await expect(main(mockCore, mockContext, mockGithub)).rejects.toBe(denied);
+      expect(mockCore.summary.addRaw).not.toHaveBeenCalledWith(expect.stringContaining("GitHub API quota exhausted"));
+    });
+  });
+
   it("records the executing reusable workflow separately from its caller in the same run", async () => {
     const callerRef = "github/my-repo/.github/workflows/caller.yml@refs/heads/main";
     const executingRef = "org/platform/.github/workflows/worker.lock.yml@refs/tags/v1";
@@ -175,7 +288,7 @@ describe("generate_aw_info.cjs", () => {
     vi.stubEnv("GITHUB_WORKFLOW_REF", callerRef);
     vi.stubEnv("GITHUB_RUN_ATTEMPT", "2");
     const caller = { repo: "github/my-repo", run_id: "12345", run_attempt: "2", workflow_id: callerRef, workflow_call_id: `12345-2:${callerRef}` };
-    await main(mockCore, { ...mockContext, payload: { inputs: { aw_context: JSON.stringify(caller) } } });
+    await main(mockCore, { ...mockContext, payload: { inputs: { aw_context: JSON.stringify(caller) } } }, mockGithub);
     const info = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
     expect(info).toMatchObject({
       workflow_id: executingRef,
@@ -195,11 +308,8 @@ describe("generate_aw_info.cjs", () => {
     delete process.env.GH_AW_INFO_WORKFLOW_ID;
     vi.stubEnv("GITHUB_RUN_ATTEMPT", "2");
     vi.stubEnv("GITHUB_WORKFLOW_REF", "github/my-repo/.github/workflows/caller.yml@refs/heads/main");
-    await main(mockCore, mockContext);
-    const info = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
-    expect(info.workflow_id).toBe("");
-    expect(info.workflow_call_id).toBe("12345-2");
-    expect(info.caller_workflow_ref).toBe("github/my-repo/.github/workflows/caller.yml@refs/heads/main");
+    await expect(main(mockCore, mockContext)).rejects.toThrow("executing workflow identity");
+    expect(fs.existsSync(awInfoPath)).toBe(false);
   });
 
   it("defaults the workflow call ID to the first attempt when the runner omits it", async () => {
@@ -395,6 +505,90 @@ describe("generate_aw_info.cjs", () => {
 
     await expect(main(mockCore, mockContext)).rejects.toThrow("ERR_CONFIG");
     expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining("ERR_CONFIG"));
+  });
+
+  it.each(["router", "router/economy", "router/balanced", "router/robust", "router/fast", "Router/Economy", "router/economy?effort=high"])(
+    "fails before the agent starts when an unrouted main model resolves to the router value %s",
+    async model => {
+      // For example vars.GH_AW_DEFAULT_MODEL_COPILOT or ${{ vars.MODEL }} resolving to a router value.
+      process.env.GH_AW_INFO_MODEL = model;
+      process.env.GH_AW_INFO_MODEL_CONFIG = '{"routing":{"enabled":false},"models":{"allowed":[],"blocked":[]},"max_ai_credits_source":"default"}';
+      try {
+        await expect(main(mockCore, mockContext)).rejects.toThrow("ERR_CONFIG");
+        expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining(`resolved to the router value ${JSON.stringify(model)} at run time`));
+        expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining("router, router/economy, router/balanced, router/robust"));
+        expect(fs.existsSync(awInfoPath)).toBe(false);
+      } finally {
+        delete process.env.GH_AW_INFO_MODEL_CONFIG;
+      }
+    }
+  );
+
+  it("fails on a runtime router value when no model config is compiled", async () => {
+    process.env.GH_AW_INFO_MODEL = "router/economy";
+    delete process.env.GH_AW_INFO_MODEL_CONFIG;
+    await expect(main(mockCore, mockContext)).rejects.toThrow("ERR_CONFIG");
+  });
+
+  it("fails when an empty model expression falls back to a router value from the model variables", async () => {
+    // model: ${{ inputs.model }} resolved empty; the harness would use GH_AW_MODEL_FALLBACK,
+    // here vars.GH_AW_DEFAULT_MODEL_COPILOT=router/economy.
+    process.env.GH_AW_INFO_MODEL = "";
+    process.env.GH_AW_INFO_MODEL_FALLBACK = "router/economy";
+    process.env.GH_AW_INFO_MODEL_CONFIG = '{"routing":{"enabled":false},"models":{"allowed":[],"blocked":[]},"max_ai_credits_source":"default"}';
+    try {
+      await expect(main(mockCore, mockContext)).rejects.toThrow("ERR_CONFIG");
+      expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining('resolved to the router value "router/economy" at run time'));
+      expect(fs.existsSync(awInfoPath)).toBe(false);
+    } finally {
+      delete process.env.GH_AW_INFO_MODEL_FALLBACK;
+      delete process.env.GH_AW_INFO_MODEL_CONFIG;
+    }
+  });
+
+  it("checks the resolved model expression rather than the fallback when the expression is nonempty", async () => {
+    process.env.GH_AW_INFO_MODEL = "gpt-6.1-sol";
+    process.env.GH_AW_INFO_MODEL_FALLBACK = "router/economy";
+    try {
+      await main(mockCore, mockContext);
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GH_AW_INFO_MODEL_FALLBACK;
+    }
+  });
+
+  it("fails when vars.GH_AW_MODEL_AGENT_<ENGINE> disables implicit routing and resolves to a router value", async () => {
+    // Without a model, GH_AW_INFO_MODEL is vars.GH_AW_MODEL_AGENT_COPILOT || vars.GH_AW_DEFAULT_MODEL_COPILOT || 'auto',
+    // and a nonempty agent variable makes the activation decision disable implicit routing.
+    process.env.GH_AW_INFO_MODEL = "router/robust";
+    process.env.GH_AW_INFO_MODEL_CONFIG = '{"routing":{"enabled":false},"models":{"allowed":[],"blocked":[]},"max_ai_credits_source":"default"}';
+    try {
+      await expect(main(mockCore, mockContext)).rejects.toThrow("ERR_CONFIG");
+      expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining('resolved to the router value "router/robust" at run time'));
+      expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining("vars.GH_AW_MODEL_AGENT_<ENGINE>"));
+    } finally {
+      delete process.env.GH_AW_INFO_MODEL_CONFIG;
+    }
+  });
+
+  it("does not fail on a router-like model variable when the compiled config routes the run", async () => {
+    // Explicit routing ignores the model variables, so their value is never passed to the engine.
+    process.env.GH_AW_INFO_MODEL = "router/economy";
+    process.env.GH_AW_INFO_MODEL_CONFIG = '{"routing":{"enabled":true,"goal":"cost","mode":"economy","requested":"router/economy"},"models":{"allowed":[],"blocked":[]},"max_ai_credits_source":"default"}';
+    try {
+      await main(mockCore, mockContext);
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+      const awInfo = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
+      expect(awInfo.model_config.routing).toEqual({ enabled: true, goal: "cost", mode: "economy", requested: "router/economy" });
+    } finally {
+      delete process.env.GH_AW_INFO_MODEL_CONFIG;
+    }
+  });
+
+  it.each(["openrouter/auto", "routerx", "my-router/economy", "gpt-6.1-sol"])("does not treat %s as a router value", async model => {
+    process.env.GH_AW_INFO_MODEL = model;
+    await main(mockCore, mockContext);
+    expect(mockCore.setFailed).not.toHaveBeenCalled();
   });
 
   it("should not fail when model name does not contain unresolved expressions", async () => {

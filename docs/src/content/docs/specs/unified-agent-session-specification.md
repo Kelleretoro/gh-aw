@@ -3,9 +3,9 @@ title: Unified Agent Session Specification
 description: Draft contract for canonical traces, full unified artifacts, and bounded compact unified sessions.
 sidebar:
   order: 1365
-version: "2.7.0"
+version: "2.9.0"
 status: Draft
-publication_date: "2026-10-30"
+publication_date: "2026-11-11"
 editors:
   - name: GitHub Agentic Workflows Team
     organization: GitHub
@@ -13,9 +13,9 @@ editors:
 
 # Unified Agent Session Specification
 
-**Version**: 2.7.0<br>
+**Version**: 2.9.0<br>
 **Status**: Draft<br>
-**Publication Date**: 2026-10-30<br>
+**Publication Date**: 2026-11-11<br>
 **Editors**: GitHub Agentic Workflows Team (GitHub)<br>
 **This Version**: [unified-agent-session-specification](/gh-aw/specs/unified-agent-session-specification/)<br>
 **Latest Version**: This document
@@ -30,7 +30,7 @@ This specification defines the session traces used by GitHub Agentic Workflows: 
 
 This is a **GitHub Agentic Workflows project specification**, written using W3C-inspired document conventions. It is **not an official W3C standard**, W3C publication, or W3C-endorsed recommendation.
 
-Version 2.7.0 is a draft governed by the project's normal review process. It may be updated, replaced, or superseded. The accompanying implementation and regression suites exercise this contract, including the sampled CI sessions identified in Section 9.4. This is not a blanket declaration of conformance for every engine version or source format. Section 10 records historical pre-implementation gaps, not current defects. Approval and ongoing compliance testing remain project responsibilities.
+Version 2.8.0 is a draft governed by the project's normal review process. It may be updated, replaced, or superseded. The accompanying implementation and regression suites exercise this contract, including the sampled CI sessions identified in Section 9.4. This is not a blanket declaration of conformance for every engine version or source format. Section 10 records historical pre-implementation gaps, not current defects. Approval and ongoing compliance testing remain project responsibilities.
 
 The specification version belongs to this document. The unified file's leading
 `session.format` record carries an independent numeric serialization-format
@@ -85,7 +85,11 @@ The agent artifact already contains native session evidence: Copilot session
 `logEntries` as `agent-session.jsonl` so conclusion can reuse canonical events
 without parsing the same native transcript again. After downloading agent, detection, safe-output, experiment,
 and eval evidence, the conclusion job merges these observations into
-`usage/aw_session.jsonl`. The agent artifact also carries the split activation
+`usage/aw_session.jsonl`. Conclusion also downloads activation's `info` artifact
+to collect runner-owned `aw_info.json` as `workflow.info`, including available
+engine, model, version, revision, and trigger metadata. Runtime model metadata,
+when captured, takes precedence over the activation snapshot.
+The agent artifact also carries the split activation
 `aw-prompts/system.txt` and `aw-prompts/user.txt` files; the merger records each
 available file as an untimed `prompt.system` or `prompt.user` event with its exact
 content and source path. These prompt events are omitted from default summaries.
@@ -239,11 +243,11 @@ opaque because its essential fields are not defined by this specification.
 
 | Payload family | Essential fields |
 | --- | --- |
-| Agent initialization | Engine, model, session ID, working directory; no tool inventories or duplicated provider metadata. |
+| Agent initialization | Engine, observed CLI version, provider, model, session ID, working directory; no tool inventories or duplicated provider envelopes. |
 | Agent messages and reasoning | Exact `content`, without duplicate text blocks or the original message envelope. |
 | Agent session errors | Observed diagnostic fields, including `errorType`, `code`, and `statusCode`; absent status codes remain absent, and unrelated native error context is omitted. |
 | Agent policy refusals | Structured `reason`, exact available `content`, `policyCategory`, `explanation`, and streaming `partial` flag; no duplicated provider envelope. |
-| Agent tool lifecycle | Correlation IDs, tool/server names, one `input` or `output` field, command, outcome/error signals, duration, and exit code. Background tool updates retain observed `taskId` and `taskType`; progress and task notifications do not imply a tool completion. |
+| Agent tool lifecycle | Correlation IDs, including supplied `messageId`, the observed `model`, tool/server names, one `input` or `output` field, separately supplied `structuredContent`, command, outcome/error signals, duration, and exit code. Background tool updates retain observed `taskId` and `taskType`; progress and task notifications do not imply a tool completion. |
 | Agent accounting | Turns, duration, cost, observed terminal `status` and `sourceType`, normalized `usage` including reported reasoning tokens, errors, and permission denials. |
 | Agent execution diagnostics | Unique harness/compiler `categories`, native `errorCodes` and `errorTypes`, and the observed final process `exitCode`; no diagnostic messages or duplicated engine envelopes. |
 | MCP | Server, direction, RPC/call/request IDs, method, tool name, duration, sizes, status, reason, and error code/message. Failed calls reporting HTTP 429 also retain `httpStatus: 429` and the sanitized `retryHint`, including retry durations or `Retry-After` seconds/HTTP-date. No RPC arguments, response bodies, echoed queries/URLs in rate-limit diagnostics, or error context. |
@@ -255,7 +259,7 @@ opaque because its essential fields are not defined by this specification.
 | Execution, detection, workflow | Observed outcomes, exit code, duration/start/end, detection job result/conclusion/categorical reason and verdict flags, engine ID, requested model, trigger type, workflow/repository/run ID, and available gh-aw, AWF, MCPG, and agent versions. No detector transcript or free-form reasons. |
 | Model routing | `firewall.model_routing` retains its stage, purpose, provider, labels, selection, endpoint, router, request, outcome, and deviation fields, plus AWF's ranked choices, pool counts, request endpoints, telemetry availability, HTTP status, and failure phase when supplied. `workflow.info` includes the observed `model`, `requestedModel`, and a compact `modelRouting` object. `model_routing.outcome` records the harness's status, wire model, effective and selected endpoints, effort, applied effort, and failure code. |
 | Caller context and episode lineage | `workflow.info.awContext` retains the supplied `aw_context` object from runner-owned `aw_info.json.context`, including original keys and nested work-queue data. For webhook batches, it retains unique affected items and delivery IDs but omits each delivery's raw `payload`; those bodies remain in runner-owned context files. Text and Markdown summaries display the log-safe context as compact JSON alongside the workflow metadata, subject to existing output-size limits. Registered secrets are redacted during artifact serialization and summary rendering. `workflow.info.episode` additionally projects supplied canonical lineage and parent repository, run, attempt, workflow, call identity, and event type. |
-| Skills | Activation inventory records installed skill name, relative source, scope, SHA-256 content digest, and declared purpose, without skill content. Exact-name and cross-scope collisions retain names, kinds, and source identifiers: current sources are workspace-relative paths, while overwritten frontmatter installations use ordinal identifiers such as `frontmatter-1`. Observed engine invocations retain the selected skill name, path, source, trigger, model, and turn when supplied; a declared or installed skill is not proof of invocation. |
+| Skills | Activation inventory records installed skill name, relative source, scope, and SHA-256 content digest, without skill descriptions or content. Exact-name and cross-scope collisions retain names, kinds, and source identifiers: current sources are workspace-relative paths, while overwritten frontmatter installations use ordinal identifiers such as `frontmatter-1`. Observed engine invocations retain the selected skill name, path, source, trigger, model, and turn when supplied; a declared or installed skill is not proof of invocation. |
 
 OpenTelemetry observations use `otel.span`, `otel.span_event`, and `otel.log`.
 They retain trace/span/parent IDs, names, status, attributes, links, log bodies
@@ -369,7 +373,16 @@ timestamp values and MUST derive its ordering key using the source schema's
 units, not an epoch-magnitude heuristic. ISO timestamps MUST carry a timezone.
 Numeric Squid audit timestamps use Unix seconds; native agent timestamps and
 token-tracker audit `ts` values use milliseconds. Pi's observed
-`message.timestamp` is also a supported source timestamp. ISO fractional seconds
+`message.timestamp` is also a supported source timestamp, including its
+`data.messageMetadata.timestamp` representation in saved canonical traces.
+When the event has no source clock, the unified projection MUST retain a valid
+observed message clock as `timestamp` before omitting the archival message
+metadata. Promotion MUST use the ordering parser's timezone, calendar and
+numeric-range validation. Embedded native message clocks take precedence over
+archival message clocks only when valid; invalid archival message clocks MUST
+NOT be promoted.
+Explicit source clocks take precedence and retain their native values; ordering
+anchors are not substitutes for missing native clocks. ISO fractional seconds
 and OTLP decimal-string Unix nanoseconds MUST be compared at nanosecond precision.
 `provenance.timestampMs` is an observed millisecond projection, not the exact
 ordering key; native timestamps retain their original precision.
@@ -457,7 +470,14 @@ Grader and eval result collection MUST import only records attributed to the
 current run, not restored historical results. Runner-owned `aw_info.json`
 supplies the run ID and available attempt; the supplied collector environment
 (defaulting to the process environment) supplies them only when recorded run
-identity is absent. An explicit environment snapshot MUST NOT borrow run identity
+identity is absent. The live conclusion entry point explicitly supplies the
+current execution identity, which MUST reconcile the in-memory workflow metadata
+and derived workflow call ID before filtering durable, grader, and eval records
+or computing built-in graders. Caller context and episode parent identities
+remain unchanged.
+This prevents a reused successful activation snapshot from selecting an earlier
+attempt. Source artifacts remain unchanged; offline reconstruction retains
+recorded-identity precedence. An explicit environment snapshot MUST NOT borrow run identity
 from the ambient process. Records from other runs or
 explicitly different attempts are excluded without changing source artifacts.
 Unattributed results or an unavailable current run ID produce collection
@@ -568,6 +588,7 @@ preserve encounter order and retain only these event kinds and `data` keys:
 | `execution.result` | `outcome`, `conclusion`, `exitCode`, `durationMs`, `startedAt`, `finishedAt` |
 | `harness.retry` | `attempts`, `exitCode`; validated bounded attempt lists from Section 6.4 |
 | `harness.attempt` | Validated bounded attempt fields from Section 6.4 |
+| `harness.decision` | Validated invocation skip outcomes, question indices, error codes, latency, proposed attempt, timestamp, and avoided-invocation flag from Section 6.4 |
 | `engine.retry` | `sourceEngine`, `sourceType`, `sessionId`, `agentId`, and validated `attempt`, `maxRetries`, `backoffMs` from Section 6.4 |
 | `grader.result` | `id`, `status`, `value`, `score`, `unit`, `passed`, `direction`, `threshold`, `enabled`, `min`, `max`, `version` |
 
@@ -687,6 +708,8 @@ The following tables describe the common fields in `data`. Optional native and p
 | Field | Value and availability |
 | --- | --- |
 | `sourceEngine` | String naming the originating integration, such as `claude`, `copilot`, `codex`, `gemini`, `pi`, `opencode`, `goose`, a named plaintext sample, or `custom`. A custom delegation can retain the detected parser's engine label as described in 7.6. |
+| `agentVersion` | Source-dependent CLI version string, retained in canonical and full unified sessions. |
+| `provider` | Source-dependent provider identifier, retained in canonical and full unified sessions; a local proxy name does not identify its upstream provider. |
 | `model` | Source-dependent model string. |
 | `sessionId` | Source-dependent native session or thread identifier. |
 | `cwd` | Source-dependent working-directory string, unchanged. |
@@ -764,11 +787,18 @@ Native `parameters` remains a reader alias for `input`. If both are present, rea
 | `toolName` | Source-dependent native name, or a name recovered from an exact matching start. |
 | `success` | Boolean when the source completion establishes an outcome; omitted when unknown. |
 | `output` | Source-dependent JSON-compatible output, not restricted to text. |
+| `outputTruncated` | Optional boolean indicating native output truncation. Absence means unknown; `false` does not certify collector completeness. |
+| `structuredContent` | Optional separately supplied JSON-compatible tool result, retained alongside `output` without flattening nested fields or replacing explicit empty or falsy values. |
 | `durationMs` | Source-dependent finite nonnegative duration in milliseconds, including zero. |
 | `error` | Optional native error string, object, or other supported error value. |
 | `result` | Optional native result value, including Copilot `result.content` arrays or JSON content blocks. |
 
 `output` and `result` can coexist. A reader uses an explicitly present `output` for the primary output view, otherwise the native `result`; neither is destroyed. Source-specific result envelopes remain available to readers.
+
+The full unified artifact retains `structuredContent` independently of the primary
+output view, including shell `stdout`, `stderr`, and `exit_code` fields. It uses
+the same registered-secret redaction as other tool payloads. This does not retain
+duplicated provider envelopes or change the compact MCP RPC projection.
 
 **T-UAS-014 — Explicit failures.** A mapping MUST represent an explicit failed status, error outcome, `is_error: true`, `isError: true`, or nonzero command exit code as a failure. Absence of an error is not, by itself, evidence of completion or success. A source protocol's documented successful completion or default non-error tool-result semantics MAY establish `success: true`; a start alone MUST NOT. If preserved native signals conflict, readers MUST treat an explicit failure as controlling and retain the contradictory source evidence.
 
@@ -830,6 +860,7 @@ source for opaque fields.
 | `model.inventory` | AWF's runtime model list from `sandbox/firewall/models.json` and persisted `/reflect` inventory, selecting the first valid copy from `agent/awf-reflect.json`, then `sandbox/firewall/awf-reflect.json`. Agent and threat-detection inventories retain their source path and phase separately. Payloads contain provider names, AWF's endpoint `configured` state, full model ID lists, routing model IDs, supported endpoints, supported reasoning efforts, and context windows, and the observed `modelsFetchComplete` flag when supplied. Null or absent model and routing lists are unknown and omitted, never empty (T-UAS-075). Endpoint routing metadata takes precedence over the top-level fallback. Credentials, headers, URLs, and unrecognized fields are excluded. Missing inventory does not imply unavailable models; malformed sources emit collection warnings rather than empty inventory events. JSON parse failures produce one warning per source. |
 | `model_endpoint.mismatch` | A single harness JSON record from `agent/model-endpoint-mismatch.json`, with the model/API mismatch cause and corrective action. |
 | `model.resolution` | Runner-written records from `agent/model-resolution.json`, one per resolved role, with the engine, role, configured and resolved model, provider, status, and failure cause from the shared "resolve configured model" step (T-UAS-074). |
+| `durable.restore`, `durable.session` | Runner-written, metadata-only records from `agent/durable-session.jsonl` or its `usage/agent/` copy. Restoration records `restored`, `fresh`, or `failed` and available parent-run and artifact IDs. Native startup records `resumed` or `fresh` and the selected session ID only after the native session has opened or emitted activity. Both retain engine, artifact storage, run ID and attempt, and timestamp with `durable` component and `agent` phase provenance. Records from other runs or attempts are excluded; invalid metadata emits collection warnings. Historical content, credentials and unrecognized fields are excluded. Restoration alone does not prove native startup; missing records are unknown, not fresh sessions. Compact sessions preserve these fields within their existing limits. |
 | `guardrail.daily_aic` | Activation's daily AI Credits decision (`status`, `exceeded`, and available numeric `total`, `estimated`, `threshold`). Omitted when the guardrail has no decision; an existing event is not duplicated. |
 | `github_api.rate_limit` | Available GitHub API rate-limit JSONL observations retain the recorded source (`response_headers`, `rate_limit_api`, or `retry`), operation, resource, limit, remaining, used, reset, and retry state. `credentialSource` identifies a known GitHub Actions token, PAT, or app token where classified by the client; absent or unknown credential types are not inferred from quota values. Raw credentials and unrecognized fields are excluded. The collector prefers `github_rate_limits.jsonl` over its `usage/` copy to avoid duplicate observations. |
 | `plugin.installation` | Successful plugin installations retain the pinned `plugin` reference, `repository`, `ref`, local checkout `path`, and `status: "installed"`, with the installation timestamp. CLI and directory-based engines record success after installation or staging; Claude records the checked-out directory made available through `--plugin-dir`, and Codex records success after marketplace registration and plugin installation. The collector prefers `plugin-installations.jsonl` over its `usage/` copy. Credentials and unrecognized fields are excluded; absent evidence does not imply an installation. |
@@ -867,7 +898,7 @@ duration collection itself requires only read access.
 
 **T-UAS-072 — Skill evidence and conflicts.** When an activation skill inventory
 is present, the merger MUST include its deterministic installed-skill names,
-relative sources, installation scopes, content digests, and declared purposes
+relative sources, installation scopes, and content digests
 with activation provenance. It MUST report exact-name collisions and conflicting
 scopes without treating similar names as failures. It MUST NOT include skill
 contents in these observations. Engine usage MUST be attributed only to explicit
@@ -1049,8 +1080,9 @@ selected `aw_info.json` copy) as exactly one `model.config` event per run, with
 
 | Field | Writer and provenance | Meaning |
 | --- | --- | --- |
-| `routing.enabled` | Compiler → runner | Whether `engine.model-routing` is configured. `false` is an explicit unrouted run. |
+| `routing.enabled` | Compiler → runner | Whether model routing is configured (`engine.model-routing`, a router model value, or the implicit default). `false` is an explicit unrouted run. |
 | `routing.goal`, `routing.mode` | Compiler → runner | Configured routing objective and mode. Never the router's per-run classification (`workflow.info.modelRouting.mode`). |
+| `routing.requested` | Compiler → runner | Router value the workflow set as its model: `router`, `router/economy`, `router/balanced`, or `router/robust`. Absent when routing comes from `engine.model-routing` or the implicit default. |
 | `routing.provider` | Compiler → runner | Native routing provider sent to AWF as `apiProxy.routing.provider`: `anthropic` (Claude) or `openai` (Codex). Absent for GitHub Copilot routing. |
 | `routing.allowedModels` | Compiler → runner | Configured routing candidates as authored (exact ids or gh-aw aliases) without the routing provider prefix; absent when unset or expression-valued. |
 | `routing.candidateModels` | Compiler → runner | Effective router pool sent to AWF (`routing.candidateModels`, or the allow list on AWF without it): `github-copilot/` ids and patterns for Copilot routing, or bare ids and patterns of the native `routing.provider`, with aliases expanded and narrowed by `models.allowed` and `models.blocked`, or the Claude/Codex family default. Absent when the router has no shortlist or a candidate is expression-valued. |
@@ -1340,6 +1372,21 @@ In particular, Gemini `stats.tool_calls` is not a turn count. Codex completed tu
 
 ### 6.4 Retry attempts
 
+`skip-if-decision` evaluations are collected as `harness.decision` events with
+`provenance.component: harness` and `provenance.phase: agent`. They retain
+`proposedAttempt`, optional `startupAttemptId`, `outcome`, one-based question
+indices and their outcomes/errors, `latencyMs`, `timestamp`, and
+`avoidedInvocation`. Outcomes are `allow`, `deny`, or `unknown`; any `deny`
+dominates the aggregate, otherwise any `allow` dominates `unknown`. Errors are
+bounded identifiers, never provider messages or file contents. The harness
+retry artifact also retains `decisionResults`; summary copies and individual
+events describe the same evaluations and must not be counted twice.
+
+A denied proposed invocation does not produce a `harness.attempt` and does not
+increment process attempts or retries. Decision failures abstain without a
+decision retry. Proxy usage remains authoritative, including decision requests;
+a skipped agent process is not evidence of zero total model usage.
+
 **T-UAS-087 — Observed attempts.** Collection MUST emit one `harness.attempt`
 observation for each validated entry in `harness_retry.json`, including an entry
 whose `exitCode` is `null`. The existing `harness.retry` summary remains available
@@ -1354,7 +1401,7 @@ be replaced with attempts inferred from messages, session IDs, or continuations.
 | `attemptId` | Bounded local correlation key, scoped by run, phase, layer, and source invocation; not a native session ID. |
 | `startupAttemptId` | Optional enclosing startup invocation for a harness attempt. |
 | `exitCode` | Observed process status, or `null` when completion was not observed. |
-| `failureClasses` | Existing allowlisted failure identifiers; never raw exception text. |
+| `failureClasses` | Existing allowlisted failure identifiers, including `rate_limit_wait_exceeded`; never raw exception text. |
 | `startedAt`, `finishedAt` | Optional observed Unix milliseconds; missing completion MUST NOT acquire an invented end time. |
 | `strategy` | Optional observed `restart` or `resume`; a resume retry is not a new task continuation. |
 | `backoffMs` | Optional delay before this attempt; not a usage measurement. |
@@ -1415,6 +1462,17 @@ Telemetry failures MUST NOT change retry decisions. Existing mask collection,
 redaction, symlink rejection, protected-session capture, and trusted execution
 evidence boundaries MUST remain in effect. Compact sessions MAY retain the
 bounded attempt fields but remain subject to their existing loss budgets.
+
+**T-UAS-090 — Copilot terminal rate-limit waits.** When the Copilot harness
+observes terminal HTTP 429 evidence, it MUST inspect `Retry-After` only from
+`error`, `session.error`, or `turn.failed` events and from stderr. Assistant and
+tool events MUST NOT be used as `Retry-After` evidence. A valid numeric-seconds
+value or a valid non-expired HTTP-date value MUST determine the requested wait
+duration. The harness MUST wait for that duration unless it exceeds the
+configured `max-delay-ms` limit or the remaining soft-timeout budget, including
+the shutdown buffer. In either exceeded case, the attempt MUST terminate with
+the allowlisted failure identifier `rate_limit_wait_exceeded`. Missing, invalid,
+or expired `Retry-After` values MUST preserve the existing retry behavior.
 
 The deterministic conformance suite is
 `actions/setup/js/harness_retry_session.test.cjs`, together with the harness,
@@ -1700,6 +1758,12 @@ run metadata identifies Pi; it does not rewrite stored Actions artifacts.
 
 The adapter can discover a reported model from a finalized turn without inventing an earlier model observation. When Pi reports `responseModel`, canonical message and error observations use that served model; the canonical trace retains the requested `model` and native thinking levels as message metadata. Child request observations also preserve reported reasoning-output tokens without adding them to parent usage. Presentation aliases such as `bash` → `Bash` do not change canonical tool names. Sources lacking duration or cost do not supply zero duration or zero cost.
 
+Pi message clocks survive reconciliation of `message_end`, `turn_end` and
+`agent_end` snapshots onto streamed text, reasoning and tool calls. Supplied
+tool `messageId` and `model` survive the unified projection; the full
+`messageMetadata` envelope remains archival. These fields identify a message
+and its model, not additional inference or usage observations.
+
 ### 7.6 Custom engines
 
 **T-UAS-041 — Custom format detection.** The custom adapter MUST select a delegate from actual supported input signatures. Parseable JSON alone, any dot-containing type alone, a nonempty markdown result, or a delegate's fabricated initialization MUST NOT establish detection. Existing Claude-compatible and Codex fallback support MUST remain available for unprotected ingestion, and native canonical events MUST remain supported.
@@ -1732,6 +1796,11 @@ in the [custom engine reference](/gh-aw/reference/third-party-agent/#protected-s
 It requires a definition-owned `behaviors.log-parser`; the generic format
 detection and tolerant recovery rules do not authorize fallback after protected
 recorder verification fails.
+
+Nonempty `skip-if-decision` lists are rejected for this profile. The outer
+decision harness would retain the recorder's capture descriptor across the
+exec-only boundary, and a denied invocation cannot supply a verified structured
+session. Absent or empty lists preserve protected execution and ingestion.
 
 **T-UAS-084 — Native source and collection completeness.** Protected ingestion
 MUST use AWF-native host-only command output and validate its metadata, private
@@ -1803,10 +1872,24 @@ assistant messages. The custom adapter also recognizes this signature.
 | Native logfmt `message="server unavailable"` with a failed MCP server, or harness `opencode.mcp_failure` | Report the observed server name in `mcpFailures`; preserve harness events without interpreting arbitrary prose as failure evidence. |
 
 OpenCode envelope timestamps use milliseconds and remain unchanged, including
-when a completed tool part expands into invocation and result events. Duplicate
+when a completed tool part expands into invocation and result events. The native
+`sessionID` scopes core events through canonical `data.sessionId`. Tool metadata
+projects only the observed boolean `truncated` into `outputTruncated` (nested
+under `metadata.metadata` for v2); provider envelopes remain in the native and
+parser artifacts, not the unified projection. Duplicate
 parts are identified within their session, not globally. Cache-read and
 cache-write tokens are separate from the reported input count; reasoning tokens
 are an output subset, not an additional contribution to total tokens.
+Exported accounting revisions remain after the original observations in source
+order, even when their timestamps regress. Usage is reconciled by session and
+message identity; repeated step observations and shared source IDs are not
+additional turns or globally unique event IDs.
+When recognized native records span multiple sessions, the appended aggregate
+`session.result` sets `data.sessionId: null`, overriding session aliases from its
+last source record rather than attributing combined usage, cost, turns, or errors
+to that session. The source envelope and payload additions remain in the parser
+artifact; individual observations retain their session scope, and single-session
+results remain scoped as before.
 Synthetic coverage lives in `parse_opencode_log.test.cjs` and
 `opencode_workflow.test.cjs`; it is not evidence of a live smoke run.
 
@@ -2628,6 +2711,18 @@ Malformed logs and very large records can exhaust memory or produce misleading s
 Native IDs can collide, timestamps can be out of order, and a trace can contain ambiguous concurrent calls. Exact-ID pairing avoids attributing a failure or output to the wrong tool. Cross-session concatenation requires an external boundary policy; this specification does not invent a wrapper or fabricated session IDs to resolve such ambiguity.
 
 ## 13. Change Log (Informative)
+
+### Version 2.9.0 - Draft (2026-11-11)
+
+- Added Copilot terminal HTTP 429 `Retry-After` handling to Section 6.4 and requirement T-UAS-090.
+- Defined accepted numeric-seconds and non-expired HTTP-date values, restricted evidence sources, bounded waiting, soft-timeout/shutdown-buffer enforcement, and the `rate_limit_wait_exceeded` allowlisted failure identifier.
+- Retained serialization-format version 1.
+
+### Version 2.8.0 - Draft (2026-11-09)
+
+- Retained valid observed Pi message clocks across native and saved canonical traces, with explicit source-clock precedence and shared ordering validation (T-UAS-056).
+- Preserved tool/message/model correlation and supplied structured tool content in the essential unified projection while keeping native envelopes archival.
+- Retained serialization-format version 1.
 
 ### Version 2.7.0 - Draft (2026-10-30)
 

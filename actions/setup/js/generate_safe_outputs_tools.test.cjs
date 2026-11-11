@@ -114,6 +114,40 @@ describe("generate_safe_outputs_tools", () => {
     expect(result.map((/** @type {{name: string}} */ t) => t.name)).not.toContain("report_missing_tool");
   });
 
+  it.skipIf(process.platform !== "linux").each([false, true])("keeps generated files owner-only, including existing files: %s", existing => {
+    const validationPath = path.join(testDir, "validation.json");
+    fs.writeFileSync(configPath, JSON.stringify({ create_issue: {} }), { mode: 0o600 });
+    for (const file of [toolsMetaPath, validationPath, outputPath]) {
+      if (existing) {
+        fs.writeFileSync(file, "old");
+        fs.chmodSync(file, 0o666);
+      }
+    }
+
+    runScript({
+      GH_AW_TOOLS_META_JSON: "{}",
+      GH_AW_VALIDATION_JSON: "{}",
+    });
+
+    for (const file of [configPath, toolsMetaPath, validationPath, outputPath]) {
+      const stat = fs.statSync(file);
+      expect(stat.mode & 0o777).toBe(0o600);
+      expect(stat.uid).toBe(process.geteuid());
+      expect(stat.gid).toBe(process.getegid());
+    }
+    expect(JSON.parse(fs.readFileSync(outputPath, "utf8"))[0].name).toBe("create_issue");
+  });
+
+  it.skipIf(process.platform !== "linux")("rejects a symlinked tools output without modifying its target", () => {
+    fs.writeFileSync(configPath, JSON.stringify({ create_issue: {} }), { mode: 0o600 });
+    const target = path.join(testDir, "private.json");
+    fs.writeFileSync(target, "unchanged", { mode: 0o600 });
+    fs.symlinkSync(target, outputPath);
+
+    expect(() => runScript()).toThrow();
+    expect(fs.readFileSync(target, "utf8")).toBe("unchanged");
+  });
+
   it.each([
     ["missing_tool", "missing_data"],
     ["missing-tool", "missing-data"],
@@ -229,7 +263,7 @@ describe("generate_safe_outputs_tools", () => {
     for (const keyword of ["anyOf", "oneOf", "allOf"]) {
       expect(tool.inputSchema).not.toHaveProperty(keyword);
     }
-    expect(tool.description).toContain("REQUIRED: Provide at least one of: status, title, body, labels, assignees, or milestone.");
+    expect(tool.description).toContain("REQUIRED: Provide at least one of: status, title, body, labels, assignees, milestone, or artifacts.");
     expect(tool.inputSchema.properties.milestone.type).toEqual(["number", "string", "null"]);
     expect(tool.inputSchema.properties.milestone.description).toContain("Use null to clear.");
   });
@@ -353,20 +387,20 @@ describe("generate_safe_outputs_tools", () => {
       JSON.stringify([
         ...sampleSourceTools,
         {
-          name: "ado_create_work_item",
-          description: "Creates an Azure DevOps work item.",
+          name: "external_create_record",
+          description: "Creates a provider-neutral external record.",
           inputSchema: { type: "object", properties: {} },
         },
       ])
     );
-    fs.writeFileSync(configPath, JSON.stringify({ ado_create_work_item: { max: 1 } }));
+    fs.writeFileSync(configPath, JSON.stringify({ external_create_record: { max: 1 } }));
     fs.writeFileSync(toolsMetaPath, JSON.stringify({ description_suffixes: {}, repo_params: {}, dynamic_tools: [] }));
 
     runScript();
 
     const result = JSON.parse(fs.readFileSync(outputPath, "utf8"));
     expect(result).toHaveLength(1);
-    expect(result[0].name).toBe("ado_create_work_item");
+    expect(result[0].name).toBe("external_create_record");
   });
 
   it("applies description suffix from tools_meta", () => {

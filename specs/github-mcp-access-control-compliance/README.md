@@ -3,19 +3,19 @@
 This directory contains fixture stubs for the Section 11 compliance tests of the
 [GitHub MCP Access Control Specification](../../scratchpad/github-mcp-access-control-specification.md).
 
-**Spec version pinned at commit `36dc9545032b6ac02ed719c725b88368d7e34d23`.**
+**Spec version pinned at commit `e5113cd9c697c9443ed269ba3b83e457765da1df`.**
 
 ## Sync Guard: pinned spec drift check
 
-**This is a manual/local-only check.** No `.github/workflows/` CI workflow currently invokes this
-script; it is a doc-review guard intended to be run locally (or added to CI) before merging changes
-that touch the pinned specification file.
+CI runs the pinned-commit comparison in `.github/workflows/ci.yml` whenever this README or the
+pinned specification changes. Update the pin in this README in the same change as any intentional
+specification update, and update the matching pin in `.github/workflows/ci.yml`.
 
-As a doc-review/CI guard, compare the pinned commit to the current tip commit of
-`scratchpad/github-mcp-access-control-specification.md` and fail on mismatch:
+CI fetches the full history so the comparison uses the latest commit that changed
+`scratchpad/github-mcp-access-control-specification.md` and fails when it differs from the pin:
 
 ```bash
-PINNED="36dc9545032b6ac02ed719c725b88368d7e34d23"
+PINNED="e5113cd9c697c9443ed269ba3b83e457765da1df"
 CURRENT="$(git log -n1 --format=%H -- scratchpad/github-mcp-access-control-specification.md)"
 
 test "$CURRENT" = "$PINNED" || {
@@ -64,6 +64,15 @@ Where:
 - `P6_IntegrityMet`: integrity ordering is enforced as `none < unapproved < approved < merged`
 
 The denial code is selected by the first failing guard in the evaluation order above.
+
+## Local implementation status
+
+The local `pkg/workflow/` compiler has no `tools.github.roles` or
+`private-repos` fields. These controls remain normative in the specification but
+are deferred locally, so the abstract `P3_RoleAllow` and `P4_PrivateRepoAllow`
+fixtures test the specification model only and do not establish local Complete
+Conformance. The status was verified on 2026-11-10 in Section 4.8 of the
+[specification](../../scratchpad/github-mcp-access-control-specification.md).
 
 ## Behavioral Coverage Map
 

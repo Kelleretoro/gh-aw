@@ -116,6 +116,25 @@ export interface PluginInstallationData {
   status: "installed";
 }
 
+/** Runner-observed durable state; restoration is distinct from native startup. */
+export interface DurableSessionMetadata {
+  engine: string;
+  storage: "artifact";
+  runId: string;
+  runAttempt: string;
+  parentRunId?: string;
+}
+
+export interface DurableRestoreData extends DurableSessionMetadata {
+  status: "restored" | "fresh" | "failed";
+  artifactId?: string;
+}
+
+export interface DurableStartupData extends DurableSessionMetadata {
+  status: "resumed" | "fresh";
+  sessionId: string;
+}
+
 /** AWF API proxy steering event-log observation. */
 export interface FirewallSteeringData extends RuntimeObservationData {
   threshold?: JsonValue;
@@ -202,6 +221,8 @@ export interface ModelConfigData {
     enabled: boolean;
     goal?: string;
     mode?: string;
+    /** Router value the workflow set as its model (for example `router/economy`); absent when routing comes from `engine.model-routing` or the implicit default. */
+    requested?: "router" | "router/economy" | "router/balanced" | "router/robust";
     /** Native routing provider (`anthropic` or `openai`) sent to AWF as `apiProxy.routing.provider`; absent for GitHub Copilot routing. */
     provider?: "anthropic" | "openai";
     /** Configured routing candidates as authored (exact ids or gh-aw aliases) without provider prefix; absent means the router default or unknown. */
@@ -506,6 +527,7 @@ export type HarnessFailureClass =
   | "copilot_model_verification"
   | "overloaded_error"
   | "rate_limit_error"
+  | "rate_limit_wait_exceeded"
   | "max_turns"
   | "no_deferred_marker"
   | "invalid_model"
@@ -548,12 +570,37 @@ export interface HarnessAttemptData extends HarnessRetryAttemptData {
   layer: "harness" | "startup";
 }
 
+export type HarnessDecisionOutcome = "allow" | "deny" | "unknown";
+export type HarnessDecisionError =
+  "invalid_configuration" | "sandbox_unavailable" | "proxy_unavailable" | "invalid_proxy_endpoint" | "model_unavailable" | "timeout" | "evaluation_failed" | "file_reference_failed" | "sensitive_content_blocked";
+
+/** Advisory decision preceding a proposed invocation, not authorization or an agent attempt. */
+export interface HarnessDecisionData {
+  /** @asType integer @minimum 1 @maximum 101 */
+  proposedAttempt: number;
+  /** @pattern ^startup:[1-9][0-9]{0,2}$ */
+  startupAttemptId?: string;
+  outcome: HarnessDecisionOutcome;
+  /** @maxItems 400 */
+  questions: {
+    /** One-based index in workflow skip-if-decision. @asType integer @minimum 1 @maximum 400 */
+    question: number;
+    outcome: HarnessDecisionOutcome;
+    error?: HarnessDecisionError;
+  }[];
+  latencyMs: SessionCount;
+  timestamp: SessionCount;
+  error?: HarnessDecisionError;
+  avoidedInvocation: boolean;
+}
+
 export interface HarnessRetryData {
   /** @asType integer @minimum 0 @maximum 101 */
   attempts: number;
   exitCode: HarnessRetryExitCode | null;
   attemptResults: HarnessRetryAttemptData[];
   startupAttemptResults?: HarnessRetryAttemptData[];
+  decisionResults?: HarnessDecisionData[];
 }
 
 /** Conclusion's dependency snapshot, not the still-running conclusion job. */
@@ -594,7 +641,7 @@ export interface AdmissionDecisionData {
 }
 
 export interface DailyAICDecisionData {
-  status: "disabled" | "skipped" | "under_budget" | "exceeded" | "structural_error" | "transient_error";
+  status: "disabled" | "skipped" | "under_budget" | "exceeded" | "structural_error" | "transient_error" | "quota_blocked";
   exceeded?: boolean;
   total?: number;
   estimated?: number;
@@ -717,6 +764,8 @@ export interface CollectionData {
 
 /** Known essential payloads. Unknown native extensions remain open. */
 export interface UnifiedSessionEventDataMap {
+  "durable.restore": DurableRestoreData;
+  "durable.session": DurableStartupData;
   "workflow.job_result": WorkflowJobResultData;
   "memory.push": MemorySaveResultData;
   "model.inventory": ModelInventoryData;
@@ -728,8 +777,8 @@ export interface UnifiedSessionEventDataMap {
   "skill.context_delivered_ref": { interactionId?: JsonValue; source?: JsonValue; contentId?: JsonValue };
   "session.format": SessionFileFormatData;
   "agent.execution": AgentExecutionData;
-  "session.init": Pick<SessionInitData, "sourceEngine" | "model" | "sessionId" | "cwd" | "reasoningEffort"> & UnifiedSessionContextData;
-  "session.start": Pick<SessionInitData, "sourceEngine" | "model" | "sessionId" | "cwd" | "reasoningEffort"> & UnifiedSessionContextData;
+  "session.init": Pick<SessionInitData, "sourceEngine" | "agentVersion" | "provider" | "model" | "sessionId" | "cwd" | "reasoningEffort"> & UnifiedSessionContextData;
+  "session.start": Pick<SessionInitData, "sourceEngine" | "agentVersion" | "provider" | "model" | "sessionId" | "cwd" | "reasoningEffort"> & UnifiedSessionContextData;
   "session.error": {
     error?: JsonValue;
     message?: JsonValue;
@@ -788,26 +837,46 @@ export interface UnifiedSessionEventDataMap {
     /** Observed native usage, not an additive accounting contribution. */
     usageSnapshot?: JsonValue;
   };
-  "tool.execution_start": Pick<ToolExecutionStartData, "toolCallId" | "stepIndex" | "toolName" | "input" | "inputTruncated" | "command" | "mcpServerName"> & UnifiedSessionContextData;
-  "tool.execution_update": Pick<ToolExecutionStartData, "toolCallId" | "stepIndex" | "toolName" | "input" | "mcpServerName"> & {
-    output?: JsonValue;
-    partial?: JsonValue;
-    delta?: JsonValue;
-    contentIndex?: JsonValue;
-    sourceType?: JsonValue;
-    /** Repeated observed metadata, never additive inference usage. */
-    usageSnapshot?: JsonValue;
-    durationMs?: JsonValue;
-    status?: JsonValue;
-    command?: JsonValue;
-    taskId?: string;
-    taskType?: string;
-    error?: JsonValue;
-  } & UnifiedSessionContextData;
+  "tool.execution_start": Pick<ToolExecutionStartData, "toolCallId" | "stepIndex" | "toolName" | "input" | "inputTruncated" | "command" | "mcpServerName"> & Pick<UnifiedMessageData, "messageId" | "model"> & UnifiedSessionContextData;
+  "tool.execution_update": Pick<ToolExecutionStartData, "toolCallId" | "stepIndex" | "toolName" | "input" | "mcpServerName"> &
+    Pick<UnifiedMessageData, "messageId" | "model"> & {
+      output?: JsonValue;
+      partial?: JsonValue;
+      delta?: JsonValue;
+      contentIndex?: JsonValue;
+      sourceType?: JsonValue;
+      /** Repeated observed metadata, never additive inference usage. */
+      usageSnapshot?: JsonValue;
+      durationMs?: JsonValue;
+      status?: JsonValue;
+      command?: JsonValue;
+      taskId?: string;
+      taskType?: string;
+      error?: JsonValue;
+    } & UnifiedSessionContextData;
   "tool.execution_complete": Pick<
     ToolExecutionCompleteData,
-    "toolCallId" | "stepIndex" | "toolName" | "success" | "output" | "result" | "error" | "fileEdits" | "durationMs" | "exitCode" | "status" | "mcpServerName" | "isError" | "taskId" | "taskType" | "workflowName" | "workflowRunId"
+    | "toolCallId"
+    | "stepIndex"
+    | "toolName"
+    | "success"
+    | "output"
+    | "outputTruncated"
+    | "structuredContent"
+    | "result"
+    | "error"
+    | "fileEdits"
+    | "durationMs"
+    | "exitCode"
+    | "status"
+    | "mcpServerName"
+    | "isError"
+    | "taskId"
+    | "taskType"
+    | "workflowName"
+    | "workflowRunId"
   > &
+    Pick<UnifiedMessageData, "messageId" | "model"> &
     UnifiedSessionContextData;
   "dynamicWorkflows.task_started": DynamicWorkflowObservationData;
   "dynamicWorkflows.task_progress": DynamicWorkflowObservationData;
@@ -845,6 +914,7 @@ export interface UnifiedSessionEventDataMap {
   "execution.result": ExecutionResultData;
   "harness.retry": HarnessRetryData;
   "harness.attempt": HarnessAttemptData;
+  "harness.decision": HarnessDecisionData;
   "detection.result": DetectionResultData;
   "guardrail.admission": AdmissionDecisionData;
   "guardrail.daily_aic": DailyAICDecisionData;

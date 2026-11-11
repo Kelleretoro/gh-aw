@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,27 +29,6 @@ func nativeRoutedWorkflowSource(engine, provider, allowedModels, engineExtra, fr
 	source.WriteString(frontmatter)
 	source.WriteString("---\nReport a finding.\n")
 	return source.String()
-}
-
-// agentExecutionEnv returns the env of the agent job's AWF execution step.
-func agentExecutionEnv(t *testing.T, lock string) map[string]string {
-	t.Helper()
-	var workflow struct {
-		Jobs map[string]struct {
-			Steps []struct {
-				Run string            `yaml:"run"`
-				Env map[string]string `yaml:"env"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
-	}
-	require.NoError(t, yaml.Unmarshal([]byte(lock), &workflow))
-	for _, step := range workflow.Jobs["agent"].Steps {
-		if strings.Contains(step.Run, `awf --config "${RUNNER_TEMP}/gh-aw/awf-config.json"`) {
-			return step.Env
-		}
-	}
-	t.Fatal("agent job has no AWF execution step")
-	return nil
 }
 
 func TestModelRoutingClaudeNativeProviderCompile(t *testing.T) {
@@ -332,6 +310,21 @@ func TestModelRoutingCopilotLocksUnchanged(t *testing.T) {
 		}
 	}
 	require.NotZero(t, routed, "no compiled lock has apiProxy.routing")
+
+	for name, provider := range map[string]string{
+		"daily-cli-tools-tester.lock.yml":     "",
+		"schema-consistency-checker.lock.yml": "",
+		"daily-spending-forecast.lock.yml":    "",
+		"issue-triage-agent.lock.yml":         "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			content, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", name))
+			require.NoError(t, err)
+			match := routedLockRoutingPattern.FindStringSubmatch(string(content))
+			require.NotNil(t, match, "%s lost model routing", name)
+			require.Equal(t, provider, match[2], "%s routing provider", name)
+		})
+	}
 }
 
 // TestNativeRoutingSmokeEvidence checks that the native routed smokes compile to native

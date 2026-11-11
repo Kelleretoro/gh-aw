@@ -423,6 +423,7 @@ func (e *CopilotEngine) buildCopilotSDKExecPrefix(workflowData *WorkflowData, co
 
 func (e *CopilotEngine) buildCopilotCommand(workflowData *WorkflowData, copilotArgs []string, execPrefix, customCommandScriptSetup, logFile, mkdirCommands string, isBYOKMode bool) (string, string) {
 	copilotCommand, copilotSDKServerArgsJSON := e.buildCopilotBaseCommand(workflowData, copilotArgs, execPrefix)
+	copilotCommand = wrapCustomHarnessDecisionCommand(workflowData, e.GetID(), e.GetHarnessScriptName(), copilotCommand)
 	if isFirewallEnabled(workflowData) {
 		return e.buildCopilotFirewallCommand(workflowData, copilotCommand, customCommandScriptSetup, isBYOKMode, logFile), copilotSDKServerArgsJSON
 	}
@@ -625,9 +626,7 @@ func (e *CopilotEngine) addCopilotWorkflowStepEnv(env map[string]string, workflo
 	}
 	// Always add GH_AW_PROMPT for agentic workflows
 	env["GH_AW_PROMPT"] = constants.AwPromptsFile
-	if workflowData.EngineConfig != nil && workflowData.EngineConfig.ModelRouting != nil {
-		env["GH_AW_MODEL_ROUTING"] = "1"
-	}
+	applyModelRoutingEnv(env, workflowData)
 	applyModelAliasesEnv(env, workflowData)
 	// Tag the step as a GitHub AW agentic execution for discoverability by agents
 	env["GITHUB_AW"] = "true"
@@ -673,7 +672,7 @@ func (e *CopilotEngine) addCopilotGitHubToolEnv(env map[string]string, workflowD
 }
 
 func (e *CopilotEngine) addCopilotModelEnv(env map[string]string, workflowData *WorkflowData, modelConfigured bool, modelEnvVar string) {
-	if workflowData.EngineConfig != nil && workflowData.EngineConfig.ModelRouting != nil {
+	if isModelRoutingUnconditional(workflowData) {
 		return
 	}
 	// Set the model environment variable.
@@ -688,6 +687,7 @@ func (e *CopilotEngine) addCopilotModelEnv(env map[string]string, workflowData *
 		return
 	}
 	env[constants.CopilotCLIModelEnvVar] = compilerenv.BuildModelOverrideExpression(modelEnvVar, compilerenv.DefaultModelCopilot, constants.CopilotBYOKDefaultModel)
+	guardImplicitRoutingModelEnv(env, workflowData, constants.CopilotCLIModelEnvVar)
 }
 
 func (e *CopilotEngine) addCopilotFinalStepEnv(env map[string]string, workflowData *WorkflowData) {
@@ -738,8 +738,9 @@ func (e *CopilotEngine) buildCopilotExecutionStep(workflowData *WorkflowData, co
 	// Add tool arguments comment before the run section
 	toolArgsComment := e.generateCopilotToolArgumentsComment(workflowData.Tools, workflowData.SafeOutputs, workflowData.MCPScripts, workflowData, "        ")
 	if toolArgsComment != "" {
-		commentLines := strings.Split(strings.TrimSuffix(toolArgsComment, "\n"), "\n")
-		stepLines = append(stepLines, commentLines...)
+		for line := range strings.SplitSeq(strings.TrimSuffix(toolArgsComment, "\n"), "\n") {
+			stepLines = append(stepLines, strings.TrimSuffix(line, "\r"))
+		}
 	}
 	stepLines = append(stepLines, "        timeout-minutes: "+timeoutValue)
 	// Filter environment variables to only include allowed secrets

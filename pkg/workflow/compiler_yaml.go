@@ -80,7 +80,7 @@ func (c *Compiler) buildJobsAndValidate(data *WorkflowData, markdownPath string)
 // permissions, concurrency, run-name, environment variables, cache comments, and jobs.
 func (c *Compiler) generateWorkflowBody(yaml *strings.Builder, data *WorkflowData) {
 	// Write basic workflow structure
-	fmt.Fprintf(yaml, "name: \"%s\"\n", data.Name) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
+	fmt.Fprintf(yaml, "name: %q\n", data.Name) //nolint:fprintferrorunchecked // strings.Builder writes cannot fail.
 
 	// Inject on.workflow_call.outputs when workflow_call is configured and safe-outputs are present
 	onSection := data.On
@@ -307,6 +307,12 @@ func (c *Compiler) generateYAML(data *WorkflowData, markdownPath string) (string
 	yamlContent, err = finalizeRunnerTempSafety(yamlContent)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("runner temp safety rewriting could not complete; ensure generated run/script steps are valid shell or JavaScript commands: %w", err)
+	}
+	documentedYAML, err := documentPermissionComments(yamlContent, data.FrontmatterYAML)
+	if err != nil {
+		compilerYamlLog.Printf("Could not document permission comments for workflow %s: %v", data.Name, err)
+	} else {
+		yamlContent = documentedYAML
 	}
 
 	// Normalize assembled YAML whitespace. This clears indentation-only blank lines

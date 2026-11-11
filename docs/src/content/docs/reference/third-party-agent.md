@@ -47,6 +47,7 @@ These definitions are examples for integration authors, **not supported gh-aw en
 | [Factory Droid](https://factory.com/product/cli) | [factory.md](https://github.com/github/gh-aw/blob/main/.github/workflows/shared/factory.md) |
 | [Goose](https://github.com/aaif-goose/goose) | [goose.md](https://github.com/github/gh-aw/blob/main/.github/workflows/shared/goose.md) |
 | [Kiro](https://kiro.dev/) | [kiro.md](https://github.com/github/gh-aw/blob/main/.github/workflows/shared/kiro.md) |
+| [mini-SWE-agent](https://github.com/SWE-agent/mini-swe-agent) | [mini-swe-agent.md](https://github.com/github/gh-aw/blob/main/.github/workflows/shared/mini-swe-agent.md) |
 | [Pydantic AI](https://ai.pydantic.dev/) | [Publisher definition](https://github.com/pydantic/pydantic-ai/blob/main/src/pydantic_ai_harness/gh-aw/pydantic.md) |
 
 ### Sample-specific constraints
@@ -59,8 +60,22 @@ These definitions are examples for integration authors, **not supported gh-aw en
 | Factory Droid | Pins `@factory/cli` 0.248.0 with lifecycle scripts disabled. Uses custom models through the AWF API proxy with placeholder credentials; real provider and Factory keys are excluded from the agent. Supports Copilot, Anthropic, and OpenAI inference, file-based prompts, high autonomy inside the sandbox, and native HTTP MCP. Native MCP retains the gateway session authorization in agent-readable `.factory/mcp.json`; this is not an upstream provider credential or a security boundary against the agent (see [gateway authentication](/gh-aw/reference/mcp-gateway/#71-authorization-header-format)). Removing it prevents authenticated MCP calls. No Factory API key is required. Factory-managed inference, direct-key execution, structured session parsing, gh-aw tool allowlists, max-turn enforcement, and Agent Plugins are unsupported. |
 | Goose | Pins CLI v1.53.0 with archive checksum verification. Uses OpenAI-compatible inference, native authenticated MCP, file-based prompts, and JSONL tool/usage events. Configuration/session state is temporary; keyring is disabled. No native gh-aw `web-fetch`; use MCP or shell. Copilot can use `copilot-requests: write` without a PAT. |
 | Kiro | Sample pins CLI 2.31.1 with the V2 harness; Powers plugins are not supported. |
+| mini-SWE-agent | Pins PyPI 2.4.6 on Python 3.12. Uses the non-interactive Python API, text-based shell actions, file-based prompts, and AWF-only Copilot, OpenAI/Codex, or Anthropic inference. Native task submission is required for success; `max-turns` limits model calls. Tools use CLI proxies, not native MCP. The untrusted native trajectory is retained in the unified agent artifact only after secret redaction and recovery-envelope validation, including failed executions. No native shell allowlists, edit disabling, Agent Plugins, repository mini configuration, or structured session parser. |
 
 Read the pinned definition for its exact install and provider contract. Native events and accounting are retained only when observed; process exit zero alone does not prove task completion.
+
+### mini-SWE-agent package access
+
+The mini-SWE sample downloads hash-locked binary wheels in trusted `pre-agent-steps`,
+before AWF starts. Agent-time installation is isolated and offline; pip verifies
+the same hashes again. No dependencies are installed into the host user site.
+
+The shared import also declares `runtimes.python`, which explicitly grants the
+agent Python ecosystem access, including `pypi.org` and `files.pythonhosted.org`.
+Engine defaults do not grant this access. For registry-free execution, vendor
+the definition without `runtimes`, retain its bootstrap steps, and provide Python
+3.12 on a Linux x86-64 runner independently. Callers can opt back in with
+`network.allowed: [python]` or `runtimes.python`.
 
 ## Defining an engine
 
@@ -69,6 +84,21 @@ A definition contains `engine.id`, metadata, and `engine.behaviors`. Its behavio
 Start from a sample with a matching transport rather than copying installation or configuration code into every workflow. Publish the definition with versioned changes and document its credentials, models, tool restrictions, supported platforms, and [unified session](/gh-aw/specs/unified-agent-session-specification/) coverage.
 
 See [imports](/gh-aw/reference/imports/) for resolution and pinning rules.
+
+### Secret environment overrides
+
+An imported definition declares supported environment variable names in
+`engine.behaviors.supported-env-var-keys`. In strict mode, these names are
+allowed to carry secret references in the consuming workflow's `engine.env`.
+The compiler checks those overrides after resolving imports and registering
+the engine, so the imported definition's allowlist applies.
+
+This does not permit arbitrary secret-bearing variables: undeclared keys in
+`engine.env` remain subject to strict-mode validation, and secret references in
+top-level `env` are still rejected. In strict mode, secret overrides require
+AWF v0.25.3 or newer to exclude them from the agent container. See
+[workflow environment variables](/gh-aw/reference/frontmatter/#environment-variables-env)
+for the restrictions on top-level `env`.
 
 ### Durable execution
 
@@ -129,7 +159,7 @@ The harness also receives `GH_AW_DURABLE_STORAGE=artifact`,
 never credentials or runtime authentication. gh-aw restores and publishes the artifact and applies
 the configured retention period. The engine is responsible for checkpoint
 compatibility, replay safety, fresh credential binding, telemetry, and unified
-session events. See [Pi durable runs](/gh-aw/reference/engines/pi/#durable-runs)
+session events. See [Durable runs](/gh-aw/reference/engines/#durable-runs)
 for parent selection, retention, and continuation limitations.
 
 Artifact files include an integrity-checked UTF-8 projection so host secret

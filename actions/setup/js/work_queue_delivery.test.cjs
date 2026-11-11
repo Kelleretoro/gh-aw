@@ -38,38 +38,46 @@ describe("historical diagnostic delivery contracts", () => {
     expect(() => createClaimDeliveryVerifier({ assignment: assignment([]) })).toThrow("ERR_WORK_QUEUE_DELIVERY_READBACK_REQUIRED: Claim delivery verifier requires trusted independent readback");
   });
 
+  it("identifies undeclared output types in delivery diagnostics", async () => {
+    const original = assignment([{ type: "missing_tool", min: 1, max: 1 }]);
+    expect((await deliver(original, [{ type: "report_incomplete" }])).diagnostics).toEqual({ event: "delivery.contract.undeclared_output", types: ["report_incomplete"] });
+  });
+
   for (const legacy of ["missing_tool", "missing_data"]) {
     const canonical = `report_${legacy}`;
 
-    it(`matches ${legacy} contracts and messages canonically without rewriting immutable Work`, async () => {
-      for (const contractType of [legacy, canonical]) {
-        const original = assignment([
-          { type: "create_issue", min: 1, max: 1 },
-          { type: contractType, min: 1, max: 1 },
-        ]);
-        const before = JSON.stringify(original);
-        const beforeDigest = digest(original);
-        expect(validateDeliveryContract(original.claims[0].work.effect_contract)).toBe(original.claims[0].work.effect_contract);
-        for (const messageType of [legacy, canonical]) {
-          const messages = [Object.freeze({ type: "create_issue", repo: "owner/repo" }), Object.freeze({ type: messageType })];
-          const delivered = await deliver(original, messages, {
-            verifyOutput: verifyBuiltinDeliveryOutput,
-            github: {
-              rest: {
-                repos: { get: async () => ({ data: { id: 7, full_name: "owner/repo" } }) },
-                issues: { get: async () => ({ data: { id: 142, number: 42, html_url: "https://github.com/owner/repo/issues/42" } }) },
+    it.each([{}, { output_id: "so_xbzi2dhGSY-3" }, { "depends-on": "so_priorOutput1" }, { output_id: "so_xbzi2dhGSY-3", "depends-on": "so_priorOutput1" }])(
+      `matches ${legacy} contracts and messages canonically without rewriting immutable Work with metadata %j`,
+      async metadata => {
+        for (const contractType of [legacy, canonical]) {
+          const original = assignment([
+            { type: "create_issue", min: 1, max: 1 },
+            { type: contractType, min: 1, max: 1 },
+          ]);
+          const before = JSON.stringify(original);
+          const beforeDigest = digest(original);
+          expect(validateDeliveryContract(original.claims[0].work.effect_contract)).toBe(original.claims[0].work.effect_contract);
+          for (const messageType of [legacy, canonical]) {
+            const messages = [Object.freeze({ type: "create_issue", repo: "owner/repo", ...metadata }), Object.freeze({ type: messageType })];
+            const delivered = await deliver(original, messages, {
+              verifyOutput: verifyBuiltinDeliveryOutput,
+              github: {
+                rest: {
+                  repos: { get: async () => ({ data: { id: 7, full_name: "owner/repo" } }) },
+                  issues: { get: async () => ({ data: { id: 142, number: 42, html_url: "https://github.com/owner/repo/issues/42" } }) },
+                },
               },
-            },
-          });
-          expect(delivered.verification).toBe("verified");
-          expect(delivered.disposition).toBe("complete");
-          expect(delivered.descriptor.outputs[1]).toEqual({ type: canonical, effect: "none" });
-          expect(messages[1].type).toBe(messageType);
-          expect(JSON.stringify(original)).toBe(before);
-          expect(digest(original)).toBe(beforeDigest);
+            });
+            expect(delivered.verification).toBe("verified");
+            expect(delivered.disposition).toBe("complete");
+            expect(delivered.descriptor.outputs[1]).toEqual({ type: canonical, effect: "none" });
+            expect(messages[1].type).toBe(messageType);
+            expect(JSON.stringify(original)).toBe(before);
+            expect(digest(original)).toBe(beforeDigest);
+          }
         }
       }
-    });
+    );
 
     it(`shares cardinality across ${legacy} and ${canonical} messages`, async () => {
       const messages = [{ type: legacy }, { type: canonical }];
@@ -103,7 +111,9 @@ describe("historical diagnostic delivery contracts", () => {
       const original = assignment([{ type: legacy, min: 1, max: 1 }]);
       expect((await deliver(original, [{ type: "report_incomplete" }])).reason).toMatch(/Undeclared output/);
       for (const outcome of [{ success: false }, { success: true, delegated: true }, { success: true, skipped: true }]) {
-        expect((await deliver(original, [{ type: canonical }], { results: [{ messageIndex: 0, ...outcome }] })).reason).toMatch(/Missing exact nondelegated delivery receipt/);
+        const delivery = await deliver(original, [{ type: canonical }], { results: [{ messageIndex: 0, ...outcome }] });
+        expect(delivery.reason).toMatch(/Missing exact nondelegated delivery receipt/);
+        expect(delivery.diagnostics.output_type).toBe(canonical);
       }
     });
   }

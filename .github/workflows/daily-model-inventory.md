@@ -2,7 +2,7 @@
 private: true
 emoji: "📦"
 name: Daily Model Inventory Checker
-description: Queries model lists from OpenAI, Anthropic, and Google APIs daily, uses AWF /reflect for Copilot models, checks every workflow model pin against the live Copilot catalogue, then analyzes the combined inventory to propose updates to the builtin model alias mapping
+description: Queries model lists from OpenAI, Anthropic, and Google APIs daily, uses AWF /reflect for Copilot models, audits workflow model pins from live source files, then analyzes the combined inventory to propose updates to the builtin model alias mapping
 on:
   schedule:
     - cron: daily
@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   copilot-requests: write
   issues: read
   pull-requests: read
@@ -19,6 +20,15 @@ engine:
   id: copilot
   copilot-sdk: true
   driver: .github/drivers/copilot_sdk_driver_sample_node.cjs
+skip-if-decision:
+  - >-
+    Do @/tmp/gh-aw/agent/model-inventory/inventory.json,
+    @/tmp/gh-aw/agent/model-inventory/reflect.json,
+    @/tmp/gh-aw/agent/model-inventory/model-pins.json, and
+    @pkg/workflow/data/model_aliases.json conclusively establish that no
+    built-in alias update or workflow model-pin correction remains? Abstain
+    until this run's live Copilot reflect and source-based pin audit are
+    complete, or if provider evidence is unavailable, stale, or incomplete.
 max-tool-denials: 3
 strict: true
 timeout-minutes: 30
@@ -320,7 +330,7 @@ steps:
     with:
       path: /tmp/gh-aw/agent/model-inventory/artifacts
 
-  - name: Predownload models.dev API index
+  - name: Pre-download models.dev API index
     shell: bash
     # runner-guard:ignore RGS-012 -- unauthenticated GET from a public read-only model index; no secrets are sent.
     run: |
@@ -339,30 +349,28 @@ steps:
       echo "Combined inventory written to $INVENTORY"
       cat "$INVENTORY"
 
-# The pin check runs again after the agent, preferring the harness's own /reflect capture,
-# so the report artifact and step summary do not depend on the agent.
 post-steps:
-  - name: Check workflow model pins
+  - name: Add live workflow model audit to step summary
     if: always()
-    continue-on-error: true
     shell: bash
     run: |
       set -euo pipefail
-      OUT="/tmp/gh-aw/agent/model-inventory/model-pins"
-      REFLECT=/dev/null
-      for candidate in /tmp/gh-aw/agent/awf-reflect.json /tmp/gh-aw/sandbox/firewall/awf-reflect.json /tmp/gh-aw/agent/model-inventory/reflect.json; do
-        if [ -s "$candidate" ]; then REFLECT="$candidate"; break; fi
-      done
-      echo "Checking workflow model pins against $REFLECT"
-      node "${RUNNER_TEMP}/gh-aw/actions/model_pin_check.cjs" --reflect "$REFLECT" --out-dir "$OUT" --repo "$GITHUB_WORKSPACE" > /dev/null
-      cat "$OUT/model-pins.md" >> "$GITHUB_STEP_SUMMARY"
+      REPORT="/tmp/gh-aw/agent/model-inventory/model-pins-summary.md"
+      if [ -s "$REPORT" ]; then
+        cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+      else
+        echo "### Workflow model pin audit unavailable" >> "$GITHUB_STEP_SUMMARY"
+        echo "The agent did not produce a source-based model pin audit." >> "$GITHUB_STEP_SUMMARY"
+      fi
 
-  - name: Upload workflow model pin report
+  - name: Upload live workflow model audit
     if: always()
     uses: actions/upload-artifact@v7.0.2
     with:
       name: model-pins
-      path: /tmp/gh-aw/agent/model-inventory/model-pins/
+      path: |
+        /tmp/gh-aw/agent/model-inventory/model-pins.json
+        /tmp/gh-aw/agent/model-inventory/model-pins-summary.md
       if-no-files-found: warn
       retention-days: 30
 
@@ -376,6 +384,7 @@ tools:
     - "*"
   github:
     toolsets: [default]
+  agentic-workflows: true
 
 safe-outputs:
   create-pull-request:
@@ -393,12 +402,15 @@ features:
   gh-aw-detection: true
 evals:
   - id: model_lists_queried
-    question: Did the agent query model inventories from OpenAI, Anthropic, Google, and Copilot APIs?
+    question: Did the agent query model inventories from OpenAI, Anthropic, Google, and Copilot APIs? Return UNKNOWN when the output records a skip-if-decision no-op before agent execution.
   - id: updates_proposed_or_noop
     question: Were updates to the builtin model alias mapping proposed, or was noop used when no changes were needed?
 ---
 
 # Daily Model Inventory Checker
+
+The AWF decision gate abstains until the agent has collected live Copilot reflect
+and pin-check evidence. Later invocations may skip only when no correction remains.
 
 You are an AI model catalog analyst for `${{ github.repository }}`.
 
@@ -515,23 +527,27 @@ echo "Copilot reflect metadata written to $OUT"
 
 ### Step 0.5: Check Workflow Model Pins
 
-Run the deterministic pin checker right after Step 0. It classifies every model pin configured
-by `.github/workflows/*.md` (and their imports) against the Copilot catalogue in the reflect
-file, using the same resolver as the engine harnesses. Do not classify pins yourself.
+Call the `status` tool on the `gh-aw` agentic-workflows MCP with no pattern and use its workflow
+list as the inventory. The tool lists workflow names and status, not model configuration; read
+the corresponding Markdown source files in the current checkout and follow local imports and
+inline agent blocks. For remote imports, use the repository-scoped GitHub MCP read tools. Do not
+read `.lock.yml` manifests or assume they contain model inventory data.
 
-```bash
-set -euo pipefail
-REPO="${GITHUB_WORKSPACE:-$PWD}"
-node "$REPO/actions/setup/js/model_pin_check.cjs" \
-  --reflect /tmp/gh-aw/agent/model-inventory/reflect.json \
-  --out-dir /tmp/gh-aw/agent/model-inventory/model-pins \
-  --repo "$REPO"
-```
+Compare Copilot model pins with `/tmp/gh-aw/agent/model-inventory/reflect.json` and aliases in
+`pkg/workflow/data/model_aliases.json`. Record exact live IDs, resolvable aliases, unavailable
+models, expressions, inherited/automatic selections, and non-Copilot providers separately.
+Mark the audit incomplete if any workflow, imported source, or required catalogue data could not
+be inspected; do not treat incomplete coverage as zero unresolvable pins.
 
-It writes `model-pins-summary.md` (the issue section), `model-pins.md` (every pin with its
-classification) and `model-pins.json` to `/tmp/gh-aw/agent/model-inventory/model-pins/`. The
-run uploads that directory as the `model-pins` artifact. Read `counts.unresolvable` from
-`model-pins.json` for Step 6.
+Write `/tmp/gh-aw/agent/model-inventory/model-pins.json` with `audit_complete`, `counts`, `pins`,
+and `errors`, and write a concise Markdown issue section to
+`/tmp/gh-aw/agent/model-inventory/model-pins-summary.md`. Include source file and field for each
+pin. `counts` must include `total`, `exact`, `alias`, `unresolvable`, and `not_checked`. For a
+remote import, honor its pinned ref; if no immutable ref is specified, resolve one with the
+GitHub MCP before reading. Mark the audit incomplete when a remote source cannot be read. Begin
+the summary with `### Action required` when any pin is unresolvable, otherwise
+`### Workflow model pins`. The post-agent steps append that summary to the Actions step summary
+and upload both files as the `model-pins` artifact.
 
 ### Step 1: Load and Validate the Inventory
 
@@ -738,14 +754,14 @@ Focus on aliases that provide genuine value to workflow authors. Prioritize:
 
 ### Step 6: Implement Updates and Create a Pull Request
 
-Implement evidence-backed alias, pricing, or unresolvable model-pin corrections. Preserve historical model entries and do not guess replacement pins. Validate the changed mappings and compile any changed workflow Markdown, commit locally, then call `create_pull_request`. Report unresolved inventory or validation blockers with `report_incomplete`.
+Implement evidence-backed alias, pricing, or unresolvable model-pin corrections. Preserve historical model entries and do not guess replacement pins. Validate the changed mappings and compile any changed workflow Markdown, commit locally, then call `create_pull_request`. If the source-based workflow audit is incomplete, report the missing coverage with `report_incomplete` instead of claiming no issues.
 
 **Pull request title format**: `Model alias inventory update - YYYY-MM-DD`
 
 **Workflow model pins**: start the pull request body with the contents of
-`/tmp/gh-aw/agent/model-inventory/model-pins/model-pins-summary.md` from Step 0.5, copied
-verbatim (it begins with `### Action required` when any pin is unresolvable). Do not edit,
-reorder or summarize it. If `counts.unresolvable` in `model-pins.json` is greater than 0,
+`/tmp/gh-aw/agent/model-inventory/model-pins-summary.md` from Step 0.5, copied verbatim (it
+begins with `### Action required` when any pin is unresolvable). Do not edit, reorder or summarize
+it. If `counts.unresolvable` in `model-pins.json` is greater than 0,
 the title must be `Model alias inventory - action required - YYYY-MM-DD`. Implement only replacements supported by live evidence; if none can be validated, report the blocker rather than creating an empty pull request.
 
 **Pull request body structure** (use h3 `###` or lower — never h1/h2):
@@ -816,7 +832,7 @@ Any caveats, historical entries retained, or aliases that are already well-cover
 
 If no updates are needed (all live models are already covered by existing aliases, all
 `models.json` pricing entries are up to date, no new task-oriented aliases are warranted, and
-`counts.unresolvable` in `model-pins.json` is 0), call `noop` with a brief summary confirming coverage is up to date. Do not create a report-only pull request. Never report no changes needed when any workflow model pin is unresolvable.
+`audit_complete` is true with `counts.unresolvable` in `model-pins.json` equal to 0), call `noop` with a brief summary confirming coverage is up to date. Do not create a report-only pull request. Never report no changes needed when any workflow model pin is unresolvable.
 
 
 ### Output Format

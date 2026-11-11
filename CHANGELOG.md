@@ -13,6 +13,35 @@ and mixed edits continue to require write-or-higher repository permission.
 
 ### Breaking changes
 
+Eligible workflows that select neither a model nor routing now default to
+`goal: cost`, `mode: auto` model routing on GitHub Copilot inference. If task
+classification is unavailable or returns `unknown`, `auto` falls back to
+`balanced`. After recompilation, the selected model, output, and cost may
+differ. To retain the previous non-routed model selection, set
+`engine.model-routing: false` and recompile; to keep a stable model, configure
+it explicitly. Explicit routing configurations are unchanged. Review generated
+locks and audit model and cost changes after recompilation.
+
+Native Jira, Linear, and Azure DevOps tools, safe-output handlers, and gateway
+issue triggers have been replaced by the declarative connector runtime. Legacy
+`auth` and `allowed` settings and the old `connectors` gateway wrapper are
+rejected, and seven native read methods are no longer exposed. Migrate by
+importing the provider declaration from
+`.github/workflows/connectors/<provider>.md`, selecting read profiles and write
+effects explicitly, configuring the required credentials, and recompiling.
+Native integrations are not retained as a compatibility path; imports do not
+install provider webhooks, and unsupported operations may require workflow
+changes.
+
+`merge-pull-request` now blocks merges when the target PR changes protected
+files. Existing workflows that merged such changes will refuse those merges
+unless configured otherwise. Keep the default and merge those PRs manually,
+configure scoped exceptions with
+`safe-outputs.merge-pull-request.protected-files.exclude`, or set
+`safe-outputs.merge-pull-request.protected-files: allowed` when protected-file
+merges are intentional, then recompile. The opt-out does not bypass other merge
+gates.
+
 `pull_request_target` workflows now default to same-repository PRs only in both
 strict and non-strict mode. Omitting `forks` is equivalent to `forks: []`; no
 explicit empty list is required. To admit forks, configure exact `owner/repo`
@@ -33,14 +62,17 @@ Historical repository scoring and the separate offline episode-join command have
 also been removed. Use `gh aw logs --episodes --outcomes` for episode summaries.
 `--outcomes-dir` remains available for JSONL export.
 
-`compile --dry-run` now rejects authored host steps, custom MCP servers/scripts,
-custom safe-output scripts, enabled Bash graders, and authored OIDC permissions,
-including imports. Custom jobs and custom safe-output jobs become disabled,
-credential-free placeholders with empty outputs. Existing actionable scanner
-findings fail alongside added findings. Migrate by removing unsupported
-declarations in a separate diagnostic workflow, reviewing skipped dependencies,
-and resolving actionable findings before live testing. Ordinary compilation is
-unchanged; dry-run is still not a hosted execution sandbox.
+`compile --dry-run` accepts workflow `steps` and `post-steps` but omits their
+code and credentials from emitted locks, so separate dispatch cannot execute
+them. It rejects `pre-steps`, `pre-agent-steps`, `on.steps`, custom MCP
+servers/scripts, custom safe-output scripts, enabled Bash graders, and authored
+OIDC permissions, including imports. Custom jobs and custom safe-output jobs
+become disabled, credential-free placeholders with empty outputs. Existing
+actionable scanner findings fail alongside added findings. Migrate by removing
+unsupported declarations in a separate diagnostic workflow, reviewing omitted
+steps and skipped dependencies, and resolving actionable findings before live
+testing. Ordinary compilation is unchanged; dry-run is still not a hosted
+execution sandbox.
 
 AWF and downloaded Copilot CLI releases now require a reviewed checksum-manifest
 digest bundled in the trusted setup action or supplied as literal

@@ -7,7 +7,7 @@ sidebar:
 
 # GitHub Agentic Workflows Security Architecture Specification
 
-**Version**: 1.1.9<br>
+**Version**: 1.1.10<br>
 **Status**: Candidate Recommendation  
 **Latest Version**: https://github.com/github/gh-aw/blob/main/specs/security-architecture-spec.md  
 **Editors**: GitHub Next (GitHub, Inc.)
@@ -24,7 +24,7 @@ The security architecture employs defense-in-depth principles including input sa
 
 This is a Candidate Recommendation specification and represents the current state of the GitHub Agentic Workflows security architecture. This specification is subject to updates based on security research, community feedback, and operational experience. Future versions may introduce additional security controls or refine existing requirements.
 
-**Publication Date**: January 29, 2026  
+**Publication Date**: November 11, 2026  
 **Governance**: This specification is maintained by GitHub Next and governed by GitHub's security and research processes.
 
 ## Table of Contents
@@ -547,7 +547,7 @@ Destination authorization, endpoint authentication, and artifact authentication 
 |---|---|
 | **TT-01 TLS policy** | The following hardened bootstrap curl paths MUST restrict both initial and redirected URLs to HTTPS and MUST retain hostname/chain validation: `install_awf_binary.sh`, `install_copilot_cli.sh`, `install_threat_detect_binary.sh`, the GitHub CLI key installer (`install_gh_cli.sh`), Cloud Hypervisor setup downloads (including `cloud_hypervisor_setup_bundle.sh`'s latest-release API probe), and the generated Compose installer in `copilot_engine_installation.go`. No insecure certificate override or HTTP retry is permitted on these paths. The inline Maven bootstrap in `copilot_engine_installation.go` remains outside this TLS policy and TT-02's independent archive-integrity guarantees. |
 | **TT-02 Independent release integrity** | AWF and downloaded Copilot CLI archives MUST authenticate their checksum manifest against a release-bound SHA256 digest before consuming it. The trusted setup action's `release_integrity.sh` supplies built-in pins; literal workflow `sandbox.agent.checksums-sha256` (AWF `checksums.txt`) and `engine.checksums-sha256` (Copilot `SHA256SUMS.txt`) MUST allow independently provisioned overrides for explicit semantic release versions. Missing, duplicate or malformed trusted pins and mismatched bytes MUST fail installation before archive extraction, installation or execution. Explicit Copilot pins MUST bypass toolcache activation and verify both host and requested musl guest archives. Pins MUST propagate with their versions to matching detection/eval installations; engine normalization MUST NOT carry another engine's version or pin. Replacing both the artifact and its network-served checksum MUST NOT bypass authentication. A bundle integrity failure MUST NOT trigger an AWF binary fallback. Threat-detect retains compiler-supplied asset digests; Compose retains architecture-specific compiler digests and an inline verifier in the generated installer, without sourcing a job-writable helper; `install_gh_cli.sh` authenticates the GitHub CLI apt signing key before installation. Cloud Hypervisor/NVX attestation checks remain independent requirements. |
-| **TT-03 Toolchain evidence** | Release builds MUST reject Go toolchains older than 1.27.3 and development/prerelease toolchains. `scripts/check-go-toolchain.sh` checks the actual compiler; `scripts/build-release.sh` inspects each native binary's embedded toolchain and records `dist/build-toolchain.txt`. Repository modules, lint tooling, the devcontainer and owned workflow Go pins use 1.27.3; user-selected Go runtimes remain author-controlled and are not attested by compilation. Generated root capture and Serena setup MUST clear inherited `GOROOT` when discovering the selected local toolchain and refresh the host environment before subsequent builds. |
+| **TT-03 Toolchain evidence** | Release builds MUST reject Go toolchains older than 1.27.4 and development/prerelease toolchains. `scripts/check-go-toolchain.sh` checks the actual compiler; `scripts/build-release.sh` inspects each native binary's embedded toolchain and records `dist/build-toolchain.txt`. Repository modules, lint tooling, the devcontainer and owned workflow Go pins use 1.27.4; user-selected Go runtimes remain author-controlled and are not attested by compilation. Generated root capture and Serena setup MUST clear inherited `GOROOT` when discovering the selected local toolchain and refresh the host environment before subsequent builds. |
 | **TT-04 Runtime evidence** | Setup MUST log a bounded inventory of available host TLS consumers without credentials, environment dumps, or authenticated URLs. Missing inspection tools and uninspected container/proxy trust stores MUST be identified rather than reported as compliant. `runtime_trust_inventory.sh` supplies host versions; image operators retain responsibility for image contents and actual trust-store selection. |
 
 The trusted bootstrap baseline includes the setup action and its digest table, literal author-supplied version/pin pairs, compiler, GitHub Actions control plane, and runner/toolcache provisioning. It excludes attacker-controlled network responses. A preinstalled Copilot CLI from a trusted runner toolcache retains the existing cache policy only when no explicit manifest pin is supplied; cache contents are not newly authenticated by download checks. An arbitrary runner binary, compromised setup action, or malicious workflow author is not repaired by a digest table.
@@ -2099,6 +2099,13 @@ roles: [admin, maintainer]  # Restrict to trusted roles
 
 ## Change Log
 
+### Version 1.1.10 (Go Toolchain Security Baseline)
+
+**Published**: November 11, 2026
+
+- Raises the TT-03 repository Go toolchain baseline from 1.27.3 to 1.27.4 in response to GO-2026-6859.
+- Preserves release-toolchain rejection, embedded-toolchain evidence, repository pinning, user-selected runtime ownership, and `GOROOT` isolation requirements.
+
 ### Version 1.1.9 (Appendix G Test Mapping)
 
 **Published**: November 5, 2026
@@ -2271,12 +2278,12 @@ The revalidation cadence **SHOULD** also include a review of `specs/security-arc
 
 ### Last Revalidation
 
-The most recent full validation pass against this specification was completed on **2026-07-15**. The results are recorded in `specs/security-architecture-spec-validation.md`. Any changes to MUST-level requirements after this date require a new validation pass per the triggers above.
+The most recent full validation pass against this specification was completed on **2026-11-08**. The results and remaining evidence gaps are recorded in `specs/security-architecture-spec-validation.md`. Any changes to MUST-level requirements after this date require a new validation pass per the triggers above.
 
 Sync check on **2026-08-25** found no new minor-version bump, reported security incident, or reference-implementation change requiring a full revalidation since the 2026-07-15 pass. This maintenance pass synchronized §9/§11 prose to the existing `pkg/workflow/threat_detection_config.go` parser and `pkg/workflow/threat_detection_inline_engine.go` runtime behavior; because it clarifies MUST-level runtime sequencing text, a targeted §9/§11 revalidation is scheduled with the Security Architecture maintainers by **2026-09-01**. The known Appendix G.10 partial-coverage gaps remain tracked there.
 
-On **2026-10-09**, RS-05a was targeted-revalidated against the allow-listed same-repository App comment implementation, unit tests, and Z3 safety model for Version 1.1.1. Version 1.1.2 extends that contract to `pull_request_review` and updates its conformance mapping and formal model; targeted revalidation of those additions is pending in `security-architecture-spec-validation.md` §7b. Version 1.1.3 extends the same-repository bot branch-event exception to `ready_for_review` and `reopened`; targeted revalidation of those additions is also pending in §7b. This does not replace the full revalidation pass required by the policy. The previous RS-05a branch-event revalidation was completed on 2026-10-01.
+On **2026-10-09**, RS-05a was targeted-revalidated against the allow-listed same-repository App comment implementation, unit tests, and Z3 safety model for Version 1.1.1. On **2026-11-09**, the bounded RS-05a authorization model was revalidated: `checkout_pr_branch_z3.test.cjs` passed all 14 expected query results (11 `unsat`, 3 `sat`), alongside the runtime and Go formal tests recorded in `security-architecture-spec-validation.md` §7b. The model does not prove webhook change-field semantics, revision freshness, fetch-time races, checked-out commit identity, or live GitHub SHA-fetch support. The November 8, 2026 full revalidation confirms runtime mappings for v1.1.2 through v1.1.8, verifies PM-08 default fork denial and configured allowlisting, and records the separate TT-01–04 evidence gap. The prior RS-05a branch-event revalidation was completed on 2026-10-01.
 
-Version 1.1.7 aligns RS-05a with immutable revision binding and explicit dispatch-context failures; v1.1.8 adds the explicit floating-head opt-in. Runtime regression mappings are recorded in the validation document; targeted formal revalidation and the policy-required full revalidation remain pending. The bounded SMT authorization model is not a proof of revision freshness or live GitHub SHA-fetch support.
+Version 1.1.7 aligns RS-05a with immutable revision binding and explicit dispatch-context failures; v1.1.8 adds the explicit floating-head opt-in. Runtime regression mappings and explicit version statuses are recorded in the validation document. The policy-required full revalidation was completed on **2026-11-08**; targeted formal authorization-model revalidation passed on **2026-11-09**. The bounded SMT model does not prove revision freshness or live GitHub SHA-fetch support.
 
 *This specification is provided under the MIT License.*

@@ -7832,6 +7832,9 @@
                       "zero_touch": {
                         "type": "boolean"
                       },
+                      "zero_touch_evidence_complete": {
+                        "type": "boolean"
+                      },
                       "objective_value": {
                         "type": "integer"
                       },
@@ -10135,6 +10138,89 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "decisions": {
+                      "type": [
+                        "null",
+                        "array"
+                      ],
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "proposedAttempt": {
+                            "type": "integer"
+                          },
+                          "startupAttemptId": {
+                            "type": "string"
+                          },
+                          "outcome": {
+                            "type": "string"
+                          },
+                          "questions": {
+                            "type": [
+                              "null",
+                              "array"
+                            ],
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "question": {
+                                  "type": "integer"
+                                },
+                                "outcome": {
+                                  "type": "string"
+                                },
+                                "error": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "question",
+                                "outcome"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "latencyMs": {
+                            "type": "integer"
+                          },
+                          "timestamp": {
+                            "type": "integer"
+                          },
+                          "error": {
+                            "type": "string"
+                          },
+                          "avoidedInvocation": {
+                            "type": "boolean"
+                          },
+                          "phase": {
+                            "type": "string"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "index": {
+                            "type": [
+                              "null",
+                              "integer"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "proposedAttempt",
+                          "outcome",
+                          "questions",
+                          "latencyMs",
+                          "timestamp",
+                          "avoidedInvocation",
+                          "phase",
+                          "path"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "avoided_invocations": {
+                      "type": "integer"
                     }
                   },
                   "required": [
@@ -10143,6 +10229,46 @@
                     "attempts",
                     "engine_retries",
                     "detection_engine_retries"
+                  ],
+                  "additionalProperties": false
+                },
+                "durable_session": {
+                  "type": [
+                    "null",
+                    "object"
+                  ],
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "engine": {
+                      "type": "string"
+                    },
+                    "storage": {
+                      "type": "string"
+                    },
+                    "parent_run_id": {
+                      "type": "string"
+                    },
+                    "artifact_id": {
+                      "type": "string"
+                    },
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "started": {
+                      "type": "boolean"
+                    },
+                    "evidence": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "started"
                   ],
                   "additionalProperties": false
                 }
@@ -10255,6 +10381,39 @@
                     "resolved_model",
                     "effective_model"
                   ],
+                  "additionalProperties": false
+                },
+                "model_config": {
+                  "type": [
+                    "null",
+                    "object"
+                  ],
+                  "properties": {
+                    "routing": {
+                      "type": [
+                        "null",
+                        "object"
+                      ],
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "goal": {
+                          "type": "string"
+                        },
+                        "mode": {
+                          "type": "string"
+                        },
+                        "requested": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "enabled"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
                   "additionalProperties": false
                 },
                 "version": {

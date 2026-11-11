@@ -75,7 +75,7 @@ func isThreatDetectionExplicitlyDisabledInConfigs(configs []string) bool {
 }
 
 func getThreatDetectionAdditionalAllowedDomains(data *WorkflowData, engineID string) []string {
-	if data == nil || data.NetworkPermissions == nil {
+	if data == nil {
 		return []string{}
 	}
 
@@ -91,8 +91,11 @@ func getThreatDetectionAdditionalAllowedDomains(data *WorkflowData, engineID str
 		effectiveEnv["ANTHROPIC_BASE_URL"] != "" ||
 		effectiveEnv[constants.CopilotProviderBaseURL] != ""
 
-	additional := make([]string, 0, len(data.NetworkPermissions.Allowed))
+	additional := make([]string, 0)
 	seen := make(map[string]struct{})
+	if data.NetworkPermissions == nil {
+		return additional
+	}
 	for _, entry := range data.NetworkPermissions.Allowed {
 		if entry == "" || strings.Contains(entry, "${{") {
 			continue
@@ -173,6 +176,11 @@ func buildExternalDetectorWorkflowData(data *WorkflowData, engineID string) *Wor
 		"bash": []any{"*"},
 	}
 	d.EngineConfig = resolveExternalDetectorEngineConfig(data, engineID)
+	if d.EngineConfig.Auth == nil && data.EngineConfig != nil &&
+		ResolveEngineID(data) == engineID && data.EngineConfig.Auth != nil {
+		auth := *data.EngineConfig.Auth
+		d.EngineConfig.Auth = &auth
+	}
 	// threat-detect currently resolves the selected engine by its standard
 	// executable name and has no custom-command option. Keep the standard
 	// Copilot CLI installed for external detection rather than propagating a
@@ -185,6 +193,9 @@ func buildExternalDetectorWorkflowData(data *WorkflowData, engineID string) *Wor
 		d.EngineConfig.LLMProvider = LLMProviderOpenAI
 	}
 	d.EngineConfig.Env = mergeThreatDetectionEngineEnv(data, engineID, d.EngineConfig.Env)
+	if d.EngineConfig.Auth == nil && isOpenAIWIFWithAWF(d) {
+		d.EngineConfig.Auth = resolveOpenAIWIFAuth(d.EngineConfig)
+	}
 	if d.EngineConfig.APITarget == "" && data.EngineConfig != nil &&
 		ResolveEngineID(data) == engineID {
 		d.EngineConfig.APITarget = data.EngineConfig.APITarget

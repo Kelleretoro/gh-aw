@@ -49,9 +49,48 @@ An optional emoji to represent the workflow visually, for example in listings an
 emoji: "🤖"
 ```
 
+### Invocation Skip Questions
+
+> [!WARNING]
+> `skip-if-decision` is experimental. Nonempty lists emit a compile-time
+> warning; configuration and behavior may change without deprecation.
+
+An optional top-level `skip-if-decision` list of up to 64 questions evaluated inside AWF before each otherwise eligible agent invocation, including initial execution, retries, resumes, and continuations. The gate applies to all built-in engines and declarative engines, including command-based, custom-harness, and durable execution paths. Nonempty lists are incompatible with declarative `protected-session-capture`; compilation rejects this combination to preserve recorder isolation and verified session ingestion.
+
+Questions and referenced files are screened for known credential patterns and
+configured secret values before transmission. A match withholds that question
+as `unknown` with `sensitive_content_blocked`. Screening is heuristic; do not
+reference confidential files merely because they are inside an allowed path.
+Structured file evidence is still model-readable untrusted data, not an
+instruction-isolation boundary.
+
+```aw wrap
+skip-if-decision:
+  - Is there no actionable work remaining in @context/task.md?
+  - Has @reports/progress.md established that further execution is unnecessary?
+```
+
+Each question returns `deny` when its skip condition is established, `allow` when execution is recommended, or `unknown` when it abstains. Any `deny` skips the invocation; otherwise, any `allow` or all `unknown` preserves the execution path selected by the deterministic harness. An absent or empty list preserves existing behavior. Decisions cannot override retry limits, budgets, deadlines, or nonrecoverable failures.
+
+Questions share one Decisions request through the existing AWF API proxy, using `gpt-6-luna-decisions` on a configured Copilot provider, or `gpt-6-luna` when only OpenAI is configured. No direct-provider fallback or additional credentials are used. Unavailable models or APIs, timeouts, malformed responses, and file-read failures abstain without decision retries. Decision requests remain subject to the proxy's model and budget policies and its existing usage accounting.
+
+Runtime `@file` references resolve relative to `engine.cwd`, or the workspace when unset. They are read afresh before each invocation using the existing guarded regular-file reader: only workspace and `/tmp/gh-aw/agent` paths are eligible; symlinks, hardlinks, sensitive paths, and oversized context are rejected. Each question's imports have a 512 KiB ceiling including question text, evidence metadata, and JSON escaping; each read receives the remaining budget.
+
+The entire serialized Decisions request is capped at 400,000 UTF-8 bytes,
+approximately 100,000 tokens at four bytes per token. This is a byte-based
+estimate, not tokenizer-exact accounting, and includes request framing,
+questions, choices, and escaped evidence. Questions that would exceed the
+remaining budget become `unknown`; smaller questions can still be evaluated.
+Unreadable context also makes only its question `unknown`. Paths use letters,
+digits, `_`, `.`, `/`, and `-`; Actions expressions are not supported in questions.
+
+Decision metadata is retained in the existing harness retry artifact and as typed `harness.decision` events in the agent's unified session. Events contain one-based question indices, outcomes, sanitized error codes, latency, the proposed attempt, and `avoidedInvocation`; they never retain file contents or raw provider diagnostics. `gh aw audit --json` exposes this history under `retries.decisions` and counts avoided invocations separately from retries. A denied invocation records a noop if no terminal safe-output exists. The gate does not apply to threat detection or evals.
+
 ### Labels (`labels:`)
 
 Optional array of strings for categorizing workflows by purpose, team, or functionality. Labels appear in `gh aw status` output as `[automation ci diagnostics]` (or a JSON array in `--json` mode) and can be filtered with `gh aw status --label automation`.
+
+Each label name is limited to 50 characters. The compiler rejects longer names, including static labels configured for safe outputs.
 
 ```yaml wrap
 labels: ["automation", "ci", "diagnostics"]
@@ -238,9 +277,15 @@ engine:
 
 See [Harness Retry and Post-result Watchdog Policy](/gh-aw/reference/engines/#harness-retry-and-post-result-watchdog-policy) for defaults, units, and the equivalent `GH_AW_HARNESS_*` environment variables.
 
-### Model Routing (`engine.model-routing:`)
+### Model Routing (`model: router`, `engine.model-routing:`)
 
-Enables experimental per-run model and reasoning-effort selection for the Copilot, Claude, Codex, and pi engines when they use GitHub Copilot inference, with the AWF firewall. Requires `goal` (`cost` or `cost-speed`) and `mode` (`economy`, `balanced`, `robust`, or `auto`). The optional `allowed-models` list takes exact model names and limits the router's candidates for the main agent; it is not a request policy. Put patterns such as `gpt-*` in [`models.allowed` or `models.blocked`](/gh-aw/reference/glossary/#model-policy-modelsallowed-modelsblocked) instead. Overrides the fixed `engine.model` and effort settings. See [Model Routing](/gh-aw/reference/model-routing/) for value meanings, requirements, sub-agent constraints, known limitations, and logs.
+Set `model` (or `engine.model`) to a router value to route the main agent: `router` (the router judges each task), `router/economy`, `router/balanced`, or `router/robust`. Each is the same as `engine.model-routing` with `goal: cost` and the matching mode (`auto` for `router`). A workflow with no model already behaves like `model: router` when it is eligible.
+
+```yaml wrap
+model: router/economy
+```
+
+`engine.model-routing` still works and enables experimental per-run model and reasoning-effort selection for the Copilot, Claude, Codex, and pi engines when they use GitHub Copilot inference, with the AWF firewall. Requires `goal` (`cost` or `cost-speed`) and `mode` (`economy`, `balanced`, `robust`, or `auto`). The optional `allowed-models` list takes exact model names and limits the router's candidates for the main agent; it is not a request policy. Put patterns such as `gpt-*` in [`models.allowed` or `models.blocked`](/gh-aw/reference/glossary/#model-policy-modelsallowed-modelsblocked) instead. Overrides the fixed `engine.model` and effort settings. See [Model Routing](/gh-aw/reference/model-routing/) for value meanings, requirements, sub-agent constraints, known limitations, and logs.
 
 ### Engine Driver (`engine.driver:`)
 
@@ -455,7 +500,15 @@ timeout-minutes: 30                  # Agentic step timeout, defaults to 20 minu
 | `ubuntu-24.04` / `ubuntu-22.04` | ✅ Supported. |
 | `ubuntu-24.04-arm` | ✅ Supported. Linux ARM64 runner. |
 | `macos-*` | ❌ Not supported. Docker is unavailable on macOS runners (no nested virtualization). See [FAQ](/gh-aw/reference/faq/). |
-| `windows-*` | ❌ Not supported. AWF requires Linux. |
+| `windows-latest` | Framework Bash steps execute in Ubuntu WSL; see [Windows runner execution](#windows-runner-execution). |
+
+#### Windows runner execution
+
+For the literal `runs-on: windows-latest`, the compiler wraps POSIX steps in built-in framework jobs, including the agent job, with PowerShell launchers that execute Bash in Ubuntu WSL. Native Windows Actions remain on the host. Unrelated custom jobs and other Windows runner labels do not receive this adapter.
+
+The runner must provide working WSL2. Generated setup selects or installs Ubuntu, installs Linux tools and Docker, and installs the Linux Node.js version selected by `actions/setup-node`. Setup fails if WSL2 or the required runtime cannot be initialized. Workspace, runner temporary paths, and GitHub command files are mapped into WSL; `/tmp/gh-aw` is shared through the runner's temporary directory for artifact collection.
+
+This adapter provides a Linux execution environment for framework commands; it does not make the agent a native Windows process. Linux remains the recommended runner, and this compiler behavior does not establish end-to-end availability for every Windows configuration.
 
 ### Workflow Concurrency Control (`concurrency:`)
 
@@ -721,6 +774,8 @@ When Go is required and `runtimes.go.version` is omitted, the generated setup st
 ### `run-install-scripts`
 
 Controls whether npm pre/post-install scripts are allowed during package installation. Configure this under `runtimes.node.run-install-scripts`. The default is `false`.
+
+The shared npm installer disables lifecycle scripts for global installs through step-level `NPM_CONFIG_IGNORE_SCRIPTS: 'true'`; local installs retain `--ignore-scripts`. This keeps exact-version global commands compatible with dependency-pinning scanners without changing version pins or release-age cooldowns.
 
 ```yaml wrap
 runtimes:

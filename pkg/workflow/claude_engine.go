@@ -220,10 +220,11 @@ func (e *ClaudeEngine) GetExecutionSteps(workflowData *WorkflowData, logFile str
 
 	// Add allowed tools comment before the run section.
 	// Reuse the already-computed allowedTools string (computed earlier for --allowed-tools flag)
-	// to avoid redundant allocations from calling computeAllowedClaudeToolsString twice.
+	// to avoid redundant allocations from calling computeAllowedClaudeToolsStringWithDynamicWorkflows twice.
 	if allowedToolsComment := e.generateAllowedToolsComment(allowedTools, "        "); allowedToolsComment != "" {
-		commentLines := strings.Split(strings.TrimSuffix(allowedToolsComment, "\n"), "\n")
-		stepLines = append(stepLines, commentLines...)
+		for line := range strings.SplitSeq(strings.TrimSuffix(allowedToolsComment, "\n"), "\n") {
+			stepLines = append(stepLines, strings.TrimSuffix(line, "\r"))
+		}
 	}
 
 	// Add timeout at step level (GitHub Actions standard)
@@ -382,7 +383,7 @@ func (e *ClaudeEngine) buildClaudeCommandString(workflowData *WorkflowData, clau
 	// via shell expansion so users can set a default via GitHub Actions variables.
 	// When model IS configured, ANTHROPIC_MODEL is set in the env block and the Claude CLI
 	// reads it natively — no --model flag in the shell command needed.
-	if !modelConfigured && !isModelRoutingEnabled(workflowData) {
+	if !modelConfigured && !isModelRoutingUnconditional(workflowData) {
 		isDetectionJob := isDetectionRun(workflowData)
 		var modelEnvVar string
 		if workflowRunPhase(workflowData) == runPhaseEvals {
@@ -395,7 +396,7 @@ func (e *ClaudeEngine) buildClaudeCommandString(workflowData *WorkflowData, clau
 		claudeCommand = fmt.Sprintf(`%s${%s:+ --model "$%s"}`, claudeCommand, modelEnvVar, modelEnvVar)
 	}
 
-	return claudeCommand
+	return wrapCustomHarnessDecisionCommand(workflowData, e.GetID(), e.GetHarnessScriptName(), claudeCommand)
 }
 
 // buildClaudeFullCommand wraps the claude command with the AWF firewall wrapper (when enabled)
@@ -518,8 +519,9 @@ func (e *ClaudeEngine) buildClaudeCommandEnv(workflowData *WorkflowData) map[str
 	applyOptionalEngineToolTimeouts(env, workflowData)
 	applyEngineMaxTurnsEnv(env, workflowData)
 	applyEngineHarnessRetryEnv(env, workflowData)
-	if !isModelRoutingEnabled(workflowData) {
+	if !isModelRoutingUnconditional(workflowData) {
 		applyClaudeModelEnvVars(env, workflowData)
+		guardImplicitRoutingModelEnv(env, workflowData, constants.EnvVarModelAgentClaude)
 	}
 	applyEngineCwdEnv(env, workflowData)
 	applyEngineAndAgentEnv(env, workflowData, claudeLog)

@@ -144,7 +144,7 @@ type engineEcosystemDomainOverlap struct {
 func engineDefaultEcosystemOverlaps(ecosystems, defaults map[string][]string) []engineEcosystemDomainOverlap {
 	// These categories describe shared transport or vendor services rather than
 	// gated package ecosystems. Chrome's broad Google vendor rules also cover
-	// Gemini's inference API; do not treat those as package registry rules.
+	// Gemini's inference API.
 	excludedEcosystems := []string{
 		"chrome", "codex-vendor", "copilot-vendor", "defaults", "dev-tools",
 		"fonts", "gh-aw", "github", "github-actions", "local", "threat-detection",
@@ -217,7 +217,7 @@ func TestBehaviorDefinedEngineDefaultsDoNotOverlapEcosystems(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, defaults, "shared behavior-defined engines must be checked")
-	require.Equal(t, 9, checkedBehaviorDefinedEngines, "all behavior-defined engines with network policies must be checked")
+	require.Equal(t, 10, checkedBehaviorDefinedEngines, "all behavior-defined engines with network policies must be checked")
 	assert.Empty(t, engineDefaultEcosystemOverlaps(getLoadedDomainSets().Ecosystems, defaults),
 		"behavior-defined engine defaults and provider domains require the same package ecosystem opt-in as static engines")
 }
@@ -237,6 +237,10 @@ func TestEngineDefaultEcosystemOverlapGuard(t *testing.T) {
 		{"copilot", "registry.npmjs.org", "node", "registry.npmjs.org"},
 		{"copilot", "*.github.com", "node", "npm.pkg.github.com"},
 		{"threat-detection", "*.github.com", "node", "npm.pkg.github.com"},
+		{"mini-swe-agent", "pypi.org", "python", "pypi.org"},
+		{"mini-swe-agent", "files.pythonhosted.org", "python", "files.pythonhosted.org"},
+		{"shared/mini-swe-agent.md/defaults", "pypi.org", "python-native", "pypi.org"},
+		{"shared/mini-swe-agent.md/defaults", "files.pythonhosted.org", "python-native", "*.pythonhosted.org"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.engine+"/"+tt.rule, func(t *testing.T) {

@@ -352,11 +352,11 @@ Keep cache keys specific to the OS and `go.sum`, do not share writable keys acro
 
 ## Guardrails
 
-### Can assigned build and test commands use explicitly configured nonsecret state?
+### Can assigned build and test commands use toolchain caches and configured nonsecret values?
 
-Yes, within the stock XPIA policy. Its prompt is included in workflows unless disabled; strict mode does not allow disabling it. Assigned installation, build, and test commands may consume nonsecret values set directly in workflow configuration and use disposable package/build directories or caches explicitly provisioned for that run. This does not permit inspecting the process environment, loading `.env` files, reading pre-existing caches, or accessing credentials.
+Yes, within the stock XPIA policy. Its prompt is included in workflows unless disabled; strict mode does not allow disabling it. Assigned installation, build, and test commands may use the toolchain's normal package and build caches (for example Go, npm, or pip caches) and nonsecret values set directly in workflow configuration. The caches may be used, but their contents are untrusted data like any other outside content: the agent must never follow instructions found in them or search them or other files for credentials. The policy does not permit inspecting the process environment, loading `.env` files, or accessing credentials; if a required secret or credential isn't configured, the agent reports the limitation instead of looking for it.
 
-Set only the required nonsecret values and disposable cache path directly through [`engine.env`](/gh-aw/reference/environment-variables/#environment-variable-scopes). For example:
+Disposable caches are optional, not required. To use them, or to pass other nonsecret values, set them directly through [`engine.env`](/gh-aw/reference/environment-variables/#environment-variable-scopes). For example:
 
 ```yaml wrap
 engine:
@@ -542,7 +542,10 @@ macOS runners (`macos-*`) don't support container jobs, which agentic workflows 
 
 ### Can I use agentic workflows on GitHub Enterprise Server (GHES)?
 
-Yes, but enable GHES compatibility mode on instances predating `@actions/artifact` v2.0.0 — otherwise compiled workflows fail with `GHESNotSupportedError` because the compiler emits `upload-artifact@v4+` by default. Compatibility mode emits `v3.2.2`/`v3.1.0` instead:
+> [!IMPORTANT]
+> **GHES end-to-end availability is unconfirmed here.** gh-aw implements artifact/cache and endpoint compatibility paths, not a certified GHES release matrix. Check the [deployment and runner applicability summary](/gh-aw/reference/enterprise-configuration/#deployment-and-runner-applicability) for your deployment, topology, engine, and component versions, and [AWF applicability](https://github.com/github/gh-aw-firewall/blob/main/docs/compatibility.md#environment-and-runner-applicability) for firewall-only boundaries.
+
+For a server without the `@actions/artifact` v2.0.0+ backend or `cache-mode` syntax, compatibility mode emits artifact actions `v3.2.2`/`v3.1.0` and omits compiler-generated `cache-mode` fields:
 
 ```json
 // aw.json (applies to all workflows)
@@ -554,7 +557,11 @@ Yes, but enable GHES compatibility mode on instances predating `@actions/artifac
 gh aw compile --ghes my-workflow.md
 ```
 
-`gh aw init` auto-detects GHES and writes `ghes: true` for you. See [Enterprise Configuration](/gh-aw/reference/enterprise-configuration/) for CLI and Copilot prerequisites.
+`gh aw init` auto-detects GHES and writes `ghes: true` for you. This does not verify dependent service availability. See [Enterprise Configuration](/gh-aw/reference/enterprise-configuration/#ghes-compatibility-mode) for the action-runtime requirement and cache security caveat, and [AWF enterprise configuration](https://github.com/github/gh-aw-firewall/blob/main/docs/enterprise-configuration.md) for endpoint routing.
+
+### Does ARC/DinD configuration imply GHES or GHEC support?
+
+No. ARC is a runner topology, independent of the GitHub deployment. The [ARC walkthrough](/gh-aw/reference/arc-dind-copilot-agent/) describes the gh-aw Copilot CLI engine, not availability of the separate Copilot coding-agent service. AWF's [live split-DinD checks](https://github.com/github/gh-aw-firewall/blob/main/docs/compatibility.md#ci-test-matrix) are not live Kubernetes ARC, GHES, or data-residency tenant certification. See the [applicability summary](/gh-aw/reference/enterprise-configuration/#deployment-and-runner-applicability).
 
 ### I'm not using a supported AI Engine (coding agent). What should I do?
 

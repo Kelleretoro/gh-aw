@@ -11,6 +11,7 @@ The method names mentioned in analyzer descriptions (such as `Err`, `Flush`, `Re
 - `appendbytestring` — reports `append(b, []byte(s)...)` calls where `b` is `[]byte` and `s` is a string, which can be simplified to `append(b, s...)`.
 - `appendoneelement` — reports `append(s, []T{x}...)` calls where a single-element slice literal is spread and can be simplified to `append(s, x)`.
 - `blankassigncomma` — reports assignment statements where every result is discarded via 2 or more blank identifiers (e.g. `_, _ = f()`), which may indicate unintended result ignoring.
+- `blankassignedcleanuperror` — reports discarded errors from `os.Remove`, `os.RemoveAll`, `os.WriteFile`, and `os.MkdirAll` when assigned to `_`, including in deferred closures. Existing `//nolint:osremoveuncheckedcleanup` directives continue to suppress `_ = os.Remove/RemoveAll` findings.
 - `bufferresetbeforereuse` — reports `bytes.Buffer` or `strings.Builder` writes after a read without an intervening `Reset()`, which can accumulate stale content.
 - `bufioscannererunchecked` — reports `bufio.Scanner` loops that do not check `Err()` after scanning completes.
 - `bytescomparestring` — reports `string(a) == string(b)` and `string(a) != string(b)` comparisons where `a` and `b` are `[]byte` values; use `bytes.Equal(a, b)` for `==` and `!bytes.Equal(a, b)` for `!=`.
@@ -27,6 +28,7 @@ The method names mentioned in analyzer descriptions (such as `Err`, `Flush`, `Re
 - `errortypeassertion` — reports type assertions from `error` to concrete types and recommends `errors.As`.
 - `errstringmatch` — reports `strings.Contains(err.Error(), "...")` patterns and recommends `errors.Is` / `errors.As`.
 - `fileclosenotdeferred` — reports non-deferred file `Close()` calls that can leak resources.
+- `filepathwalkpreferwalkdir` — reports `filepath.Walk` calls and recommends `filepath.WalkDir`.
 - `execcommandwithoutcontext` — reports `exec.Command(...)` calls inside functions that already receive `context.Context` and should use `exec.CommandContext(...)`.
 - `fmterrorfnoverbs` — reports `fmt.Errorf` calls whose format string contains no verbs, recommending `errors.New` instead.
 - `formatintitoa` — reports `strconv.FormatInt(int64(x), 10)` for `int` arguments, recommending `strconv.Itoa(x)`. Supports constant decimal bases, parentheses, and import/type aliases; excludes defined integer types and non-decimal bases. Suggested fixes are limited to package-qualified calls without overlapping comments.
@@ -40,8 +42,10 @@ The method names mentioned in analyzer descriptions (such as `Err`, `Flush`, `Re
 - `httpnoctx` — reports HTTP client and package-level HTTP calls that do not accept a `context.Context`.
 - `httprespbodyclose` — reports directly matched HTTP response `Body.Close()` calls that are not deferred.
 - `httpstatuscode` — reports raw HTTP status-code integer literals that should use `net/http` named constants.
+- `ignoredlocalerror` — reports ignored error results from functions in the `github.com/github/gh-aw` module.
 - `ioutildeprecated` — reports uses of deprecated `io/ioutil` functions (deprecated since Go 1.16) and suggests their replacements in the `io` and `os` packages.
 - `jsonmarshalignoredeerror` — reports `json.Marshal` and `json.Unmarshal` calls where the error return is discarded.
+- `jsonunmarshalbytesconversion` — reports `json.Unmarshal([]byte(s), ...)` calls where `s` is a string; use a decoder for streams, or require a second `Decode` to return `io.EOF` to preserve whole-document validation.
 - `largefunc` — reports function bodies that exceed a configurable line-count threshold.
 - `lenstringsplit` — reports `len(strings.Split(s, sep))` expressions with a non-empty separator that should use `strings.Count(s, sep)+1` to avoid an intermediate slice allocation.
 - `lenstringzero` — reports `len(s) == 0` / `len(s) != 0` comparisons on string values that should use `s == ""` / `s != ""`.
@@ -55,18 +59,21 @@ The method names mentioned in analyzer descriptions (such as `Err`, `Flush`, `Re
 - `osisnotexist` — reports `os.IsNotExist`, `os.IsExist`, `os.IsPermission`, and `os.IsTimeout`, which do not inspect arbitrary wrapped errors. Immediate checks of fresh, unmodified errors from direct filesystem `os` calls in an adjacent assignment or enclosing `if` initializer are exempt. Use `errors.Is` with `fs.ErrNotExist`, `fs.ErrExist`, or `fs.ErrPermission`. For timeouts, use `errors.As` with `interface{ Timeout() bool }` and check `Timeout()`; `errors.Is(err, os.ErrDeadlineExceeded)` only covers deadline errors, not every timeout.
 - `osexitinlibrary` — reports `os.Exit` calls in library packages (`pkg/*`) where process termination should be delegated to `cmd/*` entry points.
 - `osopenreadallpreferreadfile` — implements the `osopen-readall-prefer-readfile` rule: recommends `os.ReadFile` when a newly declared `os.Open` file is used only by a direct deferred `Close` and one `io.ReadAll` or `ioutil.ReadAll` in the same block. Extra uses, reassignment, nested reads, and write-side opens are excluded. No automatic fix is offered; review open/read error handling when simplifying.
+- `osremoveuncheckedcleanup` — reports `os.Remove` and `os.RemoveAll` expression and `go` statements whose errors are discarded, which can hide cleanup failures.
 - `ossetenvlibrary` — reports `os.Setenv` calls in library packages (`pkg/*`) where side effects should be isolated.
 - `packagelevelmutableslicemap` — reports package-level (file/package-scope) `var` slice/map declarations mutated from inside a function body via `append()` re-assignment, index assignment, or `delete()`. Mutations inside a top-level `init()` are exempt.
 - `panic-in-library-code` — reports `panic()` calls in library packages (`pkg/*`) where errors should be returned instead.
 - `rawloginlib` — reports direct usage of the standard `log` package in library packages, where `pkg/logger` should be used.
 - `readerstringconv` — reports `strings.NewReader(string(b))` where `b` is `[]byte` and `bytes.NewReader([]byte(s))` where `s` is a string; prefer `bytes.NewReader(b)` or `strings.NewReader(s)` to avoid copying data only to change reader type. No automatic fix is offered: review concrete reader types and any reliance on a defensive copy of `b`. Named string arguments still need a `string(s)` conversion.
-- `reflectdeepequalusage` — reports `reflect.DeepEqual()` calls, including calls through local function-value aliases, that should use typed equality operators or type-specific comparison functions. Alias resolution is conservative: aliases must have a declaration initializer and no reassignment or address escape; package-level aliases are not resolved.
+- `reflect-deepequal-usage` (Go package `reflectdeepequalusage`) — reports `reflect.DeepEqual()` calls, including calls through local function-value aliases, that should use typed equality operators or type-specific comparison functions. Alias resolution is conservative: aliases must have a declaration initializer and no reassignment or address escape; package-level aliases are not resolved.
 - `regexpcompileinfunction` — reports `regexp.Compile` / `regexp.MustCompile` and their POSIX variants called inside functions that should be package-level.
 - `regexpdynamicpattern` — reports regexp compile calls whose pattern is not a compile-time constant string.
 - `seenmapbool` — reports `map[string]bool` used as a set (values always `true`) that should use `map[string]struct{}` instead.
 - `slicemakezerolength` — reports zero-length slice allocations before known-size range loops that append exactly one element per iteration, where the range length provides a capacity hint.
+- `sortbasicslices` — reports `sort.Strings`, `sort.Ints`, and `sort.Float64s` calls that can be replaced with `slices.Sort`.
 - `sortslice` — reports `sort.Slice` / `sort.SliceStable` calls that should use `slices.SortFunc` / `slices.SortStableFunc`.
-- `splitindexzero` — reports `strings.Split(s, sep)[0]` and `strings.SplitN(s, sep, 2)[0]` calls that allocate a slice to read only the first segment; use `strings.Cut`.
+- `splitindexzero` — reports `strings.SplitN(s, sep, 2)[0]` calls that allocate a slice to read only the first segment; use `strings.Cut`.
+- `splitlines-on-newline` — reports `strings.Split(s, "\n")` calls that can retain carriage returns on CRLF input or produce a trailing empty element.
 - `sprintferrdot` — reports redundant `.Error()` calls on error values passed to `fmt` format functions where the fmt package calls `.Error()` automatically.
 - `sprintferrorsnew` — reports `errors.New(fmt.Sprintf(...))` calls that should use `fmt.Errorf` instead.
 - `sprintfbool` — reports `fmt.Sprintf("%t", b)` calls where `b` is a single bool value and suggests using `strconv.FormatBool(b)` instead.
@@ -80,6 +87,7 @@ The method names mentioned in analyzer descriptions (such as `Err`, `Flush`, `Re
 - `stringsindexcontains` — reports `strings.Index(s, substr)` comparisons with `-1` or `0` (e.g. `!= -1`, `>= 0`, `> -1`, `== -1`, `< 0`, `<= -1`) and their yoda-order variants that should use `strings.Contains(s, substr)` or `!strings.Contains(s, substr)` instead.
 - `stringsindexhasprefix` — reports `strings.Index(s, sub)` comparisons with `0` (`== 0`, `!= 0`) and their yoda-order variants that should use `strings.HasPrefix(s, sub)` or `!strings.HasPrefix(s, sub)` instead.
 - `stringsjoinone` — reports `strings.Join([]string{s}, sep)` calls with a single-element slice literal where the separator is never used and the call is equivalent to just `s`.
+- `stringssplitfirst` — reports `strings.Split(s, sep)[0]` with a constant non-empty separator; use `strings.Cut` to read the first segment without allocating a slice.
 - `timeafterleak` — reports `time.After` calls used as the channel-receive expression in a `select` case inside a `for` or `range` loop that leak a timer channel on each iteration when another case fires first.
 - `timesleepnocontext` — reports `time.Sleep` calls inside functions that already receive a `context.Context`, where a context-aware `select` should be used instead.
 - `timenowsub` — reports `time.Now().Sub(t)` calls that should be simplified to `time.Since(t)`.
@@ -87,14 +95,16 @@ The method names mentioned in analyzer descriptions (such as `Err`, `Flush`, `Re
 - `trimleftright` — reports `strings.TrimLeft`/`TrimRight` calls with a multi-character literal cutset where `TrimPrefix`/`TrimSuffix` was likely intended.
 - `typeassertionnil` — reports single-value type assertions to pointer types and recommends the two-value form.
 - `typeassertionokdiscarded` — reports two-value type assertions whose `ok` result is discarded.
-- `uncheckedsliceindex` — reports slice and string indexes without proven bounds checks.
-- `unchecked_deferredclose` — reports deferred `Close()` calls that ignore error return values.
+- `unchecked-deferred-close` (Go package `unchecked_deferredclose`) — reports deferred `Close()` calls that discard the returned error.
+- `unchecked-slice-index` (Go package `uncheckedsliceindex`) — reports slice and string indexing without a proven bounds check.
 - `uncheckedtypeassertion` — reports single-value type assertions where unchecked panics are possible.
 - `uncheckedflushreturn` — reports `Flush()` method calls where the error return is discarded, which silently drops buffered data on failure.
 - `walkdirignoredeerror` — reports `filepath.Walk` and `filepath.WalkDir` calls where the error return is discarded, hiding traversal failures. The analyzer lives in `walk-dir-ignored-error`.
 - `wgdonenotdeferred` — reports non-deferred `sync.WaitGroup.Done()` calls that can deadlock on panics or early returns.
 - `writebytestring` — reports `w.Write([]byte(s))` calls where `s` is a string, which can be replaced with `io.WriteString` to avoid an unnecessary `[]byte` allocation.
 - `internal` — shared helper packages for analyzers (file checks, `nolint` handling, and coverage-aware perf gating).
+
+Analyzer leaf packages expose one analyzer each and are specified centrally in this README rather than through repetitive per-analyzer READMEs. The shared helper packages under `internal/` are documented in [`internal/README.md`](internal/README.md); they are implementation details, not separately supported public APIs.
 
 ## Close error policy
 
@@ -153,7 +163,7 @@ returning a channel does not transfer ownership.
 
 Micro-optimizations flagged by allocation/perf linters (e.g. `stringsconcatloop`, `appendoneelement`,
 `appendbytestring`, `bytesbufferstring`, `bytescomparestring`, `lenstringsplit`, `mapclearloop`,
-`readerstringconv`, `reflectdeepequalusage`, `seenmapbool`, `slicemakezerolength`, `sortslice`, `splitindexzero`,
+`readerstringconv`, `reflectdeepequalusage`, `seenmapbool`, `slicemakezerolength`, `sortslice`, `splitindexzero`, `stringssplitfirst`,
 `stringbytesroundtrip`, `stringsjoinone`, `tolowerequalfold`, and `writebytestring`) only matter on hot paths: applying them to code that tests never execute adds
 churn without a measurable benefit. These linters consult the shared
 `pkg/linters/internal/coverage` package, which loads a Go coverage profile (produced by
@@ -167,7 +177,7 @@ environment variable and gates findings on the recorded execution hit count for 
 - Pass `-<linter>.hot-threshold=0` to disable coverage gating for a specific linter even when a
   profile is loaded.
 - Purely stylistic/readability linters (e.g. `stringsindexcontains`, `stringsindexhasprefix`,
-  `stringscountcontains`, `lenstringzero`) are intentionally **not** coverage-gated: they carry no
+  `stringscountcontains`, `lenstringzero`, `sortbasicslices`) are intentionally **not** coverage-gated: they carry no
   measurable performance difference, so "hot path" relevance does not apply to them.
 
 ## Public API
@@ -179,6 +189,7 @@ environment variable and gates findings on the recorded execution hit count for 
 | `appendbytestring` | Custom `go/analysis` analyzer that flags `append(b, []byte(s)...)` calls where `s` is a string that can be simplified to `append(b, s...)` |
 | `appendoneelement` | Custom `go/analysis` analyzer that flags `append(s, []T{x}...)` calls where a single-element slice literal is spread and can be simplified to `append(s, x)` |
 | `blankassigncomma` | Custom `go/analysis` analyzer that flags assignment statements where every result is discarded via 2 or more blank identifiers |
+| `blankassignedcleanuperror` | Custom `go/analysis` analyzer that flags discarded errors from `os.Remove`, `os.RemoveAll`, `os.WriteFile`, and `os.MkdirAll` when assigned to `_`, including in deferred closures |
 | `bufferresetbeforereuse` | Custom `go/analysis` analyzer that flags `bytes.Buffer` or `strings.Builder` writes after a read without an intervening `Reset()` |
 | `bufioscannererunchecked` | Custom `go/analysis` analyzer that flags `bufio.Scanner` loops that do not check `Err()` after scanning completes |
 | `bytescomparestring` | Custom `go/analysis` analyzer that flags `string(a) == string(b)` / `!=` comparisons on `[]byte` values; use `bytes.Equal(a, b)` for `==` and `!bytes.Equal(a, b)` for `!=` |
@@ -188,7 +199,7 @@ environment variable and gates findings on the recorded execution hit count for 
 | `contextcancelnotdeferred` | Custom `go/analysis` analyzer that flags context cancel functions called directly instead of deferred |
 | `ctxbackground` | Custom `go/analysis` analyzer that flags `context.Background()` calls inside functions that already receive a context parameter |
 | `deferinloop` | Custom `go/analysis` analyzer that flags `defer` statements inside `for`/`range` loop bodies that execute when the enclosing function returns rather than each iteration |
-| `deferrerrorunchecked` | Custom `go/analysis` analyzer that flags deferred calls discarding errors, except zero-argument `Close()` methods |
+| `deferred-error-unchecked` (`deferrerrorunchecked`) | Custom `go/analysis` analyzer that flags deferred calls discarding errors, except zero-argument `Close()` methods |
 | `errorfwrapv` | Custom `go/analysis` analyzer that flags `fmt.Errorf` calls that pass error arguments without `%w` wrapping |
 | `excessivefuncparams` | Custom `go/analysis` analyzer that flags function declarations with too many positional parameters |
 | `errormessage` | Custom `go/analysis` analyzer that flags non-actionable error message patterns in changed files (or all files with `-errormessage.full-repo`) |
@@ -196,6 +207,7 @@ environment variable and gates findings on the recorded execution hit count for 
 | `errstringmatch` | Custom `go/analysis` analyzer that flags brittle `strings.Contains(err.Error(), "...")` checks |
 | `execcommandwithoutcontext` | Custom `go/analysis` analyzer that flags `exec.Command(...)` calls that should use `exec.CommandContext(...)` in context-receiving functions |
 | `fileclosenotdeferred` | Custom `go/analysis` analyzer that flags file `Close()` calls that are not deferred immediately |
+| `filepathwalkpreferwalkdir` | Custom `go/analysis` analyzer that flags `filepath.Walk` calls and recommends `filepath.WalkDir` |
 | `fmterrorfnoverbs` | Custom `go/analysis` analyzer that flags `fmt.Errorf` calls with no format verbs, recommending `errors.New` |
 | `formatintitoa` | Custom `go/analysis` analyzer that simplifies decimal `strconv.FormatInt(int64(x), 10)` calls on `int` arguments to `strconv.Itoa(x)` |
 | `fprintferrorunchecked` | Custom `go/analysis` analyzer that warns about unchecked `fmt.Fprintf`/`Fprint`/`Fprintln` writes other than direct console output |
@@ -208,8 +220,10 @@ environment variable and gates findings on the recorded execution hit count for 
 | `httpnoctx` | Custom `go/analysis` analyzer that flags HTTP calls that do not accept a `context.Context` |
 | `httprespbodyclose` | Custom `go/analysis` analyzer that flags directly matched HTTP response `Body.Close()` calls that are not deferred |
 | `httpstatuscode` | Custom `go/analysis` analyzer that flags raw HTTP status-code integer literals that should use `net/http` named constants |
+| `ignoredlocalerror` | Custom `go/analysis` analyzer that flags discarded errors from functions in the `github.com/github/gh-aw` module |
 | `ioutildeprecated` | Custom `go/analysis` analyzer that flags deprecated `io/ioutil` function calls (deprecated since Go 1.16) and suggests replacements in the `io` and `os` packages |
 | `jsonmarshalignoredeerror` | Custom `go/analysis` analyzer that flags `json.Marshal`/`json.Unmarshal` calls where the error return is discarded |
+| `jsonunmarshalbytesconversion` | Custom `go/analysis` analyzer that flags `json.Unmarshal([]byte(s), ...)` calls where `s` is a string and recommends `strings.NewReader(s)` for streams or requiring a second `Decode` to return `io.EOF` for whole-document validation |
 | `largefunc` | Custom `go/analysis` analyzer that flags large functions with actionable diagnostics |
 | `lenstringsplit` | Custom `go/analysis` analyzer that flags `len(strings.Split(s, sep))` with a non-empty separator that should use `strings.Count(s, sep)+1` |
 | `lenstringzero` | Custom `go/analysis` analyzer that flags `len(s) == 0` / `len(s) != 0` on string values that should use `s == ""` / `s != ""` |
@@ -223,18 +237,21 @@ environment variable and gates findings on the recorded execution hit count for 
 | `osisnotexist` | Custom `go/analysis` analyzer that flags legacy `os` error predicates and recommends wrapped-error-aware checks |
 | `osopenreadallpreferreadfile` | Custom `go/analysis` analyzer that recommends `os.ReadFile` for an `os.Open` file used only by deferred `Close` and one `ReadAll` |
 | `osexitinlibrary` | Custom `go/analysis` analyzer that flags `os.Exit` usage in library packages |
+| `osremoveuncheckedcleanup` | Custom `go/analysis` analyzer that flags discarded errors from `os.Remove` and `os.RemoveAll` expression and `go` statements |
 | `ossetenvlibrary` | Custom `go/analysis` analyzer that flags `os.Setenv` usage in library packages |
 | `packagelevelmutableslicemap` | Custom `go/analysis` analyzer that flags package-level slice/map `var` declarations mutated from inside a function body via `append()` re-assignment, index assignment, or `delete()` |
 | `panic-in-library-code` | Custom `go/analysis` analyzer that flags `panic()` usage in library packages |
 | `rawloginlib` | Custom `go/analysis` analyzer that flags standard-library `log` package calls in library packages |
 | `readerstringconv` | Custom `go/analysis` analyzer that flags `strings.NewReader(string(b))` and `bytes.NewReader([]byte(s))` conversions and recommends the reader matching the original data |
-| `reflectdeepequalusage` | Custom `go/analysis` analyzer that flags `reflect.DeepEqual()` calls that should use typed equality operators or type-specific comparison functions |
+| `reflect-deepequal-usage` (`reflectdeepequalusage`) | Custom `go/analysis` analyzer that flags `reflect.DeepEqual()` calls that should use typed equality operators or type-specific comparison functions |
 | `regexpcompileinfunction` | Custom `go/analysis` analyzer that flags regexp compilation inside function bodies |
 | `regexpdynamicpattern` | Custom `go/analysis` analyzer that flags regexp compile calls with non-constant patterns |
 | `seenmapbool` | Custom `go/analysis` analyzer that flags `map[string]bool` used as a set that should use `map[string]struct{}` |
 | `slicemakezerolength` | Custom `go/analysis` analyzer that flags zero-length slice allocations before known-size range loops that append one element per iteration |
+| `sortbasicslices` | Custom `go/analysis` analyzer that flags `sort.Strings`, `sort.Ints`, and `sort.Float64s` calls that can be replaced with `slices.Sort` |
 | `sortslice` | Custom `go/analysis` analyzer that flags `sort.Slice` / `sort.SliceStable` calls that should use `slices.SortFunc` / `slices.SortStableFunc` |
-| `splitindexzero` | Custom `go/analysis` analyzer that flags `strings.Split(s, sep)[0]` and `strings.SplitN(s, sep, 2)[0]` calls that allocate a slice to read only the first segment |
+| `splitindexzero` | Custom `go/analysis` analyzer that flags `strings.SplitN(s, sep, 2)[0]` calls that allocate a slice to read only the first segment |
+| `splitlines-on-newline` | Custom `go/analysis` analyzer that flags `strings.Split` calls using a newline separator |
 | `sprintferrdot` | Custom `go/analysis` analyzer that flags redundant `.Error()` calls on error values passed to `fmt` format functions |
 | `sprintferrorsnew` | Custom `go/analysis` analyzer that flags `errors.New(fmt.Sprintf(...))` calls that should use `fmt.Errorf` instead |
 | `sprintfbool` | Custom `go/analysis` analyzer that flags `fmt.Sprintf("%t", b)` calls where `b` is a single bool value and suggests using `strconv.FormatBool(b)` instead |
@@ -248,6 +265,7 @@ environment variable and gates findings on the recorded execution hit count for 
 | `stringsindexcontains` | Custom `go/analysis` analyzer that flags `strings.Index(s, substr)` comparisons with `-1` or `0` that should use `strings.Contains` or `!strings.Contains` |
 | `stringsindexhasprefix` | Custom `go/analysis` analyzer that flags `strings.Index(s, sub)` comparisons with `0` (`== 0`, `!= 0`) that should use `strings.HasPrefix` or `!strings.HasPrefix` |
 | `stringsjoinone` | Custom `go/analysis` analyzer that flags `strings.Join([]string{s}, sep)` calls with a single-element slice literal where the separator is unused and the call is equivalent to just `s` |
+| `stringssplitfirst` | Custom `go/analysis` analyzer that flags `strings.Split(s, sep)[0]` with a constant non-empty separator |
 | `timeafterleak` | Custom `go/analysis` analyzer that flags `time.After` in `select` cases inside loops that leak a timer channel on each iteration when another case fires first |
 | `timesleepnocontext` | Custom `go/analysis` analyzer that flags `time.Sleep` calls in context-aware functions |
 | `timenowsub` | Custom `go/analysis` analyzer that flags `time.Now().Sub(t)` calls that should use `time.Since(t)` |
@@ -255,11 +273,11 @@ environment variable and gates findings on the recorded execution hit count for 
 | `trimleftright` | Custom `go/analysis` analyzer that flags `strings.TrimLeft`/`TrimRight` calls with a multi-character literal cutset where `TrimPrefix`/`TrimSuffix` was likely intended |
 | `typeassertionnil` | Custom `go/analysis` analyzer that flags single-value type assertions to pointer types and recommends the two-value form |
 | `typeassertionokdiscarded` | Custom `go/analysis` analyzer that flags two-value type assertions whose `ok` result is discarded |
-| `uncheckedsliceindex` | Custom `go/analysis` analyzer that reports slice and string indexes without proven bounds checks |
-| `unchecked_deferredclose` | Custom `go/analysis` analyzer that flags deferred `Close()` calls whose error return is ignored |
+| `unchecked-slice-index` (`uncheckedsliceindex`) | Custom `go/analysis` analyzer that reports slice and string indexes without proven bounds checks |
+| `unchecked-deferred-close` (`unchecked_deferredclose`) | Custom `go/analysis` analyzer that flags deferred `Close()` calls whose error return is ignored |
 | `uncheckedtypeassertion` | Custom `go/analysis` analyzer that flags unchecked single-value type assertions |
 | `uncheckedflushreturn` | Custom `go/analysis` analyzer that flags `Flush()` method calls where the error return is discarded |
-| `walkdirignoredeerror` | Custom `go/analysis` analyzer in `walk-dir-ignored-error` that flags `filepath.Walk`/`filepath.WalkDir` calls where the error return is discarded |
+| `walk-dir-ignored-error` (`walkdirignoredeerror`) | Custom `go/analysis` analyzer that flags `filepath.Walk`/`filepath.WalkDir` calls where the error return is discarded |
 | `walkfuncerrshadow` | Custom `go/analysis` analyzer that flags `filepath.Walk`/`filepath.WalkDir` callbacks whose `err` parameter shadows an outer `err` variable assigned from the walk call |
 | `wgdonenotdeferred` | Custom `go/analysis` analyzer that flags non-deferred `sync.WaitGroup.Done()` calls |
 | `writebytestring` | Custom `go/analysis` analyzer that flags `w.Write([]byte(s))` calls where `s` is a string that can be replaced with `io.WriteString` |
@@ -297,10 +315,13 @@ import (
 	"github.com/github/gh-aw/pkg/linters/rawloginlib"
 	"github.com/github/gh-aw/pkg/linters/regexpcompileinfunction"
 	"github.com/github/gh-aw/pkg/linters/regexpdynamicpattern"
+	"github.com/github/gh-aw/pkg/linters/sortbasicslices"
 	"github.com/github/gh-aw/pkg/linters/sortslice"
 	"github.com/github/gh-aw/pkg/linters/sprintfbool"
 	"github.com/github/gh-aw/pkg/linters/sprintfint"
+	"github.com/github/gh-aw/pkg/linters/splitlines-on-newline"
 	"github.com/github/gh-aw/pkg/linters/ssljson"
+	"github.com/github/gh-aw/pkg/linters/stringssplitfirst"
 	"github.com/github/gh-aw/pkg/linters/timesleepnocontext"
 	"github.com/github/gh-aw/pkg/linters/trimleftright"
 	"github.com/github/gh-aw/pkg/linters/typeassertionnil"
@@ -328,10 +349,13 @@ _ = panicinlibrarycode.Analyzer
 _ = rawloginlib.Analyzer
 _ = regexpcompileinfunction.Analyzer
 _ = regexpdynamicpattern.Analyzer
+_ = sortbasicslices.Analyzer
 _ = sortslice.Analyzer
 _ = sprintfbool.Analyzer
 _ = sprintfint.Analyzer
+_ = splitlinesonnewline.Analyzer
 _ = ssljson.Analyzer
+_ = stringssplitfirst.Analyzer
 _ = timesleepnocontext.Analyzer
 _ = trimleftright.Analyzer
 _ = typeassertionnil.Analyzer
@@ -364,6 +388,7 @@ _ = typeassertionnil.Analyzer
 - `github.com/github/gh-aw/pkg/linters/httpnoctx` — HTTP-no-context analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/httprespbodyclose` — HTTP-response-body-close analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/httpstatuscode` — http-status-code analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/ignoredlocalerror` — ignored-local-error analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/ioutildeprecated` — ioutil-deprecated analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/jsonmarshalignoredeerror` — json-marshal-ignored-error analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/largefunc` — large-func analyzer subpackage
@@ -377,6 +402,7 @@ _ = typeassertionnil.Analyzer
 - `github.com/github/gh-aw/pkg/linters/osgetenvlibrary` — os-getenv-library analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/osisnotexist` — os-error-predicate analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/osopenreadallpreferreadfile` — os.Open/ReadAll simplification analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/osremoveuncheckedcleanup` — os-remove-unchecked-cleanup analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/osexitinlibrary` — os-exit-in-library analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/ossetenvlibrary` — os-setenv-library analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/packagelevelmutableslicemap` — package-level-mutable-slice-map analyzer subpackage
@@ -386,6 +412,7 @@ _ = typeassertionnil.Analyzer
 - `github.com/github/gh-aw/pkg/linters/regexpcompileinfunction` — regexp-compile-in-function analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/regexpdynamicpattern` — regexp-dynamic-pattern analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/seenmapbool` — seen-map-bool analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/sortbasicslices` — sort-basic-slices analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/sortslice` — sort-slice analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/sprintferrdot` — sprintf-err-dot analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/sprintferrorsnew` — sprintf-errors-new analyzer subpackage
@@ -399,6 +426,7 @@ _ = typeassertionnil.Analyzer
 - `github.com/github/gh-aw/pkg/linters/stringsindexcontains` — strings-index-contains analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/stringsindexhasprefix` — strings-index-has-prefix analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/stringsjoinone` — strings-join-one analyzer subpackage
+- `github.com/github/gh-aw/pkg/linters/stringssplitfirst` — strings-split-first analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/timeafterleak` — time-after-leak analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/timesleepnocontext` — time-sleep-no-context analyzer subpackage
 - `github.com/github/gh-aw/pkg/linters/tolowerequalfold` — to-lower-equal-fold analyzer subpackage
@@ -431,6 +459,7 @@ _ = typeassertionnil.Analyzer
 - `typeassertionnil` is registered but excluded from CI enforcement pending a cross-platform enforcement-readiness audit.
 - `unchecked_deferredclose` is registered but excluded from CI enforcement until existing deferred `Close()` findings are remediated.
 - `walkdirignoredeerror` is registered but excluded from CI enforcement until existing discarded `WalkDir` errors in `pkg/cli/audit_threat_detection.go` and `pkg/cli/model_routing.go` are remediated.
+- `ignoredlocalerror` is registered but excluded from CI enforcement until existing ignored local errors are reviewed.
 - `excessivefuncparams` exposes a `-max-params` analyzer flag and defaults to `8` parameters (`DefaultMaxParams`).
 - `largefunc` exposes a `-max-lines` analyzer flag, defaults to `60` lines (`DefaultMaxLines`), and skips `_test.go` files.
 - `osexitinlibrary` helps enforce separation between library logic and process-level termination.

@@ -7,9 +7,9 @@ sidebar:
 
 # AI Credits Specification
 
-**Version**: 1.5.1<br />
+**Version**: 1.5.3<br />
 **Status**: Draft  
-**Publication Date**: 2026-10-12<br />
+**Publication Date**: 2026-11-05<br />
 **Editor**: GitHub Agentic Workflows Team  
 **This Version**: [ai-credits-specification](/gh-aw/specs/ai-credits-specification/)  
 **Latest Published Version**: This document
@@ -453,12 +453,13 @@ A conforming implementation MUST enforce the following at compile time:
 | T-AIC-DG-019 | Agent, Detection, and Evaluations accounting is validated independently without overlapping-source double counting | §9.11 |
 | T-AIC-DG-020 | Every supported zero-accounting path satisfies its documented evidence conditions | §9.11 |
 | T-AIC-DG-021 | Unresolved historical accounting substitutes the positive configured per-run maximum for the whole run | §9.12 |
-| T-AIC-DG-022 | Transient reads retry at most three times; quota, permission, and retry restrictions stop without estimates | §9.13 |
+| T-AIC-DG-022 | Transient reads retry at most three times; exhausted quota stops remain unverified and block enforced startup without estimates | §9.13, §9.14 |
 | T-AIC-DG-023 | Workflow-history 404 uses repository-history fallback, not zero usage or an incomplete total | §9.9, §9.13 |
 | T-AIC-DG-024 | Estimated credits are reported separately and equality with the threshold is exceeded | §9.14 |
 | T-AIC-DG-025 | Repo-memory trust, timestamp filtering, duplicate selection, and permissive read behavior match the separate backend contract | §9.15 |
 | T-AIC-DG-026 | A cancelled rerun without a verified producer carries usage only from the unique latest earlier executed job with a verified producer; missing accounting, ambiguous prior jobs, and other outcomes fail closed | §9.11 |
 | T-AIC-DG-027 | Run/attempt-bound advisory Decisions failures use the failed-Evaluations accounting policy, preserve other component usage, and replace whole-run estimates on the next scan | §9.11 |
+| T-AIC-DG-028 | Successful Decisions model-unavailable skips require coherent run/selected-attempt evidence and no answer records; other component usage and strict accounting precedence remain intact | §9.11 |
 
 ### 9.8 Guardrail Bypass Conditions
 
@@ -556,10 +557,11 @@ The following additional component zero-accounting fallbacks are supported. Othe
 | Legacy failed Agent before accounting | Verified coverage, no selected accounting, failed conclusion, missing raw file, no execution-evidence file, and no inspected legacy Agent artifact |
 | Failed Evaluations before accounting | Verified coverage, failed conclusion, and no selected accounting |
 | Advisory Decisions failure before accounting | Verified coverage, successful job conclusion, no selected accounting, and `evals/evals_status.json` identifying the same run and selected job attempt with engine `decisions`, status `not_evaluated`, reason `judge_failed`, execution outcome `failure`, and execution state `started` |
+| Unavailable Decisions model before accounting | Verified coverage, successful job conclusion, no selected accounting, and `evals/evals_status.json` identifying the same run and selected job attempt with engine `decisions`, status `not_evaluated`, reason `model_unavailable`, execution outcome `success`, and execution state `model_unavailable`; both `evals.jsonl` and `evals/evals.jsonl` MUST be missing or empty |
 
 Legacy Agent evidence is inspected only when no non-empty Agent accounting candidate exists. The legacy artifact must be unexpired, timestamp-bound to its job, and contain a regular log no larger than 10 MiB. Detection's empty-raw exception is checked before lower-priority candidate selection. The remaining zero fallbacks MUST NOT override a malformed non-empty or higher-priority unreadable source.
 
-These are implemented evidence/compatibility policies, not a proof that a provider never charged a request. In particular, missing-accounting failure heuristics and absent provider-response usage cannot certify external billing. The advisory Decisions fallback applies the existing failed-Evaluations policy to the judge outcome when `continue-on-error` leaves its wrapper job successful. It emits a warning that provider billing remains unverified; it MUST NOT override non-empty or unreadable accounting.
+These are implemented evidence/compatibility policies, not a proof that a provider never charged a request. In particular, missing-accounting failure heuristics and absent provider-response usage cannot certify external billing. The advisory Decisions fallback applies the existing failed-Evaluations policy to the judge outcome when `continue-on-error` leaves its wrapper job successful. The unavailable-model fallback covers a rejected Decisions request with no answers, not arbitrary `not_evaluated` markers or missing usage. Mismatched identity, engine, reason, outcome, or state, and non-empty or unreadable answer files MUST NOT establish that fallback. Both Decisions fallbacks emit a warning that provider billing remains unverified and MUST NOT override non-empty or unreadable accounting.
 
 ### 9.12 Conservative Whole-Run Maximum Fallback
 
@@ -587,7 +589,7 @@ Retry, recovery, and stop diagnostics identify the read using a fixed operation 
 
 After every authoritative candidate has been resolved, sum its selected measured or estimated value exactly once, including confirmed-zero runs in run counts and statistics. `daily_ai_credits_total` is this sum; `daily_ai_credits_estimated` is the sum restricted to estimated runs. Every supplied run value and aggregate total MUST be finite and non-negative; overflow MUST fail accounting before publishing a total or threshold decision, for either backend. For positive threshold `L`, totals strictly below `L` produce `under_budget`; totals at or above `L` produce `exceeded`, set `daily_ai_credits_exceeded: true`, and gracefully skip the agent.
 
-An unresolved scan MUST NOT report `under_budget` from a partial total. It calls `core.setFailed` and reports `structural_error` for missing credentials, HTTP 401/404, or a non-rate-limited 403; other caught accounting failures report `transient_error`. A marked quota/reserve stop takes precedence over the HTTP resource/permission classification and reports `transient_error`. Disabled or bypassed checks report `disabled` or `skipped` without accounting.
+An unresolved scan MUST NOT report `under_budget` from a partial total. It calls `core.setFailed` and reports `structural_error` for missing credentials, HTTP 401/404, or a non-rate-limited 403; other caught accounting failures report `transient_error`. A marked quota/reserve stop takes precedence over the HTTP resource/permission classification and reports `quota_blocked` without calling `core.setFailed`; the total and estimated outputs remain empty and `daily_ai_credits_exceeded` remains `false`. Enforce mode MUST gate agent startup on this status; an explicitly configured fail-open mode MAY continue, but MUST NOT relabel the result as complete, under budget, or exceeded. Disabled or bypassed checks report `disabled` or `skipped` without accounting.
 
 `continue-on-error: true` is an explicit Actions step-level fail-open policy: it may allow continuation despite an unknown total, but MUST NOT relabel the accounting result as complete or under budget. Summary-rendering failures are outside the accounting state machine; they may change step failure reporting after totals were computed.
 
@@ -609,7 +611,7 @@ The writer uses staged usage files and the permissive usage parser, appending ti
 
 ### 9.16 Native Contract Coverage and Validation Boundary
 
-Focused Vitest suites exercise the runtime behavior described in Sections 9.9–9.15, including history completeness, snapshot trust and reinspection, component accounting, fallback decisions, API retries and quota handling, and repo-memory ledger rules. The spec-derived fixed-output contract cases are in `actions/setup/js/daily_aic_spec_conformance.test.cjs`; related implementation suites cover detailed boundaries. These tests are executable conformance examples, not a proof of provider billing or GitHub API behavior.
+Focused Vitest suites exercise the runtime behavior described in Sections 9.9–9.15, including history completeness, snapshot trust and reinspection, component accounting, fallback decisions, API retries and quota handling, and repo-memory ledger rules. The spec-derived fixed-output contract cases are in `actions/setup/js/daily_aic_spec_conformance.test.cjs`; quota-blocked cases verify empty totals, `exceeded: false`, and no activation failure, while compiler tests verify enforced startup gating and configured fail-open behavior. These tests are executable conformance examples, not a proof of provider billing or GitHub API behavior.
 
 ---
 
@@ -741,6 +743,7 @@ Pricing catalogs are configuration inputs. Implementations MUST:
 - **[GH-COPILOT-BILLING-MODELS]** GitHub Copilot models and pricing. <https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing>
 - **[GH-COPILOT-BILLING-PLANS]** Subscription plans for GitHub Copilot. <https://docs.github.com/en/copilot/about-github-copilot/subscription-plans-for-github-copilot>
 - **[MODELS-DEV]** models.dev API index. <https://models.dev/api.json>
+- **[GH-AW-COMPONENT-COVERAGE]** Daily AIC component accounting implementation and focused compliance tests. <https://github.com/github/gh-aw/blob/main/actions/setup/js/daily_aic_component_coverage.cjs>, <https://github.com/github/gh-aw/blob/main/actions/setup/js/daily_aic_component_coverage.test.cjs>
 
 ---
 
@@ -764,6 +767,16 @@ This specification MUST be revalidated when any of the following occurs:
 
 <a id="change-log"></a>
 ## Change Log
+
+### Version 1.5.3 (2026-11-10)
+
+- **Clarified**: A marked quota/reserve stop reports `quota_blocked` with empty totals and `exceeded: false`; enforced startup is gated without converting the unknown total into a failed or exceeded accounting result.
+- **Updated**: Spec-conformance documentation to identify the quota-blocked output and compiler startup-gating checks, while preserving configured fail-open behavior.
+
+### Version 1.5.2 (2026-11-05)
+
+- **Added**: Section 9.11 and compliance test T-AIC-DG-028 specify the run/selected-attempt-bound Decisions model-unavailable fallback, absence-of-answer evidence, and fail-closed accounting boundaries.
+- **Clarified**: The advisory `judge_failed` failure/started policy remains unchanged; unavailable-model skips do not certify external provider billing.
 
 ### Version 1.5.1 (2026-10-12)
 
